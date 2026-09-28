@@ -1,0 +1,154 @@
+[build-system]
+requires = ["setuptools>=69.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jarvis-assistant"
+version = "0.1.0"
+description = "JARVIS: a voice-first, agentic Windows AI assistant."
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [{ name = "JARVIS Team" }]
+keywords = ["ai", "agent", "assistant", "voice", "windows"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Win32 (MS Windows)",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+# Runtime dependencies stay minimal and stdlib-first; anything that pulls in a
+# native binary, a heavy ML stack or a network service lives in an extra so a
+# headless install cannot be ambushed by it. ``tests/test_packaging_declared_deps.py``
+# fails the build if a first-party module ever imports an undeclared package.
+dependencies = [
+    "PyYAML>=6.0.1",  # phase 3: configuration system
+    "langgraph>=0.2.0",  # phase 10: multi-agent orchestration graph
+    "qq-botpy>=1.2.1",  # QQ official bot gateway and message APIs
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.5.0",
+    "black>=24.4.0",
+    "mypy>=1.10.0",
+    "pytest>=8.2.0",
+    "types-PyYAML>=6.0.12",  # mypy stubs for phase 3
+]
+# Phase 6 + 7 + 8 + 9: wake word + microphone capture + VAD + speech recognition
+# + speech synthesis. Optional because they pull in native binaries / heavy ML
+# stacks (PortAudio, ONNX Runtime, PyTorch); JARVIS runs without them until
+# voice features are enabled.
+voice = [
+    "sounddevice>=0.4.6",   # PortAudio capture
+    "openwakeword>=0.6.0",  # default wake-word engine (offline, key-free)
+    "silero-vad>=4.0.0",    # phase 7 VAD default engine (offline, TorchScript)
+    "funasr>=1.0.0",        # phase 8 ASR default engine (SenseVoice, offline ONNX)
+    "edge-tts>=1.1.0",      # phase 9 TTS cloud alternative (pure-Python)
+    "soundfile>=0.12.0",    # decodes Edge-TTS' MP3 into the PCM every consumer wants
+    # "pvporcupine>=3.0.0", # alternative wake-word engine; uncomment if you have an AccessKey
+    # "cosyvoice"           # phase 9 TTS default engine (offline). Not a clean
+    #                       # PyPI wheel: install manually per its official guide
+    #                       # (ModelScope + git clone), then set tts.engine=cosyvoice.
+]
+# Phase 17: the desktop HUD window (pywebview shell over the Vue bundle) plus the
+# telemetry sampler it shows. Optional so a headless / voice-only install never
+# pays for either. ``psutil`` belongs here too: ``jarvis.tools.monitor`` imports it
+# lazily and degrades to "遥测读取失败" when absent, so the gate stays honest.
+desktop = [
+    "pywebview>=6.2,<7",  # WebView2 shell and the JS bridge
+    "psutil>=6.0",       # CPU / memory / disk sampler
+]
+build = [
+    "pyinstaller>=6.6",  # onedir windowed executable packaging
+]
+
+[project.scripts]
+jarvis = "jarvis.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["jarvis*"]
+
+[tool.setuptools.package-data]
+"jarvis.config" = ["defaults.yaml"]
+# The HUD is a Vite build output that is deliberately not in git (hash-named
+# assets churn every build). Without this line a wheel installs a desktop extra
+# that opens ... nothing, so tests/test_packaging_declared_deps.py asserts both
+# the declaration and, for anyone building a wheel, that the files exist.
+"jarvis.ui" = ["web/**/*"]
+
+# ---------------------------------------------------------------------------
+# Quality gates
+# ---------------------------------------------------------------------------
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["jarvis", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "N",   # pep8-naming
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "SIM", # flake8-simplify
+    "RUF", # ruff-specific rules
+]
+
+# Fullwidth Chinese punctuation (，：；（）etc.) is intentional in user-facing
+# prompts and messages for this Chinese assistant; do not flag it.
+ignore = ["RUF001"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["jarvis"]
+
+[tool.black]
+line-length = 100
+target-version = ["py312"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+show_error_codes = true
+pretty = true
+files = ["jarvis", "tests"]
+
+# Optional voice packages ship no type stubs; they are imported lazily and
+# wrapped behind typed adapters, so untyped calls stay contained there.
+[[tool.mypy.overrides]]
+module = [
+    "sounddevice",
+    "openwakeword",
+    "openwakeword.*",
+    "pvporcupine",
+    "silero_vad",
+    "onnxruntime",
+    "numpy",
+    "soundfile",
+    "psutil",
+    "webview",
+    "funasr",
+    "funasr.*",
+    "torch",
+    "modelscope",
+    "edge_tts",
+    "cosyvoice",
+    "cosyvoice.*",
+    "langgraph",
+    "langgraph.*",
+    "langchain_core",
+    "langchain_core.*",
+    "botpy",
+    "botpy.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["."]

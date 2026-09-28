@@ -1,0 +1,17 @@
+# Optional voice-pipeline dependencies (phase 6 + 7 + 8 + 9: wake word, capture,
+# VAD, speech recognition, speech synthesis). Mirrors the `voice` extra in
+# pyproject.toml.
+sounddevice>=0.4.6
+openwakeword>=0.6.0
+silero-vad>=4.0.0
+# Phase 8 ASR default engine (SenseVoice / FunASR, offline ONNX). funasr pulls
+# in torch and (for model download) modelscope transitively.
+funasr>=1.0.0
+# Phase 9 TTS cloud alternative (pure-Python; no local model).
+edge-tts>=1.1.0
+# Alternative wake-word engine (needs a free Picovoice AccessKey in the env var
+# named by wakeword.porcupine.access_key_env):
+# pvporcupine>=3.0.0
+# Phase 9 TTS default engine (CosyVoice / offline ONNX) is NOT a clean PyPI
+# wheel — install manually per its official guide (ModelScope + git clone),
+# then set tts.engine=cosyvoice.

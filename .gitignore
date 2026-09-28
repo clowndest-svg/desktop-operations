@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+
+# Tooling caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.idea/
+.vscode/
+
+# Runtime artifacts (later phases)
+logs/
+*.log
+botpy.log*
+database/*.db
+database/*.sqlite3
+
+# Secrets — never commit credentials
+.env
+*.key
+secrets.yaml
+
+# Frontend: dependencies and build output (rebuild with `npm run build`)
+node_modules/
+.npm-cache/
+jarvis/ui/web/
+
+# Generated demo media — reproduce with scripts/record_demo.py
+commercial/assets/demo/
+assets/*.wav
+
+# Local agent/tool scratch, not part of the project
+.workbuddy/
+
+# 与本项目无关的遗留产物（别处的 SVG 动画 demo），留在磁盘但不进公开仓库。
+# 本地 main 分支仍跟踪它；要彻底清理请手工确认后删除文件本身。
+pelican_bicycle_animation.html
+
+# 商业物料（报价档位、能力口径、需求确认单）只留在本地 main 分支。
+# 本分支是公开仓库的镜像：任何时候都不要把 main 推上去，main 的历史里含 commercial/。
+commercial/

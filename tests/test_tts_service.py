@@ -1,0 +1,168 @@
+"""Tests for TtsService lifecycle (fake engine, no hardware / native deps)."""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Iterator, Mapping
+from typing import cast
+
+import pytest
+
+from jarvis.config.loader import load_defaults
+from jarvis.config.schema import TtsSection
+from jarvis.core.exceptions import TtsError
+from jarvis.tts.service import TtsService, TtsSettings, default_engine_factory
+from jarvis.tts.types import AudioChunk
+
+
+def is_running(service: TtsService) -> bool:
+    """Read ``service.running`` through a call so mypy cannot narrow the
+    property expression to ``Literal[True]`` across ``service.stop()``."""
+    return service.running
+
+
+def tts_section(**overrides: object) -> TtsSection:
+    raw = dict(cast(Mapping[str, object], load_defaults()["tts"]))
+    raw.update(overrides)
+    return TtsSection.from_mapping(raw)
+
+
+def settings(**overrides: object) -> TtsSettings:
+    return TtsSettings(section=tts_section(**overrides))
+
+
+class FakeTtsEngine:
+    """Deterministic engine yielding fixed chunks, honouring cancellation."""
+
+    def __init__(self, section: TtsSection | None = None) -> None:
+        self.section = section
+        self.closed = False
+
+    @property
+    def name(self) -> str:
+        return "fake"
+
+    @property
+    def sample_rate(self) -> int:
+        return 16_000
+
+    def synthesize(
+        self,
+        text: str,
+        *,
+        voice: str | None = None,
+        speed: float | None = None,
+        volume: float | None = None,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> Iterator[AudioChunk]:
+        del voice, speed, volume
+        for index in range(3):
+            if should_stop is not None and should_stop() is True:
+                return
+            yield AudioChunk(
+                audio=f"[{index}]".encode(),
+                sample_rate=16_000,
+                is_final=index == 2,
+            )
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_disabled_service_does_not_load_engine() -> None:
+    factory_calls: list[object] = []
+    service = TtsService(
+        lambda: settings(enabled=False),
+        engine_factory=lambda s: factory_calls.append(s) or FakeTtsEngine(s),  # type: ignore[func-returns-value]
+    )
+    service.start()
+    assert not is_running(service)
+    assert factory_calls == []  # engine never even constructed
+    service.stop()  # must be a safe no-op
+
+
+def test_enabled_service_loads_engine_synthesizes_and_stops() -> None:
+    engine = FakeTtsEngine()
+    service = TtsService(
+        lambda: settings(enabled=True),
+        engine_factory=lambda s: engine,
+    )
+    service.start()
+    assert is_running(service)
+    assert not engine.closed
+
+    chunks = list(service.synthesize("hello"))
+    assert len(chunks) == 3
+    assert chunks[-1].is_final is True
+
+    service.stop()
+    assert not is_running(service)
+    assert engine.closed
+
+
+def test_synthesize_before_start_raises() -> None:
+    service = TtsService(
+        lambda: settings(enabled=False),
+        engine_factory=lambda s: FakeTtsEngine(s),
+    )
+    with pytest.raises(TtsError, match="not loaded"):
+        list(service.synthesize("hello"))
+
+
+def test_synthesize_to_bytes_collects_chunks() -> None:
+    engine = FakeTtsEngine()
+    service = TtsService(
+        lambda: settings(enabled=True),
+        engine_factory=lambda s: engine,
+    )
+    service.start()
+    audio, fmt, rate = service.synthesize_to_bytes("hello")
+    assert audio == b"[0][1][2]"
+    assert fmt == "pcm_s16le"
+    assert rate == 16_000
+    service.stop()
+
+
+def test_synthesize_honours_should_stop() -> None:
+    engine = FakeTtsEngine()
+    service = TtsService(
+        lambda: settings(enabled=True),
+        engine_factory=lambda s: engine,
+    )
+    service.start()
+    calls = {"n": 0}
+
+    def should_stop() -> bool:
+        calls["n"] += 1
+        return calls["n"] >= 2  # cancel after the 2nd poll
+
+    chunks = list(service.synthesize("hello", should_stop=should_stop))
+    assert len(chunks) == 1  # first chunk emitted, then cancelled
+    assert chunks[0].is_final is False
+    service.stop()
+
+
+def test_stop_is_idempotent() -> None:
+    service = TtsService(
+        lambda: settings(enabled=True),
+        engine_factory=lambda s: FakeTtsEngine(s),
+    )
+    service.start()
+    service.stop()
+    service.stop()  # second stop must not raise
+    assert not is_running(service)
+
+
+def test_default_engine_factory_unknown_engine_hard_fails() -> None:
+    # Schema rejects this at validation time, but the factory is defensive too
+    # for any caller that builds a section directly (bypassing validation).
+    bad_section = TtsSection(
+        enabled=True,
+        engine="gpt-sovits",
+        voice="x",
+        speed=1.0,
+        volume=1.0,
+        device="cpu",
+        model="x",
+    )
+    with pytest.raises(TtsError, match="unknown tts engine"):
+        default_engine_factory(bad_section)

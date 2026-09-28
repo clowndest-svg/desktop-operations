@@ -1,0 +1,17 @@
+# JARVIS runtime dependencies (kept in sync with pyproject.toml).
+#
+# Phase 3 (configuration system):
+PyYAML>=6.0.1
+# QQ official bot SDK
+qq-botpy>=1.2.1
+# Phase 4 (logging): stdlib only, no new deps.
+# Phase 5 (LLM layer): stdlib urllib transport on purpose, no new deps.
+#
+# Phase 6 (wake word) dependencies are OPTIONAL — they pull native binaries
+# (PortAudio, ONNX Runtime). Install them only when enabling voice:
+#     pip install -r requirements-voice.txt
+# or: pip install jarvis-assistant[voice]
+#
+# Later phases will append pinned entries here, e.g.:
+#   Phase 10 -> langgraph                   (agent orchestration)
+#   Phase 17 -> pyside6                     (UI)
