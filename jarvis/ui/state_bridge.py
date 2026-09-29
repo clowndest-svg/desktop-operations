@@ -154,6 +154,30 @@ class StateBridge:
             self._interrupted = False
             self._awaiting_assistant = False
 
+    def add_turn(self, role: str, text: str) -> None:
+        """Append one message that did not come from the microphone.
+
+        The typed question and its answer have to land in the same transcript as
+        spoken ones, or the panel shows two histories and the reader has to work
+        out which one is the conversation.
+        """
+        with self._lock:
+            self._add_turn(role, text)
+            snapshot = self._build()
+        self._notify(snapshot)
+
+    def clear_history(self) -> None:
+        """Empty the transcript, leaving the voice indicator alone.
+
+        「清空」 is a request about the *log*. Waking-state with it would be the
+        classic bug where clearing a chat panel also releases the microphone.
+        """
+        with self._lock:
+            self._history.clear()
+            self._awaiting_assistant = False
+            snapshot = self._build()
+        self._notify(snapshot)
+
     # -- internals -----------------------------------------------------
 
     def _apply(self, event: PipelineEvent) -> None:

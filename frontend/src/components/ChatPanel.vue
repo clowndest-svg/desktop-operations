@@ -2,6 +2,15 @@
   <section class="hud-panel chat">
     <header class="hud-title">
       对话 · CONSOLE
+      <button
+        class="hud-btn chat__talk"
+        type="button"
+        :disabled="!canTalk"
+        :title="talkTitle"
+        @click="talk"
+      >
+        {{ listening ? '聆听中…' : '按一下说' }}
+      </button>
       <button class="hud-btn chat__clear" type="button" :disabled="busy || lines.length === 0" @click="clear">
         清空
       </button>
@@ -9,7 +18,8 @@
 
     <div ref="listRef" class="chat__log">
       <p v-if="lines.length === 0" class="hud-label chat__empty">
-        打一句话问小夜。文字问答只需要 API Key；语音唤醒要在上方点「启用语音」，加载约 1-2 分钟。
+        打一句话、或点「按一下说」直接开口。文字问答只需要 API Key；
+        语音要在上方点「启用语音」，加载约 1-2 分钟。
       </p>
       <div v-for="(line, index) in lines" :key="index" class="chat__turn" :class="`chat__turn--${line.role}`">
         <span class="chat__who">{{ line.role === 'user' ? '你' : '小夜' }}</span>
@@ -31,23 +41,40 @@
         {{ busy ? '思考中…' : '发送' }}
       </button>
     </form>
+
+    <p v-if="notice" class="chat__notice">{{ notice }}</p>
   </section>
 </template>
 
 <script setup lang="ts">
-import { nextTick, ref } from 'vue'
+import { computed, nextTick, ref } from 'vue'
 import { chatAsk } from '@/api/bridge'
+import { useVoiceStore } from '@/stores/voice'
 
-interface Line {
-  role: 'user' | 'assistant'
-  text: string
-}
+const voice = useVoiceStore()
 
-const lines = ref<Line[]>([])
 const draft = ref('')
 const busy = ref(false)
-const error = ref('')
+const localError = ref('')
 const listRef = ref<HTMLElement | null>(null)
+
+/**
+ * The transcript is Python's, not this component's.
+ *
+ * Spoken turns arrive on the push channel, so a locally-owned list would show the
+ * typed half of the conversation and drop the spoken half -- two histories in one
+ * chat panel is a reader having to work out which one is real.
+ */
+const lines = computed(() => voice.history)
+const error = computed(() => localError.value || voice.error)
+const notice = computed(() => voice.notice)
+const listening = computed(() => voice.turn === 'listening')
+const canTalk = computed(() => voice.enabled && !busy.value)
+
+const talkTitle = computed(() => {
+  if (voice.enabled) return '跳过唤醒词，直接说这一句'
+  return voice.label
+})
 
 async function scrollToEnd(): Promise<void> {
   await nextTick()
@@ -55,25 +82,31 @@ async function scrollToEnd(): Promise<void> {
   if (element) element.scrollTop = element.scrollHeight
 }
 
+async function talk(): Promise<void> {
+  await voice.talk()
+  await scrollToEnd()
+}
+
 async function send(): Promise<void> {
   const question = draft.value.trim()
   if (question === '' || busy.value) return
-  lines.value = [...lines.value, { role: 'user', text: question }]
   draft.value = ''
-  error.value = ''
+  localError.value = ''
   busy.value = true
   await scrollToEnd()
   try {
     const reply = await chatAsk(question)
     if (reply.error) {
-      // Keep the question on screen: it is the only record of what was attempted.
-      error.value = reply.error
+      // Keep the question in the box: it is the only record of what was attempted.
+      localError.value = reply.error
       draft.value = question
       return
     }
-    lines.value = [...lines.value, { role: 'assistant', text: reply.answer }]
+    // The turns come back through the state bridge; pull once so the panel does
+    // not wait for a push that a quiet microphone will never send.
+    await voice.pullSnapshot()
   } catch (err) {
-    error.value = err instanceof Error ? err.message : String(err)
+    localError.value = err instanceof Error ? err.message : String(err)
     draft.value = question
   } finally {
     busy.value = false
@@ -81,9 +114,9 @@ async function send(): Promise<void> {
   }
 }
 
-function clear(): void {
-  lines.value = []
-  error.value = ''
+async function clear(): Promise<void> {
+  await voice.clearTranscript()
+  localError.value = ''
 }
 </script>
 
@@ -96,8 +129,13 @@ function clear(): void {
   min-height: 0;
 }
 
-.chat__clear {
+.chat__talk {
   margin-left: auto;
+  padding: 2px 10px;
+  font-size: 11px;
+}
+
+.chat__clear {
   padding: 2px 10px;
   font-size: 11px;
 }
@@ -170,5 +208,11 @@ function clear(): void {
 
 .chat__input:disabled {
   color: var(--hud-dim);
+}
+
+.chat__notice {
+  margin: 0;
+  font-size: 11px;
+  color: var(--hud-amber);
 }
 </style>

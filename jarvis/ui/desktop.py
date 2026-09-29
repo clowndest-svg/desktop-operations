@@ -147,11 +147,40 @@ class HudBridge:
             return {"phase": "off", "detail": "本进程未启用语音功能", "keyword": ""}
         return voice_status_dict(self._voice.mute())
 
+    def voice_talk(self) -> dict[str, object]:
+        """Open one spoken turn without saying the wake word.
+
+        Refused presses come back with a reason rather than an empty success: a
+        button that silently does nothing is indistinguishable from a dead bridge,
+        and the operator has no way to tell which one they are looking at.
+        """
+        if self._voice is None:
+            return {
+                "phase": "off",
+                "detail": "本进程未启用语音功能",
+                "keyword": "",
+            }
+        return voice_status_dict(self._voice.talk())
+
     def chat_ask(self, text: str) -> dict[str, object]:
         """Answer one typed question. Blocks until the model replies."""
         if self._chat is None:
             return {"question": text, "answer": "", "error": "对话服务未启用"}
-        return self._chat.ask(text).to_dict()
+        reply = self._chat.ask(text)
+        if self._state is not None and not reply.error:
+            # Typed and spoken turns share one transcript. Two logs in a chat panel
+            # leaves the reader working out which one is the conversation.
+            self._state.add_turn("user", reply.question)
+            self._state.add_turn("assistant", reply.answer)
+        return reply.to_dict()
+
+    def chat_clear(self) -> dict[str, object]:
+        """Forget the conversation and empty the transcript the page renders."""
+        if self._chat is not None:
+            self._chat.clear_history()
+        if self._state is not None:
+            self._state.clear_history()
+        return {"ok": True}
 
     def state_snapshot(self) -> dict[str, object]:
         """The live voice/turn state, for a page that joined after the events flew.

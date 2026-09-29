@@ -17,6 +17,14 @@
       <div class="clean__summary hud-label">
         <span>{{ selectedCount }} / {{ totalItems }} 项已选</span>
         <span class="hud-num">约 {{ formatBytes(selectedBytes) }}</span>
+        <button
+          v-if="state === 'ready'"
+          class="hud-btn clean__all"
+          type="button"
+          @click="toggleAll"
+        >
+          {{ allSelected ? '取消全选' : `全选 ${totalItems} 项 / ${formatBytes(totalBytes)}` }}
+        </button>
       </div>
 
       <div class="clean__list">
@@ -91,11 +99,15 @@ const allItems = computed<JunkItem[]>(() =>
   (plan.value?.groups ?? []).flatMap((group) => group.items),
 )
 const totalItems = computed(() => allItems.value.length)
+const totalBytes = computed(() => allItems.value.reduce((sum, item) => sum + item.size_bytes, 0))
 const selectedItems = computed(() => {
   const chosen = new Set(selected.value)
   return allItems.value.filter((item) => chosen.has(item.path))
 })
 const selectedCount = computed(() => selectedItems.value.length)
+const allSelected = computed(
+  () => totalItems.value > 0 && selectedCount.value === totalItems.value,
+)
 const selectedFiles = computed(() =>
   selectedItems.value.reduce((sum, item) => sum + Math.max(1, item.member_count), 0),
 )
@@ -131,6 +143,19 @@ function describe(item: JunkItem): string {
     }
   }
   return lines.join('\n')
+}
+
+/**
+ * Tick or untick every row the scan actually offered.
+ *
+ * "Every row" is the whole of it: protected paths were dropped during the scan and
+ * are checked again per member at delete time, so select-all cannot reach them. The
+ * button spells out the count and the size it is about to select, because a
+ * select-all whose cost only appears afterwards is the failure mode this panel
+ * exists to avoid.
+ */
+function toggleAll(): void {
+  selected.value = allSelected.value ? [] : allItems.value.map((item) => item.path)
 }
 
 async function scan(): Promise<void> {
@@ -213,7 +238,15 @@ async function commit(): Promise<void> {
 
 .clean__summary {
   display: flex;
-  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.clean__all {
+  margin-left: auto;
+  padding: 2px 10px;
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 .clean__list {

@@ -28,6 +28,7 @@ class FakeLoop:
     def __init__(self) -> None:
         self.starts = 0
         self.stops = 0
+        self.talks = 0
 
     @property
     def listening(self) -> bool:
@@ -38,6 +39,10 @@ class FakeLoop:
 
     def stop(self) -> None:
         self.stops += 1
+
+    def speak_now(self) -> bool:
+        self.talks += 1
+        return True
 
 
 class FakeWindow:
@@ -121,6 +126,27 @@ class TestVoiceSurface:
         assert status["phase"] == "muted"
         assert loop.stops == 1
 
+    def test_talk_opens_one_turn_on_the_live_loop(self, tmp_path: Any) -> None:
+        loop = FakeLoop()
+        voice = VoiceService(lambda _on_event: loop, permission=lambda: True)
+        bridge = _bridge(tmp_path, voice=voice)
+        voice.enable()
+        assert _wait_running(voice)
+
+        status = bridge.voice_talk()
+
+        assert loop.talks == 1
+        assert status["phase"] == "running"
+        assert status["detail"], "the press needs something to show either way"
+
+    def test_talk_without_a_voice_stack_says_so(self, tmp_path: Any) -> None:
+        bridge = _bridge(tmp_path)
+
+        status = bridge.voice_talk()
+
+        assert status["phase"] == "off"
+        assert status["detail"]
+
     def test_the_keyword_reaches_the_page(self, tmp_path: Any) -> None:
         voice = VoiceService(
             lambda _on_event: FakeLoop(),
@@ -172,6 +198,54 @@ class TestChatSurface:
 
     def test_reply_shape_is_exactly_what_the_page_renders(self) -> None:
         assert ChatReply("q", "a").to_dict() == {"question": "q", "answer": "a", "error": ""}
+
+    def test_a_typed_turn_lands_in_the_same_transcript_as_a_spoken_one(self, tmp_path: Any) -> None:
+        """One log, not two: the page renders ``state.history`` for both paths."""
+        chat = ChatService(lambda: FakeLlmClient("今天是星期六"))
+        chat.start()
+        state = StateBridge()
+        bridge = _bridge(tmp_path, chat=chat, state=state)
+
+        bridge.chat_ask("今天星期几")
+
+        assert [(t.role, t.text) for t in state.snapshot().history] == [
+            ("user", "今天星期几"),
+            ("assistant", "今天是星期六"),
+        ]
+
+    def test_a_failed_turn_is_not_written_into_the_transcript(self, tmp_path: Any) -> None:
+        def boom() -> FakeLlmClient:
+            raise RuntimeError("没有配置 API Key")
+
+        state = StateBridge()
+        chat = ChatService(boom)
+        chat.start()
+        bridge = _bridge(tmp_path, chat=chat, state=state)
+
+        bridge.chat_ask("你好")
+
+        assert state.snapshot().history == ()
+
+    def test_clearing_empties_the_transcript_without_touching_the_microphone(
+        self, tmp_path: Any
+    ) -> None:
+        loop = FakeLoop()
+        voice = VoiceService(lambda _on_event: loop, permission=lambda: True)
+        chat = ChatService(lambda: FakeLlmClient("好的"))
+        chat.start()
+        state = StateBridge()
+        bridge = _bridge(tmp_path, voice=voice, chat=chat, state=state)
+        voice.enable()
+        assert _wait_running(voice)
+        bridge.chat_ask("现在几点")
+        assert state.snapshot().history
+
+        bridge.chat_clear()
+
+        assert state.snapshot().history == ()
+        assert chat.history_length == 0
+        assert loop.stops == 0, "「清空」 is about the log, not the microphone"
+        assert bridge.voice_status()["phase"] == "running"
 
 
 class TestStatePull:

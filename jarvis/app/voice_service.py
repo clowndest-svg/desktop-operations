@@ -38,6 +38,15 @@ logger = logging.getLogger("jarvis.app.voice_service")
 
 BootThreadName = "jarvis-voice-boot"
 
+_NOT_RUNNING = {
+    VoicePhase.LOADING: "语音模型还在加载，等它变成「待唤醒」再按",
+    VoicePhase.MUTED: "麦克风已释放，先点「启用语音」",
+    VoicePhase.FAILED: "语音不可用，状态条上有原因",
+    VoicePhase.OFF: "先点「启用语音」，加载约 2 分钟",
+}
+"""Why 「按一下说」 refused, per phase. A button that does nothing silently is
+indistinguishable from a broken one, and the customer cannot tell which."""
+
 
 class VoiceLoop(Protocol):
     """The running voice stack, as far as this service cares.
@@ -49,6 +58,10 @@ class VoiceLoop(Protocol):
     @property
     def listening(self) -> bool:
         """Whether the capture loop is alive."""
+        ...
+
+    def speak_now(self) -> bool:
+        """Open one turn without the wake word. ``False`` if it is busy or down."""
         ...
 
     def start(self) -> None: ...
@@ -219,6 +232,24 @@ class VoiceService:
             status = VoiceStatus(self._phase, self._detail, self._keyword_text())
         self._notify(status)
         return status
+
+    def talk(self) -> VoiceStatus:
+        """Open one spoken turn without the wake word.
+
+        Nothing here is stored: the phase does not change, and the pipeline's own
+        ``state`` event is what tells the page it is listening. The returned detail
+        is a one-shot answer to "why didn't that button do anything", which is the
+        only feedback a press that was refused would otherwise get.
+        """
+        with self._lock:
+            phase, detail, loop = self._phase, self._detail, self._loop
+        keyword = self._keyword_text()
+        if phase is not VoicePhase.RUNNING or loop is None:
+            reason = detail or _NOT_RUNNING.get(phase, "先点「启用语音」")
+            return VoiceStatus(phase, reason, keyword)
+        if not loop.speak_now():
+            return VoiceStatus(phase, "它正在听或正在回答，等这一轮结束再按", keyword)
+        return VoiceStatus(phase, "在听，说完停一下即可", keyword)
 
     # ------------------------------------------------------------------
     # Internals

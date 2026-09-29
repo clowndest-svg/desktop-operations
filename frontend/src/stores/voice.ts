@@ -1,11 +1,14 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import {
+  clearChat,
   enableVoice,
   fetchUiSnapshot,
   fetchVoiceStatus,
   muteVoice,
   onUiState,
+  talkNow,
+  type ChatTurn,
   type TurnPhase,
   type UiSnapshot,
   type VoicePhase,
@@ -33,6 +36,14 @@ export const useVoiceStore = defineStore('voice', () => {
   const interrupted = ref(false)
   const busy = ref(false)
   const lastUpdated = ref(0)
+  /** The shared transcript: typed questions and spoken turns land in one list. */
+  const history = ref<ChatTurn[]>([])
+  /**
+   * One-shot answer to a press that was refused or accepted, shown next to the
+   * button and cleared by the next pushed state. Distinct from ``error``, which is
+   * a bridge failure and stays until it is fixed.
+   */
+  const notice = ref('')
   // Last bridge failure, shown in the header. Without this a rejected call leaves
   // the indicator on its previous value, and the operator's only feedback is
   // "nothing happened" -- indistinguishable from a dead button.
@@ -143,7 +154,52 @@ export const useVoiceStore = defineStore('voice', () => {
     detail.value = snapshot.voice_detail ?? ''
     turn.value = snapshot.voice === 'running' ? snapshot.voice_state : 'idle'
     interrupted.value = snapshot.interrupted
+    history.value = snapshot.history ?? []
+    // A push supersedes whatever the last press said.
+    notice.value = ''
     lastUpdated.value = Date.now()
+  }
+
+  /** Skip the wake word and open one spoken turn. */
+  async function talk(): Promise<void> {
+    if (busy.value) return
+    busy.value = true
+    try {
+      const status = await talkNow()
+      notice.value = status.detail ?? ''
+      if (status.phase !== phase.value) apply(status)
+    } catch (err) {
+      error.value = describe(err)
+    } finally {
+      busy.value = false
+    }
+  }
+
+  /** Forget the conversation, on both sides of the bridge. */
+  async function clearTranscript(): Promise<void> {
+    try {
+      await clearChat()
+      history.value = []
+      notice.value = ''
+    } catch (err) {
+      error.value = describe(err)
+    }
+  }
+
+  /**
+   * Pull the transcript once without touching the indicator.
+   *
+   * A typed turn is answered by Python writing into the same transcript the
+   * microphone writes into, but nothing guarantees a push arrives afterwards --
+   * a quiet microphone has no reason to change state. Without this the panel
+   * updates only when something else happens to move.
+   */
+  async function pullSnapshot(): Promise<void> {
+    try {
+      applySnapshot(await fetchUiSnapshot())
+    } catch {
+      // A missing bridge leaves whatever is already on screen; that is stale, not wrong.
+    }
   }
 
   async function start(): Promise<void> {
@@ -174,10 +230,12 @@ export const useVoiceStore = defineStore('voice', () => {
     phase,
     detail,
     error,
+    notice,
     keyword,
     turn,
     interrupted,
     busy,
+    history,
     lastUpdated,
     enabled,
     loading,
@@ -189,6 +247,9 @@ export const useVoiceStore = defineStore('voice', () => {
     refresh,
     enable,
     mute,
+    talk,
+    clearTranscript,
+    pullSnapshot,
     start,
     stop,
   }

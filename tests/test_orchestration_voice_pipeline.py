@@ -235,3 +235,42 @@ def test_wake_word_required_to_listen() -> None:
     assert _wait_for(lambda: h.pipeline._get_state() == PipelineState.IDLE, timeout=1.0)
     h.pipeline.stop()
     assert not any(e.kind in ("speech_start", "speech_end") for e in h.events)
+
+
+def test_speak_now_runs_a_turn_without_the_wake_word() -> None:
+    """The HUD's 「按一下说」: same chain, no keyword spoken."""
+    h = build(wake_hits=[], source_chunks=[_FRAME] * 8)
+    h.pipeline.start()
+    assert _wait_for(lambda: h.pipeline.state == PipelineState.IDLE, timeout=1.0)
+
+    assert h.pipeline.speak_now() is True
+    assert h.finished.wait(timeout=5.0), "the manual turn never reached the agent"
+    h.pipeline.stop()
+
+    assert len(h.asr.calls) == 1
+    assert [e.text for e in h.events if e.kind == "reply"] == ["你好", "好的"]
+    assert not [e for e in h.events if e.kind == "wake"], (
+        "a manual turn must not fabricate a wake: the wake event is what the "
+        "cooldown and the keyword label are built on"
+    )
+    states = [e.text for e in h.events if e.kind == "state"]
+    assert states[:2] == ["idle", "listening"], "the press must open the turn, not log only"
+
+
+def test_speak_now_is_refused_while_a_turn_is_already_open() -> None:
+    h = build(wake_hits=[], source_chunks=[_FRAME] * 4)
+    h.pipeline.start()
+
+    assert h.pipeline.speak_now() is True
+    assert h.pipeline.speak_now() is False, (
+        "a second press must not reset the buffer mid-utterance -- that would "
+        "drop what the user already said"
+    )
+    h.pipeline.stop()
+
+
+def test_speak_now_is_refused_before_the_loop_runs() -> None:
+    h = build()
+
+    assert h.pipeline.speak_now() is False, "no capture thread means nothing to listen"
+    assert h.pipeline.state == PipelineState.IDLE

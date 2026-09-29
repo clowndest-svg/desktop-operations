@@ -142,7 +142,9 @@ interface PywebviewApi {
   voice_status(): Promise<VoiceStatus>
   voice_enable(): Promise<VoiceStatus>
   voice_mute(): Promise<VoiceStatus>
+  voice_talk(): Promise<VoiceStatus>
   chat_ask(text: string): Promise<ChatReply>
+  chat_clear(): Promise<{ ok: boolean }>
   state_snapshot(): Promise<UiSnapshot>
 }
 
@@ -244,19 +246,26 @@ const mock: PywebviewApi = {
   async voice_mute() {
     return mockVoice.mute()
   },
+  async voice_talk() {
+    return mockVoice.talk()
+  },
   async chat_ask(text) {
-    return {
-      question: text,
-      answer: '（浏览器预览模式的样例回答）我是小夜。桌面版里这句话来自真实模型。',
-      error: '',
-    }
+    const answer = '（浏览器预览模式的样例回答）我是小夜。桌面版里这句话来自真实模型。'
+    // The desktop transcript is pushed from Python; the mock has to keep its own,
+    // or the panel is empty in preview and nobody can tell that from a bug.
+    mockHistory.push({ role: 'user', text }, { role: 'assistant', text: answer })
+    return { question: text, answer, error: '' }
+  },
+  async chat_clear() {
+    mockHistory.length = 0
+    return { ok: true }
   },
   async state_snapshot() {
     return {
       voice_state: mockTurn,
       voice: mockVoice.status().phase,
       voice_detail: mockVoice.status().detail,
-      history: [],
+      history: [...mockHistory],
       last_event: 'mock',
       interrupted: false,
     }
@@ -299,9 +308,25 @@ const mockVoice = {
     this.detail = '麦克风已释放'
     return this.status()
   },
+  talk(): VoiceStatus {
+    if (this.phase !== 'running') {
+      return { ...this.status(), detail: MOCK_REFUSALS[this.phase] ?? '先点「启用语音」' }
+    }
+    mockTurn = 'listening'
+    return { ...this.status(), detail: '在听，说完停一下即可' }
+  },
+}
+
+const MOCK_REFUSALS: Record<VoicePhase, string> = {
+  off: '先点「启用语音」，加载约 2 分钟',
+  loading: '语音模型还在加载，等它变成「待唤醒」再按',
+  running: '',
+  failed: '语音不可用，状态条上有原因',
+  muted: '麦克风已释放，先点「启用语音」',
 }
 
 let mockTurn: TurnPhase = 'idle'
+const mockHistory: ChatTurn[] = []
 
 const api = (): PywebviewApi | null => window.pywebview?.api ?? null
 
@@ -382,6 +407,21 @@ export function enableVoice(): Promise<VoiceStatus> {
 
 export function muteVoice(): Promise<VoiceStatus> {
   return bridge().then((target) => target.voice_mute())
+}
+
+/**
+ * Open one spoken turn without the wake word.
+ *
+ * The answer is a status, not a boolean: when the press is refused, the `detail`
+ * is the only thing the operator gets, so it has to say why.
+ */
+export function talkNow(): Promise<VoiceStatus> {
+  return bridge().then((target) => target.voice_talk())
+}
+
+/** Forget the conversation and empty the transcript. */
+export function clearChat(): Promise<{ ok: boolean }> {
+  return bridge().then((target) => target.chat_clear())
 }
 
 /** Pull the current state once, so a page that mounted after the events still agrees. */

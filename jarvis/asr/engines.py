@@ -9,6 +9,7 @@ surfaces as a precise :class:`AsrError` the moment the engine is constructed.
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import TYPE_CHECKING, Any
 
@@ -23,6 +24,8 @@ from jarvis.core.exceptions import AsrError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from jarvis.vad.types import SpeechSegment
+
+logger = logging.getLogger("jarvis.asr.engines")
 
 _SENSEVOICE_TAG = re.compile(r"<\|[^|]*\|>")
 """SenseVoice rich-transcription control tokens (language / emotion / itn flags)."""
@@ -45,6 +48,25 @@ _SENSEVOICE_REGISTRY = {
     "tokenizer_classes": "SenseVoiceTokenizer",
     "frontend_classes": "WavFrontend",
 }
+
+_VAD_THREAD_BUDGET = 1
+"""What ``silero_vad`` itself asks for, at import time (``torch.set_num_threads(1)``).
+
+funasr overrides that: ``AutoModel.__init__`` raises the process-wide count to
+``ncpu`` (4 by default), and ``_reset_runtime_configs`` re-asserts it before *every*
+``generate()`` -- then never gives it back. The capture loop spends its life between
+those calls running a 32 ms VAD frame through a four-thread pool, which measured
+0.5~0.75 of a core of pure idle burn. Handing the budget back after each inference
+costs ASR nothing, because funasr sets its own value again on the way in.
+"""
+
+
+def _return_threads_to_vad(torch_module: Any) -> None:
+    try:
+        if torch_module.get_num_threads() != _VAD_THREAD_BUDGET:
+            torch_module.set_num_threads(_VAD_THREAD_BUDGET)
+    except Exception:  # a tuning nicety must never fail a transcription
+        logger.debug("could not hand the torch thread budget back to the VAD", exc_info=True)
 
 
 def _registry_hint() -> str:
@@ -103,6 +125,10 @@ class SenseVoiceAsrEngine:
         self._language = section.language
         self._temperature = section.temperature
         self._beam_size = section.beam_size
+        # Constructing AutoModel just raised the process-wide thread count for its
+        # own load. The capture loop starts before any inference happens, so the
+        # budget has to be handed back here rather than only after a turn.
+        _return_threads_to_vad(torch)
 
     @property
     def name(self) -> str:
@@ -148,6 +174,10 @@ class SenseVoiceAsrEngine:
                 "sensevoice inference failed",
                 details={"cause": repr(exc)},
             ) from exc
+        finally:
+            # ``generate`` re-asserted funasr's own thread count on the way in; the
+            # VAD loop is what runs next, and it asked for one thread.
+            _return_threads_to_vad(self._torch)
         text = self._extract_text(outputs)
         return RecognitionResult(
             text=text,

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from jarvis.asr.engines import BufferedAsrStream, SenseVoiceAsrEngine
@@ -134,9 +136,113 @@ def test_sensevoice_missing_dependency_raises_asr_error() -> None:
 
 
 def test_sensevoice_engine_when_available() -> None:
-    # Only runs where the heavy ML stack is actually installed.
+    """Construct the real SenseVoice model. Off by default, deliberately.
+
+    The reason is measured, not theoretical. With ``MODELSCOPE_CACHE`` unset -- which
+    is exactly what a bare ``pytest`` gives you -- funasr goes to the hub for ~900 MB,
+    lands it on the system drive against this project's own "nothing heavy on C:"
+    rule, and on a network that blocks those downloads the suite does not *fail*, it
+    just stops. A frozen run is far more expensive than a skipped one, because a skip
+    tells you what did not run and a hang tells you nothing.
+
+    The real gate for this path is ``scripts/verify_wake_words.py``, which says which
+    cache it uses and exits non-zero on a miss.
+    """
+    if os.environ.get("JARVIS_RUN_MODEL_TESTS") != "1":
+        pytest.skip("set JARVIS_RUN_MODEL_TESTS=1 to load the real ~900 MB weights")
     pytest.importorskip("funasr")
     engine = SenseVoiceAsrEngine(asr_section())
     assert engine.name == "sensevoice"
     assert engine.sample_rate == 16_000
     engine.close()
+
+
+class _FakeTorch:
+    """Stands in for the module attribute funasr actually fights over."""
+
+    def __init__(self, threads: int = 1) -> None:
+        self.threads = threads
+
+    def get_num_threads(self) -> int:
+        return self.threads
+
+    def set_num_threads(self, count: int) -> None:
+        self.threads = count
+
+
+def _sensevoice_with_fakes(torch: _FakeTorch, model: object) -> object:
+    """An engine assembled by hand, so no weights and no funasr are needed."""
+    import numpy
+
+    from jarvis.asr.engines import SenseVoiceAsrEngine
+
+    engine = object.__new__(SenseVoiceAsrEngine)
+    engine._model = model  # type: ignore[attr-defined]
+    engine._torch = torch  # type: ignore[attr-defined]
+    engine._numpy = numpy  # type: ignore[attr-defined]
+    engine._language = "zh"  # type: ignore[attr-defined]
+    engine._temperature = 0.0  # type: ignore[attr-defined]
+    engine._beam_size = 1  # type: ignore[attr-defined]
+    return engine
+
+
+class _FunasrLikeModel:
+    """Raises the thread count on the way in, the way ``_reset_runtime_configs`` does."""
+
+    def __init__(self, torch: _FakeTorch, *, fails: bool = False) -> None:
+        self._torch = torch
+        self._fails = fails
+        self.threads_during = -1
+
+    def generate(self, **_kwargs: object) -> list[dict[str, object]]:
+        self._torch.set_num_threads(4)
+        self.threads_during = self._torch.get_num_threads()
+        if self._fails:
+            raise RuntimeError("inference exploded")
+        return [{"text": "<|zh|><|NEUTRAL|>你好"}]
+
+
+def test_recognize_hands_the_thread_budget_back_to_the_vad() -> None:
+    """The idle burn was funasr's global thread count, left raised after inference.
+
+    The capture loop runs *between* inferences. Leaving it at ncpu pushes a 32 ms VAD
+    frame through a four-thread pool, which measured as most of a core spent on
+    nothing at all.
+    """
+    torch = _FakeTorch(1)
+    model = _FunasrLikeModel(torch)
+    engine = _sensevoice_with_fakes(torch, model)
+
+    result = engine.recognize(b"\x00\x00" * 160)  # type: ignore[attr-defined]
+
+    assert result.text == "你好"
+    assert model.threads_during == 4, "inference must still get funasr's own threads"
+    assert torch.threads == 1, "and hand them back afterwards"
+
+
+def test_thread_budget_is_restored_even_when_inference_fails() -> None:
+    import pytest
+
+    from jarvis.core.exceptions import AsrError
+
+    torch = _FakeTorch(1)
+    engine = _sensevoice_with_fakes(torch, _FunasrLikeModel(torch, fails=True))
+
+    with pytest.raises(AsrError):
+        engine.recognize(b"\x00\x00" * 160)  # type: ignore[attr-defined]
+
+    assert torch.threads == 1, (
+        "a failed turn that leaves the pool raised is the expensive case: the loop "
+        "keeps listening, and keeps paying for four threads"
+    )
+
+
+def test_returning_threads_never_breaks_a_transcription() -> None:
+    from jarvis.asr.engines import _return_threads_to_vad
+
+    class Broken:
+        @staticmethod
+        def get_num_threads() -> int:
+            raise RuntimeError("no torch here")
+
+    _return_threads_to_vad(Broken())  # must not raise

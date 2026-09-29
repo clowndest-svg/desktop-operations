@@ -129,6 +129,10 @@ class _VoiceStack:
     def listening(self) -> bool:
         return self._orchestration.listening
 
+    def speak_now(self) -> bool:
+        pipeline = self._orchestration.pipeline
+        return pipeline is not None and pipeline.speak_now()
+
 
 def _voice_stack_builder(
     config_service: ConfigService,

@@ -21,10 +21,12 @@ from jarvis.core.events import VOICE_STATUS_KIND, PipelineEvent, VoicePhase
 class FakeLoop:
     """A voice stack that records what was done to it."""
 
-    def __init__(self, *, alive: bool = True) -> None:
+    def __init__(self, *, alive: bool = True, accepts_talk: bool = True) -> None:
         self.starts = 0
         self.stops = 0
+        self.talks = 0
         self._alive = alive
+        self._accepts_talk = accepts_talk
 
     @property
     def listening(self) -> bool:
@@ -35,6 +37,10 @@ class FakeLoop:
 
     def stop(self) -> None:
         self.stops += 1
+
+    def speak_now(self) -> bool:
+        self.talks += 1
+        return self._accepts_talk
 
     def set_alive(self, alive: bool) -> None:
         """Simulate the capture thread going away, or coming back."""
@@ -396,3 +402,57 @@ def test_type_checking_helper_keeps_self_importable() -> None:
         for alias in node.names
     }
     assert "Self" not in imported
+
+
+class TestTalk:
+    """「按一下说」: open a turn without the wake word."""
+
+    def test_refuses_before_the_stack_exists(self, events: list[PipelineEvent]) -> None:
+        service = _service(lambda _on_event: FakeLoop(), events)
+
+        status = service.talk()
+
+        assert status.phase is VoicePhase.OFF
+        assert "启用语音" in status.detail, "a refused press must say what to do about it"
+
+    def test_refuses_while_models_load(self, events: list[PipelineEvent]) -> None:
+        gate = threading.Event()
+        service = _service(lambda _on_event: SlowLoop(gate), events)
+        service.enable()
+
+        status = service.talk()
+
+        assert status.phase is VoicePhase.LOADING
+        assert "加载" in status.detail
+        gate.set()
+
+    def test_running_stack_gets_one_turn_and_no_phase_change(
+        self, events: list[PipelineEvent]
+    ) -> None:
+        loop = FakeLoop()
+        service = _service(lambda _on_event: loop, events)
+        service.enable()
+        _wait_until(lambda: service.status.phase is VoicePhase.RUNNING)
+        events.clear()
+
+        status = service.talk()
+
+        assert loop.talks == 1
+        assert status.phase is VoicePhase.RUNNING
+        assert status.detail, "the answer needs something to show next to the button"
+        assert not [e for e in events if e.kind == VOICE_STATUS_KIND], (
+            "opening a turn is not a change of availability; emitting one would let a "
+            "press look like the microphone came back up"
+        )
+
+    def test_reports_when_the_pipeline_declines(self, events: list[PipelineEvent]) -> None:
+        loop = FakeLoop(accepts_talk=False)
+        service = _service(lambda _on_event: loop, events)
+        service.enable()
+        _wait_until(lambda: service.status.phase is VoicePhase.RUNNING)
+
+        status = service.talk()
+
+        assert loop.talks == 1
+        assert status.phase is VoicePhase.RUNNING
+        assert "正在" in status.detail, "busy is the one case with no other visible signal"

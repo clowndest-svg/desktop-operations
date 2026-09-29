@@ -192,3 +192,63 @@ class TestVoiceAvailability:
         bridge.reset()
 
         assert bridge.snapshot().voice is VoicePhase.OFF
+
+
+def test_add_turn_writes_both_sides_of_a_typed_exchange() -> None:
+    """Typed turns share the transcript with spoken ones."""
+    bridge = StateBridge()
+
+    bridge.add_turn("user", "今天星期几")
+    bridge.add_turn("assistant", "星期六")
+
+    assert bridge.snapshot().history == (
+        ChatTurn("user", "今天星期几"),
+        ChatTurn("assistant", "星期六"),
+    )
+
+
+def test_add_turn_notifies_subscribers() -> None:
+    bridge = StateBridge()
+    seen: list[UiState] = []
+    bridge.subscribe(seen.append)
+
+    bridge.add_turn("user", "你好")
+
+    assert len(seen) == 1
+    assert seen[0].history == (ChatTurn("user", "你好"),)
+
+
+def test_add_turn_ignores_empty_text() -> None:
+    bridge = StateBridge()
+
+    bridge.add_turn("assistant", "")
+
+    assert bridge.snapshot().history == ()
+
+
+def test_clear_history_keeps_the_voice_indicator_alone() -> None:
+    """「清空」 empties the log; it must not pretend the microphone changed."""
+    bridge = StateBridge()
+    bridge.push_event(_ev("wake", "你好小夜"))
+    bridge.push_event(_ev("voice_status", "running"))
+    bridge.add_turn("user", "你好")
+
+    bridge.clear_history()
+
+    state = bridge.snapshot()
+    assert state.history == ()
+    assert state.voice is VoicePhase.RUNNING
+    assert (
+        state.voice_state is UiVoiceState.LISTENING
+    ), "the turn state belongs to the microphone, and clearing a log does not stop it"
+
+
+def test_clear_history_resets_the_reply_pairing() -> None:
+    """Otherwise the next spoken transcript is filed as an assistant answer."""
+    bridge = StateBridge()
+    bridge.add_turn("user", "半句")  # awaiting its assistant half
+
+    bridge.clear_history()
+    bridge.push_event(_ev("reply", "打开灯"))
+
+    assert bridge.snapshot().history == (ChatTurn("user", "打开灯"),)

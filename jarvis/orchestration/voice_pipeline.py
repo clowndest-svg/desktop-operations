@@ -174,6 +174,35 @@ class VoicePipeline:
         self._close(self._player)
 
     # ------------------------------------------------------------------
+    # Manual turn
+    # ------------------------------------------------------------------
+
+    def speak_now(self) -> bool:
+        """Open a turn without the wake word. ``False`` when it cannot.
+
+        Only IDLE is interruptible this way. Mid-listening there is nothing to
+        start, and mid-processing the user is already talking over an answer --
+        that is barge-in's job, and having two features seize the microphone on
+        the same click is how "it heard me but answered the wrong thing" happens.
+        """
+        if not self.running:
+            # No capture thread to hear the answer; flipping the state would leave
+            # the HUD showing "listening" with nothing behind it.
+            return False
+        with self._state_lock:
+            if self._stop.is_set() or self._state is not PipelineState.IDLE:
+                return False
+            self._state = PipelineState.LISTENING
+        # Same pairing as every other entry into LISTENING: the segmenter and the
+        # buffer are reset together, or SpeechSegment sample indices stop matching
+        # the buffer ASR slices from.
+        self._segmenter.reset()
+        self._buffer.clear()
+        self._emit(PipelineEvent(kind=PIPELINE_STATE_KIND, text=PipelineState.LISTENING.value))
+        logger.info("manual turn opened (wake word skipped)")
+        return True
+
+    # ------------------------------------------------------------------
     # Listening loop
     # ------------------------------------------------------------------
 
