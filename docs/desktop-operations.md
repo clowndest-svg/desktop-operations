@@ -22,7 +22,15 @@ setx QWENAI_API_KEY "sk-..."
 
 :: 5) 要演示语音唤醒，再加 --voice（麦克风只在窗口里点「启用语音」时才开）
 .venv\Scripts\python -m jarvis --desktop --voice
+
+:: 6) 或者什么都不用记：双击仓库根目录的「启动小夜.bat」
 ```
+
+`启动小夜.bat` 就是第 4~5 步的那条命令，多做三件事：先检查 `.venv` 和
+`jarvis\ui\web\index.html` 在不在（缺哪个就说什么缺，不会闪退），
+`cd` 到脚本自己所在的目录（放桌面快捷方式也能找到路），
+以及退出码非 0 时把日志路径打出来并按一下暂停——双击运行的人需要看到失败，
+而不是看见一个黑框一闪而过。
 
 缺 `.[desktop]` 的两个包会怎样：`pywebview` 缺 → 窗口打不开并打印构建提示；
 `psutil` 缺 → 仪表盘显示「遥测读取失败：system monitoring requires the 'psutil' package」，
@@ -59,9 +67,11 @@ setx QWENAI_API_KEY "sk-..."
 | `python -m jarvis --desktop -v` | 打开 DevTools（页面侧问题唯一的看法） |
 | `python -m jarvis --wav in.wav --out ans.wav` | 离线演示：VAD→ASR→LLM→TTS，不碰麦克风 |
 | `python -m jarvis --config my.yaml` | 指定用户配置文件 |
+| `启动小夜.bat`（仓库根目录） | 等价于 `--desktop --voice`，带前置检查和失败留痕 |
 
 打包出的 exe 等价于 `--desktop`（默认参数写在 `packaging/entry.py`），
-`--voice` 可以加到快捷方式的「目标」后面。
+`--voice` 可以加到快捷方式的「目标」后面。exe 那份的启动方式是
+`dist\小夜\小夜.exe`，它没有 `.venv` 可查，所以不需要 bat。
 
 ---
 
@@ -215,28 +225,42 @@ spec 顶部用 `ROOT = os.path.dirname(os.path.abspath(SPECPATH))` 锚回仓库�
    `__init__` 里、`AgentGraph` 在 `OrchestrationService.start()` 里），静态分析几乎
    什么都看不见 → 靠 `hiddenimports` + `collect_data_files` 补。`silero_vad` 的
    TorchScript 权重是随 wheel 分发的数据文件，不收集就没有 VAD。
-3. **funasr 在冻结环境里注册不出模型**（本项最贵的一个坑，根因已定位）：它的模型模块
-   在 import 时会用 `inspect.getsource` **读自己的源码**，而 PyInstaller 的 PYZ 归档里
-   只有编译后的字节码 → `OSError: could not get source code` → 注册表从开发环境的
-   48 个模型掉到 13 个，`SenseVoiceSmall` 正好不在里面，点「启用语音」得到
-   `RuntimeError: model 'SenseVoiceSmall' is not registered`。
-   两层修复都在包里：`packaging/hooks/runtime_hook_funasr.py` 显式补 import 并把
-   失败原因写进 `<数据目录>/logs/funasr-hook.log`（窗口化程序 stdout 是黑洞，
-   不写文件就等于没说）；spec 里 `collect_data_files("funasr", includes=["**/*.py"])`
-   把源码按原路径一起发出去，让 `inspect` 找得到。
-   `tests/test_packaging_declared_deps.py` 钉了这两条断言，改 spec 时不会静默漏掉。
-   **实测纠正一处**：`collect_data_files("funasr", includes=["**/*.py"])` 其实一个 `.py`
-   都没发出去（打包后 `_internal/funasr` 下 `.py`/`.pyc` 均为 0 个——PyInstaller 的
-   数据收集不把源码当数据）。所以那条不算修好，只是被证伪。下一步按性价比排序：
-   ① 运行时钩子里在 funasr 导入前把 `inspect.getsource` 包一层，`OSError` 时返回空串
-   （最小、最可能有效）；② 手工把 `site-packages/funasr` 整棵树作为 data 复制进包；
-   ③ 不冻结语音栈——exe 只带壳，语音要求目标机有 venv（重型 ML 依赖的常见做法）。
+3. **funasr 在冻结环境里注册不出模型**（本项最贵的一个坑，已修，实测通过）：
+   funasr 的 `tables.model_classes / tokenizer_classes / frontend_classes` 不是靠
+   import 副作用被动填的，而是靠 `funasr/__init__.py` 里的 `import_submodules(__name__)`
+   **遍历自己的包目录**主动填的。冻结环境里 `_MEIPASS/funasr` 只有一个 `version.txt`，
+   遍历结果为空 → 注册表空 → 点「启用语音」在 `auto_model.py:568` 得到
+   `TypeError: 'NoneType' object is not callable`。
+   那句 TypeError 指向的是 **tokenizer** 查表（`SenseVoiceTokenizer`，定义在
+   `funasr/tokenizer/whisper_tokenizer.py`），不是模型查表——这是最误导人的地方：
+   先按「模型没注册」去修，注册表里确实补出了 `SenseVoiceSmall`，**照样失败**。
+   走过的弯路一并记下来，免得下次再踩：
+     - `inspect.getsource` 在冻结环境抛 `OSError` 是真的（少了 35/48 个模型），
+       但它只是**第二层**原因，单独修它不够。
+     - `collect_data_files("funasr", includes=["**/*.py"])` 返回 **0 条**（本机实测）。
+       这行看着像修复，其实什么都没发出去——PyInstaller 不把源码当数据。
+       上一版 spec 里它就是空操作，而 `_internal/funasr` 下 `.py` 为 0 个才是真相。
+   真正的修复只有一行：把 `site-packages/funasr` 整个目录作为 data 发到 `_MEIPASS/funasr`
+   （424 个 `.py`）。funasr 自己的遍历随即恢复，代码仍由 PYZ 提供
+   （PyInstaller 的 importer 排在 `sys.meta_path` 最前，磁盘上的 `.py` 不会抢加载），
+   `inspect.getsource` 也顺手有了真实文件可读。
+   运行时钩子因此瘦身为两件事：装 `inspect.getsource` 兜底包装（防第二层原因复发）、
+   把「源码树在不在」写进 `<数据目录>/logs/funasr-hook.log`。它**不再在启动时 import funasr**
+   ——那会在每次开机时为多数用户根本不会点的功能多花几秒。
+   `jarvis.asr.engines._registry_hint()` 现在会在失败信息里点名缺的是哪个类。
+   `tests/test_packaging_declared_deps.py` 钉了三条断言（源码树要发、`includes=["**/*.py"]`
+   那种空操作不许回来、钩子文件必须在），且只看代码不看注释。
+   **exe 实测**：点「启用语音」→ 约 2.5 分钟后日志给出 `voice stack running`，
+   界面进入「待唤醒」；窗口冷启动 4 秒（16:59:30 → 17:03:37 是语音，17:03 之前窗口已经出来了）。
+   **代价也要说清**：语音栈起来后常驻 RSS 约 2.4 GB，待唤醒空转吃掉约半个核
+   （Silero VAD 每 32 ms 一帧、torch 多线程反复起停）。演示无妨，长期挂着不划算。
    **仍然要留一手**：冻结环境比开发环境脆，演示当天优先用
    `python -m jarvis --desktop --voice`，exe 作为交付形态另测。
 4. **未签名一定吃 SmartScreen**（「Windows 已保护你的电脑」→ 更多信息 → 仍要运行）。
    代码签名证书要钱，演示阶段先写文档，别让客户以为中病毒。
 
-体积：**本机实测 888 MB**（`dist\小夜`，含 torch/funasr 运行时，不含模型权重）。
+体积：**本机实测 882 MB / 7417 个文件**（`dist\小夜`，含 torch/funasr 运行时与 funasr
+源码树，不含模型权重）。
    权重另算 ~1.7 GB，放在 `MODELSCOPE_CACHE` 指的目录里，**不打进 exe**——
    打进去体积翻倍，而且和「清理功能扫 %TEMP%」这件事正面冲突。
 **不做 onefile**：每次启动要把

@@ -36,6 +36,30 @@ def _missing_dependency(package: str, engine: str, exc: ImportError) -> AsrError
     )
 
 
+# Names funasr looks up in its own registries to build SenseVoice. A frozen build
+# that lost funasr's package directory finds none of them, and AutoModel then
+# fails as ``TypeError: 'NoneType' object is not callable`` -- which names no
+# module, no registry and no fix. Checking by hand is how that took a day.
+_SENSEVOICE_REGISTRY = {
+    "model_classes": "SenseVoiceSmall",
+    "tokenizer_classes": "SenseVoiceTokenizer",
+    "frontend_classes": "WavFrontend",
+}
+
+
+def _registry_hint() -> str:
+    """Name the first SenseVoice class funasr failed to register, or ``''``."""
+    try:
+        from funasr.register import tables
+    except Exception:  # funasr is optional; a broken import is not our problem here
+        return ""
+    for attribute, name in _SENSEVOICE_REGISTRY.items():
+        registry = getattr(tables, attribute, None)
+        if registry is not None and name not in registry:
+            return f"{name} is missing from funasr.tables.{attribute}"
+    return ""
+
+
 class SenseVoiceAsrEngine:
     """SenseVoice / FunASR adapter — offline, ONNX (default engine).
 
@@ -67,9 +91,14 @@ class SenseVoiceAsrEngine:
                 device=section.device,
             )
         except Exception as exc:
+            hint = _registry_hint()
             raise AsrError(
                 "failed to load the SenseVoice model",
-                details={"model": section.model, "cause": repr(exc)},
+                details={
+                    "model": section.model,
+                    "cause": repr(exc),
+                    **({"hint": hint} if hint else {}),
+                },
             ) from exc
         self._language = section.language
         self._temperature = section.temperature

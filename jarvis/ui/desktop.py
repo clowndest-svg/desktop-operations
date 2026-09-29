@@ -129,7 +129,7 @@ class HudBridge:
         """Whether the microphone is available, and what it is doing about it."""
         if self._voice is None:
             return {"phase": "off", "detail": "本进程未启用语音功能", "keyword": ""}
-        return _voice_status_dict(self._voice.status)
+        return voice_status_dict(self._voice.status)
 
     def voice_enable(self) -> dict[str, object]:
         """Begin loading the voice stack. Returns immediately.
@@ -139,13 +139,13 @@ class HudBridge:
         """
         if self._voice is None:
             return {"phase": "off", "detail": "本进程未启用语音功能", "keyword": ""}
-        return _voice_status_dict(self._voice.enable())
+        return voice_status_dict(self._voice.enable())
 
     def voice_mute(self) -> dict[str, object]:
         """Let go of the microphone. The page can never open it by accident."""
         if self._voice is None:
             return {"phase": "off", "detail": "本进程未启用语音功能", "keyword": ""}
-        return _voice_status_dict(self._voice.mute())
+        return voice_status_dict(self._voice.mute())
 
     def chat_ask(self, text: str) -> dict[str, object]:
         """Answer one typed question. Blocks until the model replies."""
@@ -169,7 +169,7 @@ class HudBridge:
         return {"name": "小夜", "version": __version__, "engine": "pywebview"}
 
 
-def _voice_status_dict(status: object) -> dict[str, object]:
+def voice_status_dict(status: object) -> dict[str, object]:
     phase = getattr(status, "phase", None)
     return {
         "phase": getattr(phase, "value", "off"),

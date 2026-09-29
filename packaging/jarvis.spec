@@ -19,6 +19,7 @@ two things the code reads through ``importlib.resources`` / the filesystem --
 window opens onto nothing.
 """
 
+import importlib.util
 import os
 
 from PyInstaller.utils.hooks import (
@@ -95,28 +96,36 @@ try:
 except Exception:
     pass
 
-for heavy in ("funasr", "modelscope"):
+for heavy in ("modelscope",):
     try:
         datas += collect_data_files(heavy)
     except Exception:
         pass
 
-# ``inspect.getsource`` is the reason a frozen funasr cannot register anything:
-# its model modules read their own source at import time, and a PYZ archive holds
-# compiled code only -- the failure is ``OSError: could not get source code``.
-# Shipping the .py files next to the .pyc paths lets ``inspect`` find them.
-for source_only in ("funasr",):
-    try:
-        datas += collect_data_files(source_only, includes=["**/*.py"])
-    except Exception:
-        pass
+# funasr discovers its model / tokenizer / frontend classes by walking its own
+# package directory at import time (``import_submodules`` in its ``__init__``).
+# A frozen tree has no such directory -- ``_MEIPASS/funasr`` holds only the data
+# files -- so the walk finds nothing, ``tables.tokenizer_classes`` stays empty,
+# and ``AutoModel`` dies with ``TypeError: 'NoneType' object is not callable``
+# while building the tokenizer. Shipping the source tree makes funasr's own
+# discovery work again; the PYZ still supplies the code (its importer runs first
+# on sys.meta_path), and ``inspect.getsource`` gets real files back.
+#
+# ``collect_data_files("funasr", includes=["**/*.py"])`` looks like it should do
+# this and returns zero entries, which is how the previous build shipped an
+# empty registry while the spec claimed otherwise.
+try:
+    _funasr_spec = importlib.util.find_spec("funasr")
+    _funasr_dirs = list(_funasr_spec.submodule_search_locations or ()) if _funasr_spec else []
+    if _funasr_dirs:
+        datas += [(_funasr_dirs[0], "funasr")]
+    else:
+        print("[jarvis spec] funasr package directory not found; voice will not load")
+except Exception as _exc:
+    print(f"[jarvis spec] funasr source collection failed: {type(_exc).__name__}: {_exc}")
 
-# funasr builds a model by looking its class up in a registry populated by
-# ``@tables.register`` decorators at import time. Static analysis keeps the
-# registry but drops the model modules that were never imported directly, so the
-# lookup returns None and the frozen app dies with
-# ``TypeError: 'NoneType' object is not callable`` inside auto_model.build_model.
-# Collecting every submodule is what makes the registry complete.
+# ``collect_submodules`` is still what puts the code in the PYZ; the source tree
+# above only makes it discoverable.
 try:
     hiddenimports += collect_submodules("funasr")
 except Exception:

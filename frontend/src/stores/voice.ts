@@ -2,10 +2,12 @@ import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import {
   enableVoice,
+  fetchUiSnapshot,
   fetchVoiceStatus,
   muteVoice,
   onUiState,
   type TurnPhase,
+  type UiSnapshot,
   type VoicePhase,
   type VoiceStatus,
 } from '@/api/bridge'
@@ -53,6 +55,7 @@ export const useVoiceStore = defineStore('voice', () => {
       case 'loading':
         return '语音加载中'
       case 'running':
+        if (interrupted.value) return '已打断'
         return turn.value === 'processing' ? '思考中' : turn.value === 'listening' ? '聆听中' : '待唤醒'
       case 'muted':
         return '麦克风已释放'
@@ -67,6 +70,8 @@ export const useVoiceStore = defineStore('voice', () => {
     if (phase.value === 'failed') return 'error'
     if (phase.value === 'loading') return 'warn'
     if (phase.value !== 'running') return 'idle'
+    // Barge-in is a headline feature; it should be visible for the moment it lasts.
+    if (interrupted.value) return 'warn'
     // Armed and quiet pulses slowly; catching speech pulses fast; thinking is steady.
     return turn.value === 'listening' ? 'listening' : 'live'
   })
@@ -133,14 +138,26 @@ export const useVoiceStore = defineStore('voice', () => {
    * pull, so the indicator never sits on a stale reading just because the page
    * mounted after the microphone opened.
    */
+  function applySnapshot(snapshot: UiSnapshot): void {
+    phase.value = snapshot.voice
+    detail.value = snapshot.voice_detail ?? ''
+    turn.value = snapshot.voice === 'running' ? snapshot.voice_state : 'idle'
+    interrupted.value = snapshot.interrupted
+    lastUpdated.value = Date.now()
+  }
+
   async function start(): Promise<void> {
-    detach = onUiState((snapshot) => {
-      phase.value = snapshot.voice
-      detail.value = snapshot.voice_detail ?? ''
-      turn.value = snapshot.voice === 'running' ? snapshot.voice_state : 'idle'
-      interrupted.value = snapshot.interrupted
-      lastUpdated.value = Date.now()
-    })
+    detach = onUiState(applySnapshot)
+    // The pull is what makes the comment above true. ``voice_status()`` only knows
+    // the phase (off/loading/running/...); the *turn* state -- listening vs thinking
+    // -- is pushed from the capture thread, so a page that mounted mid-answer would
+    // otherwise show "待唤醒" until the next transition happened to arrive.
+    try {
+      applySnapshot(await fetchUiSnapshot())
+    } catch {
+      // No bridge yet (plain browser, or the shell still starting): fall through to
+      // the phase pull below rather than showing an error nobody can act on.
+    }
     try {
       await refresh()
     } catch {

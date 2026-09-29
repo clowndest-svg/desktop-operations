@@ -19,7 +19,7 @@ from jarvis.app.voice_service import VoiceService
 from jarvis.core.events import PipelineEvent, VoicePhase
 from jarvis.tools.disk_cleaner import DiskCleaner
 from jarvis.tools.monitor import SystemMonitor
-from jarvis.ui.desktop import HudBridge, _voice_status_dict, push_state
+from jarvis.ui.desktop import HudBridge, push_state, voice_status_dict
 from jarvis.ui.state_bridge import StateBridge, UiState, UiVoiceState
 from tests._fakes import FakeLlmClient
 
@@ -137,7 +137,7 @@ class TestVoiceSurface:
         assert bridge.voice_status()["keyword"] == "你好小夜"
 
     def test_voice_status_dict_survives_an_unexpected_object(self) -> None:
-        assert _voice_status_dict(object()) == {"phase": "off", "detail": "", "keyword": ""}
+        assert voice_status_dict(object()) == {"phase": "off", "detail": "", "keyword": ""}
 
 
 class TestChatSurface:

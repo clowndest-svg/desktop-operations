@@ -288,6 +288,9 @@ def test_pyinstaller_spec_ships_the_web_bundle() -> None:
     in ``datas`` or the exe starts and shows nothing but a build hint.
     """
     spec = (REPO_ROOT / "packaging" / "jarvis.spec").read_text(encoding="utf-8")
+    # Comments explain why a line is gone; they must not be what a test reads as
+    # "still there". Prose is checked by a human, code by this test.
+    code = "\n".join(line for line in spec.splitlines() if not line.lstrip().startswith("#"))
 
     assert (
         '"jarvis.ui.web"' in spec or '"jarvis", "ui", "web"' in spec
@@ -296,4 +299,12 @@ def test_pyinstaller_spec_ships_the_web_bundle() -> None:
     assert os.path.isfile(REPO_ROOT / "packaging" / "entry.py"), "the frozen entry point is missing"
     # funasr resolves model classes through an import-time registry; without every
     # submodule collected the frozen build fails with 'NoneType' object is not callable.
-    assert 'collect_submodules("funasr")' in spec, "funasr submodules must be collected"
+    assert 'collect_submodules("funasr")' in code, "funasr submodules must be collected"
+    # Collecting the code is not enough: funasr fills the registry by walking its own
+    # package directory, which a frozen tree does not have. The sources must ship too.
+    assert 'find_spec("funasr")' in code, "the spec must ship funasr's source tree"
+    # Measured, not assumed: this call looks right and returns zero entries.
+    assert 'includes=["**/*.py"]' not in code, "collect_data_files does not ship .py sources"
+    assert os.path.isfile(
+        REPO_ROOT / "packaging" / "hooks" / "runtime_hook_funasr.py"
+    ), "the frozen funasr diagnostic hook is missing"

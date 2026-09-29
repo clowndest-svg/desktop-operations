@@ -49,7 +49,10 @@ python -m venv .venv
 .venv/Scripts/python -m jarvis
 .venv/Scripts/python -m jarvis --version
 .venv/Scripts/python -m jarvis --config my.yaml   # 显式指定用户配置文件
-.venv/Scripts/python -m jarvis --desktop          # 打开桌面聊天窗口(文字提问 + 语音回答)
+.venv/Scripts/python -m jarvis --desktop          # 打开桌面 HUD(文字问答 + 遥测 + 磁盘清理)
+.venv/Scripts/python -m jarvis --desktop --voice   # 同上,并允许页面申请麦克风(点「启用语音」才开,不常驻)
+#     不想记命令:双击仓库根目录的「启动小夜.bat」= 上面那条 --desktop --voice,
+#     缺 .venv 或缺界面产物会先说明缺什么,而不是闪退。
 
 # 4. 离线演示:用一段 16kHz/单声道/s16le 的 WAV 走通 VAD→ASR→LLM→TTS,
 #    不占麦克风、不需要唤醒词,回复音频写到 --out(默认 <输入名>_reply.wav)

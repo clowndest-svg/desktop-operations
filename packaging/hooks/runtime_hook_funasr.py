@@ -1,83 +1,91 @@
-"""PyInstaller runtime hook: finish funasr's model registration in a frozen app.
+"""PyInstaller runtime hook: keep a frozen funasr able to register its models.
 
-funasr registers model classes as a side effect of importing them, and its
-auto-registration discovers the modules by **walking the package directory on
-disk**. In a frozen build the modules live inside the PYZ archive, so the walk
-finds almost nothing: on this project's build the registry came up with 13 models
-instead of 48, and ``SenseVoiceSmall`` was not among them. The user-visible symptom
-is a red "语音不可用" and::
+funasr fills ``tables.model_classes`` / ``tokenizer_classes`` / ``frontend_classes``
+by importing its own submodules, and it discovers them by walking its package
+directory (``import_submodules`` in ``funasr/__init__.py``). A frozen build has no
+such directory, so the walk finds nothing and ``AutoModel`` later fails as
+``TypeError: 'NoneType' object is not callable`` -- an error that names no module
+and no fix. The spec ships ``funasr/**/*.py`` alongside the PYZ so the walk works;
+this hook checks that it actually did.
 
-    RuntimeError: model 'SenseVoiceSmall' is not registered
+Two things happen here, both cheap:
 
-Importing the modules explicitly restores the registry. Failures are written to
-``<data>/logs/funasr-hook.log`` rather than swallowed: this is a windowed app, so
-stdout goes nowhere, and a hook that quietly skips a broken import is exactly the
-kind of defect that costs an afternoon.
+1. ``inspect.getsource`` / ``getsourcelines`` are wrapped so a missing source file
+   returns empty text instead of raising. The shipped tree should cover every
+   module, but a decorator that cannot read its source should degrade to empty
+   metadata rather than drop a class from the registry.
+2. The bundle is inspected for the funasr source tree and the answer is written to
+   ``<data>/logs/funasr-hook.log``. This is a windowed app: stdout goes nowhere,
+   and a hook that swallows its own diagnosis is how the next regression becomes
+   another afternoon of guessing.
+
+funasr is deliberately *not* imported here. Its discovery imports roughly three
+hundred modules, and doing that at bootstrap would delay the window for every
+launch to serve a feature most launches never open. The import happens when the
+user enables voice, inside the phase the HUD already labels 加载中.
 """
 
 from __future__ import annotations
 
-import importlib
+import inspect
 import os
+import sys
 
-# Everything SenseVoice needs, plus the fallbacks the configuration can select.
-PREFERRED = (
-    "funasr.models.sense_voice.model",
-    "funasr.models.sense_voice.encoder",
-    "funasr.models.sense_voice.decoder",
-    "funasr.models.sense_voice.tokenizer",
-    "funasr.models.paraformer.model",
-    "funasr.models.paraformer.encoder",
-    "funasr.models.paraformer.decoder",
-    "funasr.models.transformer.model",
-    "funasr.models.ct_transformer.model",
-    "funasr.models.fsmn_vad_streaming.model",
-    "funasr.models.e2e_asr_transformer",
-    "funasr.frontends.default",
-)
-
-_FAILURES: list[str] = []
-_IMPORTED = 0
+_SOURCE_FALLBACKS: list[str] = []
+_RAW_GETSOURCE = inspect.getsource
+_RAW_GETLINES = inspect.getsourcelines
 
 
-def _try(name: str) -> bool:
-    """Import one module, recording why it failed instead of hiding it."""
-    global _IMPORTED
+def _label(obj: object) -> str:
+    return getattr(obj, "__qualname__", None) or getattr(obj, "__name__", None) or repr(obj)[:60]
+
+
+def _safe_getsource(obj: object) -> str:
+    """``getsource`` is allowed to fail in a frozen build; empty text is not fatal."""
     try:
-        importlib.import_module(name)
-    except Exception as exc:  # optional dependency; report it, never swallow silently
-        _FAILURES.append(f"{name}: {type(exc).__name__}: {exc}")
-        return False
-    _IMPORTED += 1
-    return True
+        return _RAW_GETSOURCE(obj)
+    except OSError:
+        _SOURCE_FALLBACKS.append(_label(obj))
+        return ""
 
 
-for _name in PREFERRED:
-    _try(_name)
+def _safe_getsourcelines(obj: object) -> tuple[list[str], int]:
+    try:
+        return _RAW_GETLINES(obj)
+    except OSError:
+        _SOURCE_FALLBACKS.append(_label(obj))
+        return [], 0
 
-# Belt and braces: sweep whatever *is* importable under funasr.models so a future
-# engine change does not silently come back broken. The modules are already in the
-# archive; this only runs their @tables.register decorators.
-try:
-    import pkgutil
 
-    import funasr.models as _models
+inspect.getsource = _safe_getsource  # type: ignore[assignment]
+inspect.getsourcelines = _safe_getsourcelines  # type: ignore[assignment]
 
-    for _info in pkgutil.walk_packages(_models.__path__, prefix="funasr.models."):
-        _try(_info.name)
-except Exception as _exc:  # the sweep is a bonus; its failure is not fatal
-    _FAILURES.append(f"funasr.models sweep: {type(_exc).__name__}: {_exc}")
 
-try:
-    from funasr.register import tables
+def _funasr_source_tree() -> tuple[str, int]:
+    """Return ``(directory, number of .py files)`` for the shipped funasr sources."""
+    root = getattr(sys, "_MEIPASS", None)
+    if not root:
+        return "", -1  # running from source: the real package directory is on disk
+    directory = os.path.join(root, "funasr")
+    if not os.path.isdir(directory):
+        return directory, 0
+    count = 0
+    for _dirpath, _names, filenames in os.walk(directory):
+        count += sum(1 for name in filenames if name.endswith(".py"))
+    return directory, count
 
-    _registered = "SenseVoiceSmall" in getattr(tables, "model_classes", {})
-except Exception as _exc:
-    _registered = False
-    _FAILURES.append(f"registry probe: {type(_exc).__name__}: {_exc}")
 
-lines = [f"imported={_IMPORTED} SenseVoiceSmall_registered={_registered} failures={len(_FAILURES)}"]
-lines.extend("  " + entry for entry in _FAILURES[:12])
+_source_dir, _source_count = _funasr_source_tree()
+lines = [
+    f"frozen={getattr(sys, 'frozen', False)} funasr_py_files={_source_count} "
+    f"source_dir={_source_dir or '(not frozen)'}"
+]
+if _source_count == 0:
+    lines.append(
+        "  funasr source tree is MISSING from the bundle: its registry will be "
+        "empty and AutoModel will fail with \"'NoneType' object is not callable\""
+    )
+
 report = "\n".join(lines)
 
 print(f"[jarvis][funasr hook] {report}", flush=True)

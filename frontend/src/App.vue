@@ -109,7 +109,9 @@ onBeforeUnmount(() => {
   min-height: 0;
   display: grid;
   grid-template-columns: 260px minmax(0, 1fr) 320px;
-  grid-template-rows: minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, 0.95fr);
+  /* 清理面板要能滚几百行，所以给它最大的一份；趋势图和对话各占一屏的零头。
+     之前是 1.1/1/0.95，清理反而分到最小，590 项只露出 1-2 行。 */
+  grid-template-rows: minmax(0, 1fr) minmax(0, 0.9fr) minmax(0, 1.5fr);
   gap: 12px;
   padding: 12px 16px 16px;
 }
