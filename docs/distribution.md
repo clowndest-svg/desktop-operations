@@ -141,6 +141,33 @@ python -m jarvis --desktop
 - 配置模板里只有厂商公网端点（deepseek/openai/moonshot/dashscope），
   **不含任何私有网关地址和密钥**；私有网关在未跟踪的本地 `config.yaml` 里。
 
+### 9.1 同步 main → public-main 的固定配方（2026-10-02 实测）
+
+**为什么要有配方**：第一次做这件事时，`git checkout main -- .` 把 10 个
+`commercial/` 文件（报价、需求确认单、文案）一并搬进了公开分支的索引，
+差一步就推到公网。**这类事故只能靠机器校验挡住，不能靠人记住。**
+
+```bash
+# 1) 用独立 worktree，绝不在共享工作树里切分支
+git worktree add ../xiaoye-public public-main && cd ../xiaoye-public
+git checkout main -- .
+git rm -r --cached commercial            # 关键：checkout 会把 commercial 带进来
+echo 'commercial/' >> .gitignore && git add .gitignore
+# 清掉"只在 public 存在"的孤儿（checkout 不会删除 main 里已删的文件）
+git diff --name-status $(git write-tree) main | awk '/^D/{print $2}' | xargs -r -n1 git rm -q --cached
+
+# 2) 三道机器校验，任何一条不过就不许 push
+git ls-tree -r --name-only HEAD | grep -c '^commercial/'   # 必须是 0
+git grep -I -c -E 'sk-[A-Za-z0-9]{16,}' HEAD -- . | wc -l  # 必须是 0
+git diff --name-status HEAD main | grep -v '^A'            # 必须只有 M .gitignore
+
+# 3) 推，然后回读远端确认（别只信本地）
+git push origin HEAD:main && git fetch -q origin && git rev-parse --short origin/main
+```
+
+第三条校验最值钱：它证明公开树**严格等于** main 减 commercial，
+而不是"我看着应该没带进去"。
+
 ## 10. 交付前自检清单（复制这一串给客户或自己跑）
 
 ```powershell
