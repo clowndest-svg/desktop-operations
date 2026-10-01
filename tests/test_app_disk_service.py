@@ -149,3 +149,78 @@ class TestJunkItemRebuild:
         assert item.category == ""
         assert item.member_count == 1
         assert item.aggregates_loose_files is False
+
+
+class TestDigest:
+    """The text the 协助分析 button hands to the model.
+
+    Pinned because it is the only place a scan becomes something a model can read,
+    and a digest that silently says nothing is indistinguishable from a model that
+    had nothing to say.
+    """
+
+    @staticmethod
+    def _two_groups(tmp_path: Path, root: Path) -> DiskService:
+        cache = tmp_path / "cache"
+        cache.mkdir()
+        (cache / "big.bin").write_bytes(b"y" * 4096)
+        old = time.time() - 60.0
+        os.utime(cache / "big.bin", (old, old))
+        return DiskService(
+            lambda: DiskCleaner(
+                audit_log=tmp_path / "audit.jsonl",
+                sources={"浏览器缓存": (cache,), "临时文件": (root,)},
+                protected_dirs=(),
+            )
+        )
+
+    def test_nothing_to_say_before_the_first_scan(self, service: DiskService) -> None:
+        assert service.digest() == ""
+        assert service.last_plan is None
+
+    def test_a_failed_scan_produces_no_digest(self, tmp_path: Path) -> None:
+        service = DiskService(lambda: DiskCleaner(audit_log=tmp_path / "a.jsonl", sources={}))
+
+        assert service.plan().error
+        assert service.digest() == ""
+
+    def test_digest_names_every_category_and_the_largest_rows(
+        self, tmp_path: Path, root: Path
+    ) -> None:
+        service = self._two_groups(tmp_path, root)
+        service.start()
+        service.plan()
+
+        text = service.digest()
+
+        assert "浏览器缓存" in text
+        assert "临时文件" in text
+        assert "最大的" in text
+        # 4 KB against 32-byte leftovers: the ordering is the point of the digest, so
+        # a row list that came out alphabetical would still "contain" everything.
+        assert text.index("big.bin") < text.index("tmp0000")
+
+    def test_digest_counts_protected_skips_rather_than_hiding_them(
+        self, tmp_path: Path, root: Path
+    ) -> None:
+        service = DiskService(
+            lambda: DiskCleaner(
+                audit_log=tmp_path / "audit.jsonl",
+                sources={"临时文件": (root,)},
+                protected_dirs=(root,),
+            )
+        )
+        service.start()
+        plan = service.plan()
+
+        assert plan.skipped_protected > 0
+        assert str(plan.skipped_protected) in service.digest()
+
+    def test_stop_forgets_the_scan_it_was_describing(self, service: DiskService) -> None:
+        service.start()
+        service.plan()
+        assert service.digest()
+
+        service.stop()
+
+        assert service.digest() == ""

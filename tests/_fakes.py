@@ -138,12 +138,15 @@ class FakeTts:
 class FakeGraph:
     """Stands in for :class:`~jarvis.orchestration.graph.AgentGraph`."""
 
-    def __init__(self, reply: str = "好的") -> None:
+    def __init__(self, reply: str = "好的", raises: Exception | None = None) -> None:
         self._reply = reply
+        self._raises = raises
         self.calls: list[tuple[str, Any]] = []
 
     def run(self, user_text: str, history: list[ChatMessage] | None = None) -> str:
         self.calls.append((user_text, history))
+        if self._raises is not None:
+            raise self._raises
         return self._reply
 
 

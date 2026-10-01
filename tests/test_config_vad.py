@@ -22,7 +22,7 @@ def test_defaults_validate() -> None:
     assert section.engine == "silero"
     assert section.threshold == pytest.approx(0.5)
     assert section.min_speech_ms == 250
-    assert section.max_silence_ms == 500
+    assert section.max_silence_ms == 800
     assert section.speech_pad_ms == 100
     assert section.max_speech_ms == 0
 

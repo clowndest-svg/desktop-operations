@@ -8,12 +8,15 @@ stuck on "loading" or holding a microphone nobody asked for.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 
+from jarvis.app.preferences import VOICE_AUTO_ARM, Preferences
 from jarvis.app.voice_service import VoiceService
 from jarvis.core.events import VOICE_STATUS_KIND, PipelineEvent, VoicePhase
 
@@ -25,8 +28,11 @@ class FakeLoop:
         self.starts = 0
         self.stops = 0
         self.talks = 0
+        self.read_aloud: list[str] = []
+        self.reading_stops = 0
         self._alive = alive
         self._accepts_talk = accepts_talk
+        self._accepts_reading = True
 
     @property
     def listening(self) -> bool:
@@ -41,6 +47,14 @@ class FakeLoop:
     def speak_now(self) -> bool:
         self.talks += 1
         return self._accepts_talk
+
+    def speak_text(self, text: str) -> bool:
+        self.read_aloud.append(text)
+        return self._accepts_reading
+
+    def stop_speaking(self) -> bool:
+        self.reading_stops += 1
+        return self._accepts_reading and bool(self.read_aloud)
 
     def set_alive(self, alive: bool) -> None:
         """Simulate the capture thread going away, or coming back."""
@@ -456,3 +470,255 @@ class TestTalk:
         assert loop.talks == 1
         assert status.phase is VoicePhase.RUNNING
         assert "正在" in status.detail, "busy is the one case with no other visible signal"
+
+
+class TestRemembersConsent:
+    """The press that opened the microphone is remembered; nothing else opens it.
+
+    These six cases are the whole privacy argument for auto-arming, so each one
+    names the failure it is holding back rather than just the value it returns.
+    """
+
+    def test_pressing_enable_records_the_choice(
+        self, tmp_path: Path, events: list[PipelineEvent]
+    ) -> None:
+        store = Preferences(tmp_path / "preferences.json")
+        service = _service(lambda _on_event: FakeLoop(), events, preferences=store)
+        service.enable()
+        assert Preferences(store.path).flag(VOICE_AUTO_ARM) is True
+
+    def test_releasing_the_microphone_forgets_it(
+        self, tmp_path: Path, events: list[PipelineEvent]
+    ) -> None:
+        store = Preferences(tmp_path / "preferences.json")
+        service = _service(lambda _on_event: FakeLoop(), events, preferences=store)
+        service.enable()
+        _wait_until(lambda: service.status.phase is VoicePhase.RUNNING)
+        service.mute()
+        assert Preferences(store.path).flag(VOICE_AUTO_ARM) is False
+
+    def test_a_refused_press_is_not_recorded_as_consent(
+        self, tmp_path: Path, events: list[PipelineEvent]
+    ) -> None:
+        """A denied button must not quietly arm the next launch."""
+        store = Preferences(tmp_path / "preferences.json")
+        service = _service(
+            lambda _on_event: FakeLoop(),
+            events,
+            preferences=store,
+            permission=lambda: False,
+        )
+        service.enable()
+        assert service.status.phase is VoicePhase.FAILED
+        assert Preferences(store.path).flag(VOICE_AUTO_ARM) is False
+
+    def test_closing_the_window_leaves_the_choice_alone(
+        self, tmp_path: Path, events: list[PipelineEvent]
+    ) -> None:
+        """Quitting is not the same person saying they do not want voice."""
+        store = Preferences(tmp_path / "preferences.json")
+        service = _service(lambda _on_event: FakeLoop(), events, preferences=store)
+        service.enable()
+        _wait_until(lambda: service.status.phase is VoicePhase.RUNNING)
+        service.stop()
+        assert Preferences(store.path).flag(VOICE_AUTO_ARM) is True
+
+    def test_remembered_choice_reopens_the_microphone_on_the_next_launch(
+        self, tmp_path: Path, events: list[PipelineEvent]
+    ) -> None:
+        path = tmp_path / "preferences.json"
+        first = Preferences(path)
+        _service(lambda _on_event: FakeLoop(), events, preferences=first).enable()
+
+        # A new process would build a new service; the file is the only thing shared.
+        loops: list[FakeLoop] = []
+
+        def build(_on_event: Callable[[PipelineEvent], None]) -> FakeLoop:
+            loop = FakeLoop()
+            loops.append(loop)
+            return loop
+
+        second = _service(build, events, preferences=Preferences(path))
+        assert second.status.phase is VoicePhase.OFF, "start() must still open nothing"
+        status = second.arm_if_remembered()
+        assert status is not None and status.phase is VoicePhase.LOADING
+        assert _wait_until(lambda: second.status.phase is VoicePhase.RUNNING)
+        assert len(loops) == 1
+
+    def test_no_choice_recorded_means_no_microphone(
+        self, tmp_path: Path, events: list[PipelineEvent]
+    ) -> None:
+        built = 0
+
+        def build(_on_event: Callable[[PipelineEvent], None]) -> FakeLoop:
+            nonlocal built
+            built += 1
+            return FakeLoop()
+
+        service = _service(
+            build,
+            events,
+            preferences=Preferences(tmp_path / "preferences.json"),
+        )
+        assert service.arm_if_remembered() is None
+        assert built == 0
+        assert service.status.phase is VoicePhase.OFF
+
+    def test_a_remembered_choice_stays_silent_when_the_gate_is_closed(
+        self, tmp_path: Path, events: list[PipelineEvent], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Refusing to arm is not a failure to report on the status bar."""
+        store = Preferences(tmp_path / "preferences.json")
+        store.set_flag(VOICE_AUTO_ARM, True)
+        built = 0
+
+        def build(_on_event: Callable[[PipelineEvent], None]) -> FakeLoop:
+            nonlocal built
+            built += 1
+            return FakeLoop()
+
+        service = _service(build, events, preferences=store, permission=lambda: False)
+        with caplog.at_level(logging.WARNING):
+            assert service.arm_if_remembered() is None
+        assert built == 0
+        assert (
+            service.status.phase is VoicePhase.OFF
+        ), "a launch nobody asked to be rejected must not light the panel red"
+        assert caplog.text, "staying off by itself is too quiet to debug"
+
+    def test_without_a_store_the_feature_is_simply_absent(
+        self, events: list[PipelineEvent]
+    ) -> None:
+        service = _service(lambda _on_event: FakeLoop(), events)
+        assert service.arm_if_remembered() is None
+
+
+class TestSupersededBoot:
+    """A load that finishes after the operator moved on must not speak for the panel.
+
+    The bug these pin is the one that makes 「启用语音」 unpressable for the rest of a
+    session: the status a boot thread reports used to be unconditional, so a press
+    that arrived while an older load was still running could be answered by *that*
+    thread -- installing a microphone the window had already muted, or leaving the
+    light on 「加载中」 after the thread that would have changed it had nothing left
+    to report.
+    """
+
+    def test_a_stack_built_after_a_mute_is_released_not_installed(
+        self, events: list[PipelineEvent]
+    ) -> None:
+        gate = threading.Event()
+        built: list[FakeLoop] = []
+
+        def build(_on_event: Callable[[PipelineEvent], None]) -> FakeLoop:
+            gate.wait(timeout=5.0)
+            loop = FakeLoop()
+            built.append(loop)
+            return loop
+
+        service = _service(build, events)
+        service.enable()
+        assert service.status.phase is VoicePhase.LOADING
+        service.mute()
+        gate.set()
+
+        assert _wait_until(
+            lambda: bool(built) and built[0].stops > 0
+        ), "the late stack kept the microphone: nothing told it to let go"
+        # Waited for rather than asserted outright: the teardown that releases the
+        # late stack runs on the boot thread, so the phase lands in MUTED whenever
+        # that thread gets to it.
+        assert _wait_until(
+            lambda: service.status.phase is VoicePhase.MUTED
+        ), "a mute during loading must stay muted once the stack shows up"
+        assert all(event.text != "running" for event in events if event.kind == "voice_status")
+
+    def test_a_load_still_running_is_not_duplicated_by_a_second_press(
+        self, events: list[PipelineEvent]
+    ) -> None:
+        """The other half: 「还在加载」 is a correct answer, and must stay one."""
+        gate = threading.Event()
+        built = 0
+
+        def build(_on_event: Callable[[PipelineEvent], None]) -> FakeLoop:
+            nonlocal built
+            gate.wait(timeout=5.0)
+            built += 1
+            return FakeLoop()
+
+        service = _service(build, events)
+        service.enable()
+        first = service.enable()
+        assert first.phase is VoicePhase.LOADING
+        gate.set()
+        assert _wait_until(lambda: built == 1)
+        assert service.status.phase is VoicePhase.RUNNING
+
+
+class TestReadAloud:
+    """「打字也朗读」 asks the same stack that answers spoken turns."""
+
+    def test_a_sentence_is_handed_to_the_running_stack(self, events: list[PipelineEvent]) -> None:
+        loop = FakeLoop()
+        service = _service(lambda _on_event: loop, events)
+        service.enable()
+        assert _wait_until(lambda: service.status.phase is VoicePhase.RUNNING)
+
+        assert service.speak_text("你好，我在。") is True
+        assert loop.read_aloud == ["你好，我在。"]
+
+    def test_nothing_is_spoken_before_the_stack_exists(self, events: list[PipelineEvent]) -> None:
+        loop = FakeLoop()
+        service = _service(lambda _on_event: loop, events)
+        assert service.speak_text("你好") is False
+        assert loop.read_aloud == []
+
+    def test_blank_text_is_not_a_request(self, events: list[PipelineEvent]) -> None:
+        loop = FakeLoop()
+        service = _service(lambda _on_event: loop, events)
+        service.enable()
+        assert _wait_until(lambda: service.status.phase is VoicePhase.RUNNING)
+        assert service.speak_text("   ") is False
+        assert loop.read_aloud == []
+
+    def test_a_failed_read_aloud_never_reaches_the_caller(
+        self, events: list[PipelineEvent]
+    ) -> None:
+        """The answer is already on screen; a voice that throws must not take it away."""
+
+        class Throwing(FakeLoop):
+            def speak_text(self, text: str) -> bool:
+                raise RuntimeError("合成断了")
+
+        loop = Throwing()
+        service = _service(lambda _on_event: loop, events)
+        service.enable()
+        assert _wait_until(lambda: service.status.phase is VoicePhase.RUNNING)
+        assert service.speak_text("你好") is False
+
+    def test_a_read_aloud_does_not_change_the_phase(self, events: list[PipelineEvent]) -> None:
+        """Availability is one axis; "is it making sound" is another, and merging
+        them is how the status light starts meaning two things at once."""
+        loop = FakeLoop()
+        service = _service(lambda _on_event: loop, events)
+        service.enable()
+        assert _wait_until(lambda: service.status.phase is VoicePhase.RUNNING)
+        before = len(events)
+        service.speak_text("你好")
+        assert service.status.phase is VoicePhase.RUNNING
+        assert len(events) == before
+
+    def test_stopping_a_read_aloud_reaches_the_stack(self, events: list[PipelineEvent]) -> None:
+        loop = FakeLoop()
+        service = _service(lambda _on_event: loop, events)
+        service.enable()
+        assert _wait_until(lambda: service.status.phase is VoicePhase.RUNNING)
+        service.speak_text("你好")
+        assert service.stop_speaking() is True
+        assert loop.reading_stops == 1
+
+    def test_stopping_when_nothing_is_saying_anything_is_false(
+        self, events: list[PipelineEvent]
+    ) -> None:
+        service = _service(lambda _on_event: FakeLoop(), events)
+        assert service.stop_speaking() is False

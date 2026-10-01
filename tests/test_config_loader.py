@@ -67,6 +67,15 @@ class TestEnvOverrides:
         env = {"JARVIS_HOME": str(tmp_path), "JARVIS_CONFIG": str(tmp_path / "c.yaml")}
         assert env_overrides(env) == {}
 
+    def test_launcher_helper_variables_are_not_config_keys(self) -> None:
+        """``启动小夜.bat`` exports JARVIS_ROOT as the base for its cache paths.
+
+        It is a shell helper, not a setting, and reading it as one made the launcher
+        fail with ``unknown key 'root'`` before a window ever opened.
+        """
+        env = {"JARVIS_ROOT": "E:\\BianChengGongJu\\JarvisData", "JARVIS_WEBSOCKET__PORT": "9"}
+        assert env_overrides(env) == {"websocket": {"port": 9}}
+
     def test_malformed_variable_name_fails_fast(self) -> None:
         with pytest.raises(ConfigurationError):
             env_overrides({"JARVIS_LOGGING__": "x"})

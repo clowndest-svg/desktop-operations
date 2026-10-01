@@ -1,15 +1,78 @@
+/*
+ * Design tokens.
+ *
+ * The old skin put a 1px cyan rule and four corner brackets on every panel. That
+ * is the 2015 costume-IRON-MAN shorthand, and it is the main reason the window
+ * read as "generic dashboard": when every surface is decorated identically,
+ * nothing is the focal point. Depth here comes from stacked translucency, a single
+ * semantic rim per panel, and light that falls off — not from more line-work.
+ */
 :root {
-  --hud-bg: #04070d;
-  --hud-panel: rgba(9, 20, 33, 0.72);
+  --hud-bg-deep: #010306;
   --hud-line: rgba(77, 216, 255, 0.22);
   --hud-glow: rgba(77, 216, 255, 0.55);
   --hud-cyan: #4dd8ff;
   --hud-amber: #ffb547;
   --hud-red: #ff5d5d;
   --hud-green: #46e6a8;
+  --hud-violet: #9d7cff;
   --hud-dim: #6b8ba4;
   --hud-text: #d7eefc;
   --hud-mono: 'Consolas', 'Cascadia Mono', 'SF Mono', Menlo, monospace;
+
+  /* Elevation: two layers only. More is indistinguishable at this window size. */
+  --hud-elev-1: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 8px 26px rgba(0, 0, 0, 0.5);
+  --hud-elev-2: 0 1px 0 rgba(255, 255, 255, 0.06) inset, 0 18px 48px rgba(0, 0, 0, 0.62);
+  --hud-rim: rgba(77, 216, 255, 0.5);
+  --hud-scrim: linear-gradient(180deg, rgba(14, 32, 52, 0.82), rgba(5, 11, 20, 0.74));
+
+  /*
+   * Corners and control height, as tokens, because the complaint these close was
+   * "一排一排的要大小一致": the same row had a 22px chip, a 26px button and a 24px
+   * select next to it, each sized by whatever padding its own component chose.
+   * One height and one radius per class of thing is the whole fix.
+   */
+  --hud-radius: 12px;
+  --hud-pill: 999px;
+  --hud-control-h: 26px;
+}
+
+/*
+ * Skins. Only the hue-carrying tokens move: geometry, elevation and spacing are
+ * identical in every skin, because a theme that also shifts layout is a different
+ * interface pretending to be a colour choice. The 3D panel reads the same palette
+ * from frontend/src/theme.ts, so the figure and the frame change together.
+ */
+:root[data-skin='blue'] {
+  --hud-line: rgba(47, 143, 255, 0.24);
+  --hud-glow: rgba(47, 143, 255, 0.55);
+  --hud-cyan: #35a7ff;
+  --hud-rim: rgba(47, 143, 255, 0.55);
+  --hud-text: #dcecff;
+  --hud-dim: #6f87a8;
+}
+
+:root[data-skin='violet'] {
+  --hud-line: rgba(157, 124, 255, 0.24);
+  --hud-glow: rgba(157, 124, 255, 0.5);
+  --hud-cyan: #a48bff;
+  --hud-rim: rgba(157, 124, 255, 0.5);
+  --hud-text: #e6defc;
+  --hud-dim: #8579a8;
+}
+
+:root[data-skin='blue'] .hud-backdrop {
+  background:
+    radial-gradient(120% 90% at 22% -10%, rgba(16, 74, 148, 0.55), transparent 62%),
+    radial-gradient(90% 80% at 100% 110%, rgba(10, 44, 96, 0.4), transparent 60%),
+    var(--hud-bg-deep);
+}
+
+:root[data-skin='violet'] .hud-backdrop {
+  background:
+    radial-gradient(120% 90% at 22% -10%, rgba(64, 34, 128, 0.5), transparent 62%),
+    radial-gradient(90% 80% at 100% 110%, rgba(30, 16, 72, 0.45), transparent 60%),
+    var(--hud-bg-deep);
 }
 
 * {
@@ -23,67 +86,120 @@ body {
   user-select: none;
 }
 
-/* Faint engineering grid + scanline: reads as "instrument", not "web page". */
+/*
+ * Backdrop: a light source rather than graph paper. The grid stays but fades out
+ * toward the edges so the centre reads deeper, and one slow sweep supplies the
+ * only ambient motion — a static screen feels dead, a busy one feels cheap.
+ */
 .hud-backdrop {
   position: fixed;
   inset: 0;
   pointer-events: none;
+  background:
+    radial-gradient(120% 90% at 22% -10%, rgba(28, 78, 122, 0.5), transparent 62%),
+    radial-gradient(90% 80% at 100% 110%, rgba(58, 34, 96, 0.34), transparent 60%),
+    var(--hud-bg-deep);
+}
+
+.hud-backdrop::before {
+  content: '';
+  position: absolute;
+  inset: 0;
   background-image:
-    linear-gradient(rgba(77, 216, 255, 0.045) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(77, 216, 255, 0.045) 1px, transparent 1px);
-  background-size: 46px 46px;
+    linear-gradient(rgba(77, 216, 255, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(77, 216, 255, 0.05) 1px, transparent 1px);
+  background-size: 52px 52px;
+  /* The mask is what stops it looking like a spreadsheet: the grid dissolves. */
+  -webkit-mask-image: radial-gradient(120% 100% at 50% 40%, #000 20%, transparent 78%);
+  mask-image: radial-gradient(120% 100% at 50% 40%, #000 20%, transparent 78%);
 }
 
 .hud-backdrop::after {
   content: '';
   position: absolute;
-  inset: 0;
-  background: repeating-linear-gradient(
-    to bottom,
-    transparent 0,
-    transparent 3px,
-    rgba(0, 0, 0, 0.16) 3px,
-    rgba(0, 0, 0, 0.16) 4px
+  inset: -30% -60%;
+  background: linear-gradient(
+    104deg,
+    transparent 44%,
+    rgba(120, 210, 255, 0.05) 49%,
+    rgba(120, 210, 255, 0.09) 50%,
+    transparent 56%
   );
-  opacity: 0.5;
+  animation: hud-sweep 16s linear infinite;
 }
 
+@keyframes hud-sweep {
+  from {
+    transform: translateX(-28%);
+  }
+  to {
+    transform: translateX(28%);
+  }
+}
+
+/*
+ * No ``backdrop-filter`` here. It was measured to buy nothing: the only thing
+ * behind a panel is a smooth radial gradient and a 5%-alpha grid, and under a
+ * 0.82-alpha scrim a 6px blur is indistinguishable from no blur -- while costing a
+ * fresh backdrop snapshot for every panel, every frame the sweep light moves.
+ * Depth comes from the scrim and the shadow instead.
+ */
 .hud-panel {
   position: relative;
-  background: var(--hud-panel);
-  border: 1px solid var(--hud-line);
-  backdrop-filter: blur(2px);
+  background: var(--hud-scrim);
+  border: 1px solid rgba(77, 216, 255, 0.13);
+  border-radius: var(--hud-radius);
+  /* Rounded corners only mean something if the contents are clipped to them:
+     the 3D canvas and the scrolling lists are square. */
+  overflow: hidden;
+  box-shadow: var(--hud-elev-1);
 }
 
-/* Corner brackets — the cheapest thing that makes a box look like a HUD. */
-.hud-panel::before,
-.hud-panel::after {
+/*
+ * One rim per panel, tinted by what the panel is about. It replaces the brackets:
+ * a 1px light-catching edge along the top does more for "instrument" than four
+ * drawn corners, and it gives the eye a way to tell the panels apart.
+ */
+.hud-panel::before {
   content: '';
   position: absolute;
-  width: 12px;
-  height: 12px;
-  border-color: var(--hud-glow);
+  inset: 0 0 auto 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--hud-rim) 18%, var(--hud-rim) 62%, transparent);
+  opacity: 0.75;
   pointer-events: none;
 }
 
-.hud-panel::before {
-  top: -1px;
-  left: -1px;
-  border-top: 2px solid;
-  border-left: 2px solid;
+/*
+ * Keyed off the classes the components actually put on the element
+ * (``hud-panel chat``, ``hud-panel clean`` …). An earlier revision defined
+ * ``.hud-panel--chat`` and friends, which nothing rendered, so five of the six
+ * panels silently kept the same cyan edge -- the exact uniformity this whole
+ * redesign exists to remove.
+ */
+.rings {
+  --hud-rim: rgba(77, 216, 255, 0.62);
 }
-
-.hud-panel::after {
-  right: -1px;
-  bottom: -1px;
-  border-right: 2px solid;
-  border-bottom: 2px solid;
+.trend {
+  --hud-rim: rgba(77, 216, 255, 0.34);
+}
+.disk {
+  --hud-rim: rgba(255, 181, 71, 0.4);
+}
+.procs {
+  --hud-rim: rgba(107, 139, 164, 0.5);
+}
+.chat {
+  --hud-rim: rgba(157, 124, 255, 0.6);
+}
+.clean {
+  --hud-rim: rgba(255, 181, 71, 0.5);
 }
 
 .hud-title {
-  font-size: 11px;
-  letter-spacing: 0.22em;
-  color: var(--hud-cyan);
+  font-size: 10.5px;
+  letter-spacing: 0.26em;
+  color: rgba(120, 205, 245, 0.92);
   text-transform: uppercase;
   display: flex;
   align-items: center;
@@ -94,12 +210,33 @@ body {
   content: '';
   flex: 1;
   height: 1px;
-  background: linear-gradient(90deg, var(--hud-line), transparent);
+  background: linear-gradient(90deg, rgba(77, 216, 255, 0.24), transparent);
 }
 
 .hud-num {
   font-family: var(--hud-mono);
   font-variant-numeric: tabular-nums;
+}
+
+/*
+ * Display numerals. Everything used to sit at 11-12px, so the screen had no
+ * hierarchy to read — you had to hunt for the number that mattered.
+ */
+.hud-display {
+  font-family: var(--hud-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 30px;
+  line-height: 1;
+  letter-spacing: -0.01em;
+  color: var(--hud-text);
+  text-shadow: 0 0 22px rgba(77, 216, 255, 0.28);
+}
+
+.hud-unit {
+  font-size: 11px;
+  color: var(--hud-dim);
+  letter-spacing: 0.08em;
+  margin-left: 2px;
 }
 
 .hud-label {
@@ -109,23 +246,46 @@ body {
 }
 
 .hud-btn {
-  background: rgba(77, 216, 255, 0.08);
-  border: 1px solid var(--hud-line);
+  /*
+   * A button whose label breaks mid-word is how the console header ended up with
+   * 「按/一/下/说」 stacked down four lines: buttons sit in flex rows, so they get
+   * squeezed before the text does, and Chinese has no spaces to break on -- every
+   * character is a legal line end.
+   */
+  white-space: nowrap;
+  flex: none;
+  /*
+   * Height and radius are fixed here rather than left to each component's padding,
+   * because a row of controls that differ by 4px in height reads as a mistake even
+   * when every one of them is individually tidy.
+   */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--hud-control-h);
+  padding: 0 12px;
+  font-size: 11px;
+  background: rgba(77, 216, 255, 0.07);
+  border: 1px solid rgba(77, 216, 255, 0.2);
+  border-radius: var(--hud-pill);
   color: var(--hud-cyan);
-  padding: 5px 14px;
-  font-size: 12px;
   letter-spacing: 0.1em;
   cursor: pointer;
-  transition: background 0.16s, box-shadow 0.16s;
+  transition: background 0.16s, box-shadow 0.16s, border-color 0.16s, transform 0.08s;
 }
 
 .hud-btn:hover:not(:disabled) {
-  background: rgba(77, 216, 255, 0.2);
-  box-shadow: 0 0 12px rgba(77, 216, 255, 0.35);
+  background: rgba(77, 216, 255, 0.16);
+  border-color: rgba(77, 216, 255, 0.42);
+  box-shadow: 0 0 16px rgba(77, 216, 255, 0.24);
+}
+
+.hud-btn:active:not(:disabled) {
+  transform: translateY(1px);
 }
 
 .hud-btn:disabled {
-  opacity: 0.35;
+  opacity: 0.32;
   cursor: not-allowed;
 }
 
@@ -135,33 +295,133 @@ body {
   background: rgba(255, 93, 93, 0.08);
 }
 
+.hud-btn.danger:hover:not(:disabled) {
+  background: rgba(255, 93, 93, 0.18);
+  box-shadow: 0 0 16px rgba(255, 93, 93, 0.26);
+}
+
+/*
+ * Both places that use this are a choice that has to be legible at a glance: the
+ * settings 保存 button, and the day-range chip whose pressed state is the only
+ * signal about which window the numbers cover.
+ */
+.hud-btn--primary {
+  background: rgba(77, 216, 255, 0.24);
+  border-color: rgba(77, 216, 255, 0.6);
+  color: var(--hud-text);
+  box-shadow: 0 0 14px rgba(77, 216, 255, 0.2);
+}
+
+/*
+ * The fields that sit *between* those buttons — the model dropdown, the chat box,
+ * the settings inputs — get the same pill, or a row mixes one shape per control.
+ * Scoped to a class rather than to bare element selectors so a component can still
+ * style an odd control (the file input, a checkbox) without losing to specificity.
+ */
+.hud-field {
+  height: var(--hud-control-h);
+  padding: 0 10px;
+  border: 1px solid var(--hud-line);
+  border-radius: var(--hud-pill);
+  background: rgba(3, 9, 16, 0.8);
+  color: var(--hud-text);
+  font-size: 12px;
+  font-family: inherit;
+  outline: none;
+}
+
+.hud-field:focus {
+  border-color: rgba(77, 216, 255, 0.55);
+}
+
+.hud-field option {
+  background: #0a1220;
+  color: var(--hud-text);
+}
+
+/* Read-only indicators: the same box as a button, so one row has one height. */
+.hud-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--hud-control-h);
+  padding: 0 11px;
+  border: 1px solid var(--hud-line);
+  border-radius: var(--hud-pill);
+  background: rgba(77, 216, 255, 0.04);
+  white-space: nowrap;
+  flex: none;
+}
+
+.hud-chip--warn {
+  border-color: rgba(255, 181, 71, 0.45);
+  background: rgba(255, 181, 71, 0.07);
+}
+
+.hud-chip--warn .hud-label {
+  color: var(--hud-amber);
+}
+
+/*
+ * The pulse is a pseudo-element ring scaled and faded, not an animated
+ * ``box-shadow``: growing a blur radius is a paint the compositor cannot offload,
+ * and the running state keeps this lit for hours.
+ */
 @keyframes hud-pulse {
-  0%,
-  100% {
-    opacity: 1;
-    box-shadow: 0 0 0 0 rgba(77, 216, 255, 0.5);
+  from {
+    transform: scale(1);
+    opacity: 0.55;
   }
-  50% {
-    opacity: 0.65;
-    box-shadow: 0 0 0 7px rgba(77, 216, 255, 0);
+  to {
+    transform: scale(2.4);
+    opacity: 0;
   }
 }
 
 .hud-dot {
+  position: relative;
   width: 9px;
   height: 9px;
   border-radius: 50%;
   flex: none;
 }
 
+.hud-dot.live::before,
+.hud-dot.listening::before,
+.hud-dot.warn::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: currentColor;
+}
+
 .hud-dot.live {
+  color: var(--hud-cyan);
   background: var(--hud-cyan);
-  animation: hud-pulse 2.2s infinite;
 }
 
 .hud-dot.listening {
+  color: var(--hud-green);
   background: var(--hud-green);
-  animation: hud-pulse 0.9s infinite;
+}
+
+.hud-dot.warn {
+  color: var(--hud-amber);
+  background: var(--hud-amber);
+}
+
+.hud-dot.live::before {
+  animation: hud-pulse 2.2s ease-out infinite;
+}
+
+.hud-dot.listening::before {
+  animation: hud-pulse 0.9s ease-out infinite;
+}
+
+/* A state that needs attention without having failed: loading, or rate-limited. */
+.hud-dot.warn::before {
+  animation: hud-pulse 1.4s ease-out infinite;
 }
 
 .hud-dot.idle {
@@ -172,10 +432,22 @@ body {
   background: var(--hud-red);
 }
 
-/* A state that needs attention without having failed: loading, or rate-limited. */
-.hud-dot.warn {
-  background: var(--hud-amber);
-  animation: hud-pulse 1.4s infinite;
+/*
+ * Motion is decorative here, but the microphone indicator is not: an operator who
+ * cannot tell whether it is listening should not have animation choice taken away
+ * as a trade. The dot keeps its colour, only the pulsing stops.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .hud-backdrop::after {
+    animation: none;
+    opacity: 0;
+  }
+  .hud-dot.live::before,
+  .hud-dot.listening::before,
+  .hud-dot.warn::before {
+    animation: none;
+    opacity: 0;
+  }
 }
 
 ::-webkit-scrollbar {
@@ -184,6 +456,7 @@ body {
 
 ::-webkit-scrollbar-thumb {
   background: rgba(77, 216, 255, 0.3);
+  border-radius: 3px;
 }
 
 ::-webkit-scrollbar-track {

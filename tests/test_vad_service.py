@@ -245,6 +245,6 @@ def test_default_config_vad_is_disabled() -> None:
     assert config.vad.engine == "silero"
     assert config.vad.threshold == pytest.approx(0.5)
     assert config.vad.min_speech_ms == 250
-    assert config.vad.max_silence_ms == 500
+    assert config.vad.max_silence_ms == 800
     assert config.vad.speech_pad_ms == 100
     assert config.vad.max_speech_ms == 0

@@ -30,6 +30,9 @@ ENV_CONFIG_FILE: str = f"{ENV_PREFIX}CONFIG"
 USER_CONFIG_FILENAME: str = "config.yaml"
 """Name of the user override file inside ``<data root>/config``."""
 
+PREFERENCES_FILENAME: str = "preferences.json"
+"""Name of the remembered interface choices at the data root."""
+
 
 def default_data_dir(environ: Mapping[str, str] | None = None) -> Path:
     """Resolve the data root directory (see module docstring for the order).
@@ -106,6 +109,16 @@ class AppPaths:
         """Default location of the user override file."""
         return self.config_dir / USER_CONFIG_FILENAME
 
+    @property
+    def preferences_file(self) -> Path:
+        """Remembered interface choices (see :mod:`jarvis.app.preferences`).
+
+        Sits at the root rather than in ``config_dir``: ``config.yaml`` is an
+        operator-authored document, and a file the window writes on every click
+        must not live where somebody might be editing it.
+        """
+        return self.data_dir / PREFERENCES_FILENAME
+
     def ensure(self) -> None:
         """Create every directory of the layout (idempotent)."""
         for directory in (
@@ -122,6 +135,53 @@ class AppPaths:
 
 MODEL_CACHE_ENV_VARS: tuple[str, ...] = ("MODELSCOPE_CACHE", "HF_HOME", "TORCH_HOME")
 """Environment variables that decide where model weights are read from and written to."""
+
+
+BUNDLE_DATA_DIRNAME: str = "数据"
+"""Directory a packaged launch creates next to its own ``.exe``.
+
+The bundle lives on whichever drive the owner chose; putting the data beside it is
+how "do not fill the system drive" stops depending on somebody having set an
+environment variable correctly.
+"""
+
+
+def looks_like_an_existing_install(candidate: Path) -> bool:
+    """Does this directory hold something the owner would miss?
+
+    Mere existence is the wrong test, and this was wrong once: the funasr runtime
+    hook creates ``<data root>/logs`` for its own report, so a first-ever launch
+    already found a directory sitting there and every guard around it refused to
+    move. Only a config somebody wrote, or a database with something in it, counts.
+    """
+    if (candidate / "config" / USER_CONFIG_FILENAME).is_file():
+        return True
+    database = candidate / "database"
+    if not database.is_dir():
+        return False
+    try:
+        return any(database.glob("*.db"))
+    except OSError:  # pragma: no cover - an unreadable dir is not an install
+        return False
+
+
+def bundle_data_root(
+    environ: Mapping[str, str],
+    executable_dir: Path,
+    old_location: Path,
+) -> Path | None:
+    """The data root a packaged launch should use, or ``None`` to change nothing.
+
+    Args:
+        environ: Environment to read :data:`ENV_HOME` from.
+        executable_dir: The folder holding the shipped executable.
+        old_location: ``%LOCALAPPDATA%\\Jarvis`` itself, not its parent.
+    """
+    if environ.get(ENV_HOME, "").strip():
+        return None  # an explicit redirect is an answer, not an oversight
+    if looks_like_an_existing_install(old_location):
+        return None  # moving a running install's root looks like amnesia, not a path change
+    return executable_dir / BUNDLE_DATA_DIRNAME
 
 
 def _cache_subdirectory(paths: AppPaths, name: str) -> Path:

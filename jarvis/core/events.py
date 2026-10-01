@@ -41,6 +41,31 @@ class PipelineEvent:
     """Optional structured payload (e.g. a score, a sample count, or a state name)."""
 
 
+@dataclass(frozen=True, slots=True)
+class UsageEvent:
+    """One completed model call, accounted. Produced by ``llm``, persisted by ``app``.
+
+    The producer knows the numbers but not where they should be stored, and the
+    store must not be importable from ``llm`` (layer rule), so the composition root
+    wires one to the other through this record. There is deliberately no timestamp
+    field: the sink stamps the row with its own canonical format, because a
+    duplicated ``strftime`` pattern across two layers is a drift bug waiting to
+    happen -- and the sink runs within milliseconds of the call finishing anyway.
+
+    ``cached_tokens`` is ``None`` when the provider did not say. That is *not* the
+    same as ``0``, and the statistics screen has to keep them apart: a cache-hit
+    rate drawn from missing data is the kind of number that gets quoted in a demo
+    and believed for years.
+    """
+
+    provider: str
+    model: str
+    prompt_tokens: int
+    completion_tokens: int
+    cached_tokens: int | None = None
+    latency_ms: float = 0.0
+
+
 class VoicePhase(StrEnum):
     """Whether the microphone is available to the user, and what it is doing about it.
 

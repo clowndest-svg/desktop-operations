@@ -17,6 +17,7 @@ import os
 from collections.abc import Callable, Mapping
 
 from jarvis.config.schema import LlmSection, ProviderSection
+from jarvis.core.events import UsageEvent
 from jarvis.core.exceptions import ConfigurationError
 from jarvis.llm.client import LlmClient
 from jarvis.llm.openai_compat import OpenAiCompatClient, OpenAiCompatSettings
@@ -36,6 +37,9 @@ class LlmService:
             not exist yet at registration time.
         transport: Optional shared transport override (tests inject fakes).
         environ: Injectable environment mapping for key presence checks.
+        usage_sink: Called once per answered request with its token accounting.
+            ``llm`` must not import the storage layer, so the composition root
+            passes the recorder in -- see :class:`~jarvis.core.events.UsageEvent`.
     """
 
     def __init__(
@@ -44,10 +48,13 @@ class LlmService:
         *,
         transport: HttpTransport | None = None,
         environ: Mapping[str, str] | None = None,
+        usage_sink: Callable[[UsageEvent], None] | None = None,
     ) -> None:
         self._settings_provider = settings_provider
         self._transport = transport
         self._environ = environ
+        self._usage_sink = usage_sink
+        self._override: LlmSection | None = None
         self._section: LlmSection | None = None
         self._clients: dict[str, LlmClient] = {}
 
@@ -76,6 +83,35 @@ class LlmService:
 
     def stop(self) -> None:
         self._section = None
+        self._clients.clear()
+
+    def set_section_override(self, section: LlmSection | None) -> None:
+        """Replace the effective ``llm`` section at runtime, or clear the override.
+
+        Only the settings service calls this, and only for the four keys the window
+        is allowed to change (endpoint, model, provider). It is an override rather
+        than a mutation because the config tree is frozen on purpose -- and because
+        a client bakes ``base_url`` into its endpoint at construction, so changing
+        the address without rebuilding would silently keep calling the old one.
+        """
+        self._override = section
+        self._clients.clear()
+
+    @property
+    def has_override(self) -> bool:
+        return self._override is not None
+
+    def attach_usage_sink(self, sink: Callable[[UsageEvent], None] | None) -> None:
+        """Start recording token usage, after the service was already built.
+
+        The awkward ordering is structural, not an oversight: the ledger lives in
+        the database, the database path comes from configuration, and this service
+        is constructed from that same configuration -- so the sink can only be
+        wired once the store exists, which is after construction. Clients are built
+        lazily, so calling this before the first request costs nothing; calling it
+        later drops the cache rather than keeping a client that cannot count.
+        """
+        self._usage_sink = sink
         self._clients.clear()
 
     # -- client access -------------------------------------------------------
@@ -109,7 +145,7 @@ class LlmService:
     def _require_started(self) -> LlmSection:
         if self._section is None:
             raise ConfigurationError("LlmService is not started")
-        return self._section
+        return self._override if self._override is not None else self._section
 
     def _build_client(self, section: LlmSection, provider: ProviderSection) -> LlmClient:
         settings = OpenAiCompatSettings(
@@ -124,5 +160,10 @@ class LlmService:
             cost_output_per_1m=provider.cost_output_per_1m,
         )
         if self._transport is not None:
-            return OpenAiCompatClient(settings, self._transport, environ=self._environ)
-        return OpenAiCompatClient(settings, environ=self._environ)
+            return OpenAiCompatClient(
+                settings,
+                self._transport,
+                environ=self._environ,
+                on_usage=self._usage_sink,
+            )
+        return OpenAiCompatClient(settings, environ=self._environ, on_usage=self._usage_sink)

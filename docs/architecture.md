@@ -45,23 +45,23 @@
 | `vad` | L1 | Silero VAD 流式断句(端点状态机 + 流式端点) | core, config, audio | ✅ 7 |
 | `asr` | L1 | SenseVoice / FunASR / Whisper 流式识别 | core, config, vad | ✅ 8 |
 | `tts` | L1 | CosyVoice(离线·ONNX)/ Edge-TTS(云端),边合成边播、Barge-In 钩子 | core, config | ✅ 9 |
-| `database` | L1 | SQLite 仓储、迁移、缓存 | core, config | 11+ |
-| `vector` | L1 | FAISS 索引管理与相似检索 | core, config | 11 |
-| `ocr` | L1 | PaddleOCR 封装 | core, config | 13 |
-| `browser` | L1 | Playwright 浏览器自动化 | core, config | 14 |
-| `prompt` | L2 | 提示词模板管理(禁止散落硬编码) | core, config | 5+ |
-| `memory` | L2 | 短/长期记忆、画像、压缩/召回/排序 | core, config, database, vector, llm | 11 |
-| `knowledge` | L2 | RAG 知识库 | core, config, database, vector, llm | 11 |
-| `tools` | L2 | Tool 框架、自动注册、内置工具、危险确认(可按需引用能力包的公共接口) | core, config | 12 |
-| `vision` | L2 | 截图、屏幕/图像理解、UI 识别 | core, config, ocr, llm | 13 |
-| `computer` | L2 | 鼠标键盘窗口控制(经安全策略) | core, config, vision, ocr | 14 |
-| `mcp` | L2 | MCP 客户端、配置驱动的服务器注册、工具桥接 | core, config, tools | 15 |
-| `plugins` | L2 | 插件发现/装载/热更新 | core, config, tools | 18 |
+| `database` | L1 | SQLite 仓储、迁移、缓存 | core, config | ✅ 11 |
+| `vector` | L1 | 向量索引管理与相似检索(SQLite BLOB 存储,非 FAISS) | core, config, database | ✅ 11 |
+| `ocr` | L1 | RapidOCR(离线·ONNX Runtime,不引入 PyTorch)文字识别 | core, config | ✅ 13 |
+| `browser` | L1 | Playwright 浏览器自动化(域名黑白名单在引擎启动前生效) | core, config | ✅ 14 |
+| `prompt` | L2 | 提示词模板管理:集中定义 + 版本化 + 配置可覆盖(禁止散落硬编码) | core, config | ✅ 5+ |
+| `memory` | L2 | 短/长期记忆、画像、压缩/召回/排序 | core, config, database, vector, llm, prompt | ✅ 11 |
+| `knowledge` | L2 | RAG 知识库(分块/混合召回/带引用的问答) | core, config, database, vector, llm, prompt | ✅ 11 |
+| `tools` | L2 | Tool 框架、自动注册、内置工具、危险确认(可按需引用能力包的公共接口) | core, config | ✅ 12 |
+| `vision` | L2 | 截图、屏幕/图像理解、UI 识别 | core, config, ocr, llm, prompt | ✅ 13 |
+| `computer` | L2 | 鼠标键盘窗口控制(经安全策略,默认演练模式) | core, config, vision, ocr | ✅ 14 |
+| `mcp` | L2 | MCP 客户端(标准库 JSON-RPC,无官方 SDK 依赖)、工具桥接 | core, config, tools | ✅ 15 |
+| `plugins` | L2 | 插件发现/装载/热更新 | core, config, tools | ✅ 18 |
 | `agent` | L3 | LangGraph 多 Agent 编排(11 类 Agent) | core, config, llm, prompt, planner, memory, knowledge, tools | ✅ 10 |
-| `orchestration` | L3 | 多 Agent 调度 + 单一麦克风语音流水线(唤醒→VAD→ASR→LLM→TTS,Barge-In) | core, config, llm, asr, tts, vad, wakeword, audio, agent | ✅ 10 |
-| `planner` | L3 | 任务分解、计划模型、重规划 | core, config, llm, prompt | 10 |
-| `workflow` | L3 | 触发-条件-动作工作流引擎 | core, config, scheduler, tools, database | 16 |
-| `scheduler` | L3 | 定时/事件触发,持久化可恢复 | core, config, database | 16 |
+| `orchestration` | L3 | 多 Agent 调度 + 单一麦克风语音流水线(唤醒→VAD→ASR→LLM→TTS,Barge-In) | core, config, llm, prompt, asr, tts, vad, wakeword, audio, agent | ✅ 10 |
+| `planner` | L3 | 任务分解、计划校验(含环检测)、重规划 | core, config, llm, prompt | ✅ 10 |
+| `workflow` | L3 | 触发-条件-动作工作流引擎(YAML 定义,条件求值不用 eval) | core, config, scheduler, tools, database | ✅ 16 |
+| `scheduler` | L3 | 定时/事件触发,持久化可恢复 | core, config, database | ✅ 16 |
 | `app` | L4 | 组合根、Application 生命周期 | 所有下层 | ✅ 1 |
 | `ui` | L5 | 桌面壳:pywebview 承载 Vue3 HUD(纯表现,经 JS 桥调 app 服务) | core, config, app | 17 |
 | `qqbot` | 侧挂 | QQ 官方机器人通道:直接问 LLM,不经 app/编排层 | core, config, llm | 独立产品 |
@@ -79,9 +79,25 @@ first-party import,含函数内的懒导入):
 
 - **异常**:一律派生自 `jarvis.core.exceptions.JarvisError`;子系统内部可细化,跨层只捕获 core 导出的类型。
 - **预期失败**:跨层返回 `jarvis.core.result.Result[T, E]`,不用异常做控制流。
+- **文本原语**:CJK 分词与匹配率计算放在 `core/text.py`(`keyword_tokens` / `match_ratio`)。
+  `memory` 与 `knowledge` 都要用它,而两者同层、不允许互相依赖;各写一份就是让
+  分词规则有两个可能走偏的地方。它是纯标准库,符合 rule 3。
 - **配置**:任何行为参数来自 `config`(阶段三);代码中出现魔法值视为违规。
 - **日志**(✅ 阶段四交付):统一走标准 `logging`,logger 名一律以 `jarvis.` 开头(非 `jarvis.*` 命名空间会被按第三方降噪);`print` 禁止出现在库代码中;计费/延迟记账用 `jarvis.logging.metrics()` 附加 `extra` 字段。
 - **安全**:危险操作(删除/CMD/PowerShell/格式化/批量删除)必须走确认策略;密钥只进加密存储,不进日志、不进配置明文。
+- **数据库取值**:行是 `Mapping[str, SqlScalar]`,`MAX()` 空集时真的是 `NULL`。
+  一律用 `jarvis.database` 的 `as_int/as_str/as_float/as_bool` 取值,不要
+  `int(row["x"])` + `# type: ignore` —— 那会把真实错误一起盖掉。
+
+### 3.1 两条值得记下来的依赖边
+
+- **`vector` → `database`**:向量索引要持久化,而 `database` 是本项目的持久化层。
+  原始规划里 `vector` 只有 `core, config`,那是假设它用 FAISS 自己的索引文件;
+  改用 SQLite BLOB 之后这条边就成立了,表格与 `tests/test_architecture_layers.py`
+  已同步。
+- **`app` → 全部**:`app` 是唯一组合根。阶段十一~十八新增的 13 个服务全部在
+  `jarvis/__main__.py` 的 `_register_capabilities` 里按依赖顺序装配,
+  不在别处 `new`。
 
 ## 4. 目录总览(阶段二定稿)
 

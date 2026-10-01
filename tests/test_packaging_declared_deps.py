@@ -44,6 +44,7 @@ DIST_TO_IMPORTS: dict[str, tuple[str, ...]] = {
     "qq-botpy": ("botpy",),
     "pywebview": ("webview",),
     "psutil": ("psutil",),
+    "pystray": ("pystray",),
     "sounddevice": ("sounddevice",),
     "openwakeword": ("openwakeword",),
     "silero-vad": ("silero_vad",),
@@ -51,6 +52,14 @@ DIST_TO_IMPORTS: dict[str, tuple[str, ...]] = {
     "edge-tts": ("edge_tts",),
     "soundfile": ("soundfile",),
     "pyinstaller": ("PyInstaller",),
+    "apscheduler": ("apscheduler",),
+    "rapidocr-onnxruntime": ("rapidocr_onnxruntime",),
+    "mss": ("mss",),
+    "pillow": ("PIL",),
+    "playwright": ("playwright",),
+    "pyautogui": ("pyautogui",),
+    "pypdf": ("pypdf",),
+    "python-docx": ("docx",),
 }
 
 # Imported but never declared, each with the reason it may stay that way. Adding an
@@ -60,6 +69,12 @@ UNDECLARED_ALLOWED: dict[str, str] = {
     "torch": "transitive of silero-vad + funasr; a second ceiling here would fight them",
     "pvporcupine": "opt-in alternative engine, commented out of the voice extra on purpose",
     "cosyvoice": "no clean PyPI wheel; installed manually per its official guide",
+    # ``from System.Drawing import Color`` in jarvis/ui/pet.py reaches a CLR namespace,
+    # not a Python package: the bridge that makes those names importable is pythonnet,
+    # which pywebview's Windows backend requires and pins. There is no distribution
+    # named ``System`` to declare, and pinning pythonnet a second time here would only
+    # fight pywebview's own ceiling.
+    "System": "CLR namespaces handed to us by pythonnet, a hard dependency of pywebview on Windows",
 }
 
 # Loaded by the desktop HUD before its window appears. Files later phases add are
@@ -69,6 +84,14 @@ DESKTOP_EAGER_PATH: tuple[str, ...] = (
     "jarvis/ui/desktop.py",
     "jarvis/ui/state_bridge.py",
     "jarvis/ui/pump.py",
+    # The tray, the hide-instead-of-quit policy and the second-launch guard all run
+    # before the window appears, so they are on the same "base + [desktop] only"
+    # hook as the shell itself.
+    "jarvis/ui/tray.py",
+    "jarvis/ui/lifecycle.py",
+    "jarvis/ui/instance.py",
+    "jarvis/ui/pet.py",
+    "jarvis/ui/audio_bridge.py",
     "jarvis/app/application.py",
     "jarvis/app/system_service.py",
     "jarvis/app/disk_service.py",
@@ -198,7 +221,9 @@ def test_undeclared_exceptions_are_still_load_bearing() -> None:
     imported: set[str] = set()
     for path in _package_files():
         imported |= {name.lower() for name in _imported_modules(path)}
-    stale = sorted(key for key in UNDECLARED_ALLOWED if key not in imported)
+    # Compared case-insensitively: a CLR namespace is capitalised (`System`), and this
+    # check's job is "is the exception still used", not "did you type the case right".
+    stale = sorted(key for key in UNDECLARED_ALLOWED if key.lower() not in imported)
     assert not stale, f"nothing imports these any more, drop them: {stale}"
 
 
@@ -215,6 +240,11 @@ def test_desktop_path_needs_only_base_and_desktop_extras() -> None:
         if not path.is_file():  # a later phase has not landed yet
             continue
         for module in sorted(_imported_modules(path)):
+            # The same exceptions check 1 grants: a CLR namespace reached through
+            # pythonnet is not something `.[desktop]` could install any differently,
+            # because pywebview is what brings pythonnet.
+            if module in UNDECLARED_ALLOWED:
+                continue
             if module.lower() not in importable:
                 offenders.append(f"{relative} imports {module!r}")
     assert not offenders, "desktop start-up reaches outside base + [desktop]:\n" + "\n".join(

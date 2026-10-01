@@ -6,6 +6,7 @@ from pathlib import Path
 
 from jarvis.config.paths import (
     AppPaths,
+    bundle_data_root,
     default_data_dir,
     export_model_cache_env,
 )
@@ -110,3 +111,74 @@ class TestModelCacheRedirect:
 
         for name, target in written.items():
             assert paths.models_dir in target.parents, name
+
+
+class TestPackagedDataRoot:
+    r"""``old_location`` is ``%LOCALAPPDATA%\Jarvis`` itself.
+
+    Passing its parent here once made two of these tests pass for the wrong reason
+    -- the parent always exists -- so every case below builds the real directory.
+    """
+
+    def test_a_fresh_install_lives_next_to_the_exe(self, tmp_path: Path) -> None:
+        bundle = tmp_path / "小夜"
+        old = tmp_path / "AppData" / "Local" / "Jarvis"
+        assert bundle_data_root({}, bundle, old) == bundle / "数据"
+
+    def test_an_explicit_jarvis_home_wins(self, tmp_path: Path) -> None:
+        bundle = tmp_path / "小夜"
+        environ = {"JARVIS_HOME": str(tmp_path / "elsewhere")}
+        assert bundle_data_root(environ, bundle, tmp_path / "Jarvis") is None
+
+    def test_a_blank_override_does_not_count_as_a_choice(self, tmp_path: Path) -> None:
+        """``JARVIS_HOME=" "`` is a typo, not a redirect to the root of nowhere."""
+        bundle = tmp_path / "小夜"
+        assert (
+            bundle_data_root({"JARVIS_HOME": "   "}, bundle, tmp_path / "Jarvis") == bundle / "数据"
+        )
+
+    def test_an_existing_install_is_not_pointed_at_an_empty_folder(self, tmp_path: Path) -> None:
+        """The trap this refuses: moving the data root under a running app.
+
+        An earlier build wrote its config, database and weights under
+        ``%LOCALAPPDATA%/Jarvis``. Redirecting it to a fresh directory would show the
+        owner an assistant that forgot its own settings, and would re-download the
+        models -- which is what happened once tonight, just in the other direction.
+        """
+        bundle = tmp_path / "小夜"
+        old = tmp_path / "AppData" / "Local" / "Jarvis"
+        (old / "config").mkdir(parents=True)
+        (old / "config" / "config.yaml").write_text("llm: configured", encoding="utf-8")
+        assert bundle_data_root({}, bundle, old) is None
+
+    def test_a_database_also_counts_as_someones_data(self, tmp_path: Path) -> None:
+        bundle = tmp_path / "小夜"
+        old = tmp_path / "AppData" / "Local" / "Jarvis"
+        (old / "database").mkdir(parents=True)
+        (old / "database" / "jarvis.db").write_bytes(b"sqlite")
+        assert bundle_data_root({}, bundle, old) is None
+
+    def test_a_directory_the_runtime_hook_made_itself_is_not_an_install(
+        self, tmp_path: Path
+    ) -> None:
+        """The bug this test exists for.
+
+        ``runtime_hook_funasr`` runs before this script and creates
+        ``<data root>/logs/funasr-hook.log``. When "an install exists" was spelled
+        ``home_dir.exists()``, that log directory alone was enough to make every
+        first launch keep its data on the system drive -- which is what the two
+        packaged runs at 03:05 and 03:35 tonight actually did.
+        """
+        bundle = tmp_path / "小夜"
+        old = tmp_path / "AppData" / "Local" / "Jarvis"
+        logs = old / "logs"
+        logs.mkdir(parents=True)
+        (logs / "funasr-hook.log").write_text("funasr source tree: present", encoding="utf-8")
+        assert bundle_data_root({}, bundle, old) == bundle / "数据"
+
+    def test_the_data_folder_is_a_sibling_not_the_bundle_itself(self, tmp_path: Path) -> None:
+        """``_internal`` holds the program; dumping 2 GB of weights in beside it
+        would make the two impossible to tell apart when the owner deletes either."""
+        bundle = tmp_path / "小夜"
+        chosen = bundle_data_root({}, bundle, tmp_path / "Local" / "Jarvis")
+        assert chosen is not None and chosen.parent == bundle

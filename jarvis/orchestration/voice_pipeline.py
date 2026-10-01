@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import math
 import threading
+from array import array
 from collections.abc import Callable, Iterator
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
@@ -26,6 +28,7 @@ from typing import Protocol, runtime_checkable
 from jarvis.asr.types import RecognitionResult
 from jarvis.audio.source import AudioSource, SounddeviceSource
 from jarvis.core.events import PIPELINE_STATE_KIND, PipelineEvent
+from jarvis.core.exceptions import JarvisError
 from jarvis.llm.types import ChatMessage
 from jarvis.orchestration.player import AudioPlayer, NullAudioPlayer
 from jarvis.tts.types import AudioChunk, ShouldStop
@@ -43,6 +46,25 @@ class PipelineState(StrEnum):
     IDLE = "idle"
     LISTENING = "listening"
     PROCESSING = "processing"
+
+
+_FAILURE_MAX_CHARS: int = 200
+"""Longest failure line shown in the window; the log carries the rest."""
+
+
+def _failure_text(exc: BaseException) -> str:
+    """One line the operator can act on, for a turn that did not answer.
+
+    A typed :class:`~jarvis.core.exceptions.JarvisError` carries a message written
+    for a human -- a missing key names the *variable*, never a value -- so it is
+    safe to show. Anything else is only ever named: an unexpected exception string
+    can contain whatever the transport echoed back, and "processing failed" told
+    nobody that the answer was one environment variable away.
+    """
+    if isinstance(exc, JarvisError):
+        reason = " ".join(str(exc).split())[:_FAILURE_MAX_CHARS]
+        return reason or f"{type(exc).__name__}"
+    return f"内部错误 {type(exc).__name__}（原因在日志里）"
 
 
 @runtime_checkable
@@ -84,6 +106,22 @@ class _GraphPort(Protocol):
 _READ_CHUNK_SAMPLES = 512
 
 
+def speech_level(audio: bytes) -> tuple[int, float]:
+    """Peak and RMS of an s16le mono span, without pulling in numpy.
+
+    This runs on the turn thread once per utterance, over a few tens of thousands of
+    samples; ``array`` gives that in single-digit milliseconds, and orchestration
+    stays free of a numeric dependency it would only use twice.
+    """
+    samples = array("h")
+    samples.frombytes(audio[: len(audio) - (len(audio) % 2)])
+    if not samples:
+        return 0, 0.0
+    peak = max(max(samples), -min(samples))
+    mean_square = sum(value * value for value in samples) / len(samples)
+    return peak, math.sqrt(mean_square)
+
+
 class VoicePipeline:
     """Drives the full voice chain through one microphone loop."""
 
@@ -101,6 +139,8 @@ class VoicePipeline:
         read_chunk_samples: int = _READ_CHUNK_SAMPLES,
         on_event: Callable[[PipelineEvent], None] | None = None,
         max_history_turns: int = 20,
+        voice_provider: Callable[[], str | None] | None = None,
+        transcript_sink: Callable[[str, str], None] | None = None,
     ) -> None:
         self._detector = detector
         self._segmenter = segmenter
@@ -113,6 +153,8 @@ class VoicePipeline:
         self._read_chunk = read_chunk_samples
         self._on_event = on_event
         self._max_history = max_history_turns
+        self._voice_provider = voice_provider
+        self._transcript_sink = transcript_sink
 
         self._source: AudioSource | None = None
         self._thread: threading.Thread | None = None
@@ -122,11 +164,37 @@ class VoicePipeline:
         self._state_lock = threading.Lock()
         self._buffer = bytearray()
         self._history: list[ChatMessage] = []
+        self._reading = threading.Event()
+        """Set while a read-aloud (not a microphone turn) is being played."""
+
+        self._cancel_reading = threading.Event()
+        """Raised by :meth:`cancel_utterance`; re-armed at the start of each one."""
+
+    def _chosen_voice(self) -> str | None:
+        """The voice to speak with, read at utterance time rather than at boot.
+
+        A provider rather than a value: picking a voice in the HUD must change the
+        *next* sentence, and the engine bakes nothing in per call -- ``synthesize``
+        takes the id every time. ``None`` means "whatever the engine was configured
+        with", which is also what an operator who never opened the picker gets.
+        """
+        if self._voice_provider is None:
+            return None
+        try:
+            return self._voice_provider()
+        except Exception:  # a prefs read must not kill a sentence
+            logger.exception("voice provider failed; using the configured voice")
+            return None
 
     @property
     def running(self) -> bool:
         """Whether the listening loop is currently alive."""
         return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def reading(self) -> bool:
+        """Whether a typed answer is currently being spoken."""
+        return self._reading.is_set()
 
     @property
     def state(self) -> PipelineState:
@@ -200,6 +268,68 @@ class VoicePipeline:
         self._buffer.clear()
         self._emit(PipelineEvent(kind=PIPELINE_STATE_KIND, text=PipelineState.LISTENING.value))
         logger.info("manual turn opened (wake word skipped)")
+        return True
+
+    # ------------------------------------------------------------------
+    # Read-aloud
+    # ------------------------------------------------------------------
+
+    def utter(self, text: str) -> bool:
+        """Speak a sentence the page already shows, without opening a turn.
+
+        Returns ``False`` unless the loop is idle and nothing else is being read.
+        The refusal is not shyness: an answer spoken on top of a spoken question is
+        how "it heard me but answered the wrong thing" happens, and the user has no
+        way to tell which of the two voices they are listening to.
+
+        This is deliberately *not* a turn. The state machine stays IDLE so the
+        microphone keeps hearing the wake word -- which also means barge-in does not
+        cover it, so cancelling belongs to the caller: :meth:`cancel_utterance`
+        stops the samples still to come, and whoever fed the page the ones already
+        delivered has to retract those.
+        """
+        if not self.running or self._stop.is_set():
+            return False
+        if self._get_state() is not PipelineState.IDLE or self._reading.is_set():
+            return False
+        self._reading.set()
+        self._cancel_reading.clear()
+        threading.Thread(
+            target=self._read_aloud,
+            args=(text,),
+            name="jarvis-utter",
+            daemon=True,
+        ).start()
+        return True
+
+    def _read_aloud(self, text: str) -> None:
+        """Synthesize and play one sentence. Runs on its own thread, never the UI's.
+
+        ``cancel_utterance`` may be called at any point in here; the two places it
+        is checked are the synthesis predicate (stops producing more audio) and the
+        loop body (stops the current chunk from reaching the player).
+        """
+        cancelled = self._cancel_reading
+        try:
+            for chunk in self._tts.synthesize(
+                text,
+                voice=self._chosen_voice(),
+                should_stop=lambda: cancelled.is_set() or self._stop.is_set(),
+            ):
+                if cancelled.is_set() or self._stop.is_set():
+                    break
+                self._player.play(chunk)
+        except Exception as exc:
+            logger.exception("read-aloud failed")
+            self._emit(PipelineEvent(kind="error", text=_failure_text(exc)))
+        finally:
+            self._reading.clear()
+
+    def cancel_utterance(self) -> bool:
+        """Stop a read-aloud in progress. ``False`` when there is none."""
+        if not self._reading.is_set():
+            return False
+        self._cancel_reading.set()
         return True
 
     # ------------------------------------------------------------------
@@ -278,9 +408,9 @@ class VoicePipeline:
         self._interrupt.clear()
         try:
             self._respond(text)
-        except Exception:
+        except Exception as exc:
             logger.exception("processing turn failed")
-            self._emit(PipelineEvent(kind="error", text="processing failed"))
+            self._emit(PipelineEvent(kind="error", text=_failure_text(exc)))
         finally:
             self._end_turn()
 
@@ -303,15 +433,27 @@ class VoicePipeline:
 
     def _process(self, audio: bytes, segment: SpeechSegment) -> None:
         self._interrupt.clear()
+        peak, rms = speech_level(audio)
+        # One line per turn, and it is the only place a quiet microphone becomes
+        # visible. SenseVoice returns confident text from near-silence, so "the
+        # recognition is bad" and "the microphone delivered nothing" look identical
+        # on screen -- and they are two different bugs in two different halves.
+        logger.info(
+            "captured %d ms of speech: peak=%d rms=%.0f%s",
+            len(audio) // 32,
+            peak,
+            rms,
+            "  <-- 几乎没收到声音，检查输入设备与录音音量" if peak < 400 else "",
+        )
         try:
             result = self._asr.recognize(audio, segment=segment)
             text = result.text.strip()
             if not text:
                 return
             self._respond(text)
-        except Exception:
+        except Exception as exc:
             logger.exception("processing turn failed")
-            self._emit(PipelineEvent(kind="error", text="processing failed"))
+            self._emit(PipelineEvent(kind="error", text=_failure_text(exc)))
         finally:
             self._end_turn()
 
@@ -322,7 +464,9 @@ class VoicePipeline:
         self._append_history(ChatMessage.user(text))
         self._append_history(ChatMessage.assistant(reply))
         self._emit(PipelineEvent(kind="reply", text=reply))
-        for chunk in self._tts.synthesize(reply, should_stop=self._should_stop):
+        for chunk in self._tts.synthesize(
+            reply, voice=self._chosen_voice(), should_stop=self._should_stop
+        ):
             if self._stop.is_set():
                 break
             self._player.play(chunk)
@@ -332,6 +476,14 @@ class VoicePipeline:
 
     def _append_history(self, message: ChatMessage) -> None:
         self._history.append(message)
+        if self._transcript_sink is not None:
+            # A spoken turn is a turn: it belongs in the same stored conversation
+            # as a typed one. A sink that throws must not cost the reply, so the
+            # failure is logged and the conversation continues in memory.
+            try:
+                self._transcript_sink(message.role.value, message.content or "")
+            except Exception:
+                logger.exception("transcript sink failed; turn kept in memory only")
         limit = self._max_history * 2
         if len(self._history) > limit:
             self._history = self._history[-limit:]

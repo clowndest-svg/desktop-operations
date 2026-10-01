@@ -23,6 +23,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import chain
 
+from jarvis.core.events import UsageEvent
 from jarvis.llm.errors import (
     LlmAuthError,
     LlmConnectionError,
@@ -85,6 +86,9 @@ class OpenAiCompatClient:
         transport: HTTP transport; defaults to the stdlib implementation.
         sleep: Injectable delay function (tests pass a recorder).
         environ: Injectable environment mapping (tests avoid ``os.environ``).
+        on_usage: Called once per answered request with its token accounting. The
+            ``llm`` layer must not know about a database, so whoever wants the
+            numbers kept hands in a sink -- see :class:`UsageEvent`.
     """
 
     def __init__(
@@ -94,11 +98,13 @@ class OpenAiCompatClient:
         *,
         sleep: Callable[[float], None] = time.sleep,
         environ: Mapping[str, str] | None = None,
+        on_usage: Callable[[UsageEvent], None] | None = None,
     ) -> None:
         self._settings = settings
         self._transport: HttpTransport = transport if transport is not None else UrllibTransport()
         self._sleep = sleep
         self._environ = environ
+        self._on_usage = on_usage
         self._endpoint = settings.base_url.rstrip("/") + _CHAT_COMPLETIONS_PATH
 
     # -- LlmClient protocol -------------------------------------------------
@@ -184,6 +190,9 @@ class OpenAiCompatClient:
                 payload["max_tokens"] = options.max_tokens
             if options.top_p is not None:
                 payload["top_p"] = options.top_p
+            if options.tools:
+                payload["tools"] = [dict(tool) for tool in options.tools]
+                payload["tool_choice"] = options.tool_choice or "auto"
         return payload
 
     # -- retry policy ----------------------------------------------------------
@@ -354,6 +363,30 @@ class OpenAiCompatClient:
                 cost_usd=self._cost(usage),
             ),
         )
+        self._report_usage(usage, latency_ms)
+
+    def _report_usage(self, usage: Usage | None, latency_ms: float) -> None:
+        """Hand the numbers to whoever is keeping them, without ever failing a reply.
+
+        A provider that omitted ``usage`` produces no event at all rather than a row
+        of zeros: the statistics screen reads "no reading" from an empty set, which
+        is true, instead of "0% cached", which would not be.
+        """
+        if self._on_usage is None or usage is None:
+            return
+        try:
+            self._on_usage(
+                UsageEvent(
+                    provider=self._settings.provider_name,
+                    model=self._settings.model,
+                    prompt_tokens=usage.prompt_tokens,
+                    completion_tokens=usage.completion_tokens,
+                    cached_tokens=usage.cached_tokens,
+                    latency_ms=latency_ms,
+                )
+            )
+        except Exception:  # a broken ledger must not lose the user their answer
+            logger.exception("usage sink raised; ignoring")
 
     def _cost(self, usage: Usage | None) -> float | None:
         if usage is None:
@@ -392,7 +425,34 @@ def _parse_usage(raw: object) -> Usage | None:
         return None
     if not isinstance(prompt, int) or not isinstance(completion, int):
         return None
-    return Usage(prompt_tokens=prompt, completion_tokens=completion)
+    return Usage(
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+        cached_tokens=_parse_cached_tokens(raw),
+    )
+
+
+def _parse_cached_tokens(usage: Mapping[str, object]) -> int | None:
+    """How many prompt tokens came from the provider's cache, or ``None``.
+
+    Two wire shapes matter in practice and they are not compatible: OpenAI-style
+    providers nest it as ``prompt_tokens_details.cached_tokens``, while
+    Anthropic-style ones put ``cache_read_input_tokens`` at the top level. Reading
+    only the first is why this used to look like "the provider never tells us".
+
+    Anything absent stays ``None`` rather than 0 -- the UI distinguishes
+    「无读数」 from 「命中 0%」, and a 0 invented here would be indistinguishable
+    from a provider that genuinely cached nothing.
+    """
+    details = usage.get("prompt_tokens_details")
+    if isinstance(details, Mapping):
+        nested = details.get("cached_tokens")
+        if isinstance(nested, int) and not isinstance(nested, bool):
+            return max(0, nested)
+    flat = usage.get("cache_read_input_tokens")
+    if isinstance(flat, int) and not isinstance(flat, bool):
+        return max(0, flat)
+    return None
 
 
 def _parse_tool_calls(raw: object) -> tuple[ToolCall, ...]:

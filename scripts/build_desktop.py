@@ -22,9 +22,37 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = REPO_ROOT / "frontend"
+ICON_PATH = REPO_ROOT / "packaging" / "app.ico"
 sys.path.insert(0, str(REPO_ROOT))
 
 from jarvis.ui.desktop import WEB_DIR, bundle_hint, index_path  # noqa: E402
+
+
+def _make_icon_module() -> object:
+    """Load ``scripts/make_icon.py`` by path (``scripts`` is not a package)."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "make_icon", REPO_ROOT / "scripts" / "make_icon.py"
+    )
+    if spec is None or spec.loader is None:  # pragma: no cover - defensive
+        raise SystemExit("找不到 scripts/make_icon.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def write_icon() -> None:
+    """(Re)generate the application icon.
+
+    Regenerated on every build rather than committed as a blob: the icon is
+    drawn from a dozen numbers in ``make_icon.py``, so the script is the source
+    of truth and a stale .ico would silently disagree with it.
+    """
+    module = _make_icon_module()
+    ICON_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ICON_PATH.write_bytes(module.build_ico())  # type: ignore[attr-defined]
+    print(f"图标已生成：{ICON_PATH}")
 
 
 def _npm() -> str:
@@ -50,6 +78,7 @@ def build(*, force_install: bool) -> None:
     if force_install or not (FRONTEND_DIR / "node_modules" / ".package-lock.json").is_file():
         _npm_and_install()
     _run(_npm(), "run", "build")
+    write_icon()
 
 
 def _npm_and_install() -> None:
@@ -72,6 +101,13 @@ def verify() -> int:
     problem = bundle_hint()
     if problem:
         print(f"构建产物校验失败：{problem}", file=sys.stderr)
+        return 1
+    if not ICON_PATH.is_file():
+        print(
+            f"构建产物校验失败：缺少应用图标 {ICON_PATH}\n"
+            "  重新生成：python scripts/make_icon.py",
+            file=sys.stderr,
+        )
         return 1
     files = sorted(p for p in WEB_DIR.rglob("*") if p.is_file())
     total = sum(p.stat().st_size for p in files)

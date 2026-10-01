@@ -128,7 +128,11 @@ vad:
   # before any speech-start event is emitted.
   min_speech_ms: 250
   # End the utterance after this much continuous silence (ms).
-  max_silence_ms: 500
+  # 500 会把一句说到一半的停顿当成"说完了"：实测"帮我把临时文件清理一下然后看看
+  # 磁盘还剩多少空间"在句中 700ms 停顿处被劈成两段、各自当成一轮去应答——两边文字
+  # 都认对了（CER 4.3%），坏在断句。800ms 时两句测试样本都不再被劈开，代价是每轮
+  # 晚 0.3 秒才开始回答。复现：python scripts/bench_asr_endpoint.py
+  max_silence_ms: 800
   # Pad added around the detected speech (ms) so ASR gets clean edges.
   speech_pad_ms: 100
   # Hard cap on a single utterance (ms); 0 = no cap (long speech auto-segments).
@@ -190,3 +194,233 @@ orchestration:
   barge_in: true
   # Agent the supervisor falls back to when intent is unclear.
   default_agent: chat
+
+database:
+  # One SQLite file backs every capability that needs to remember something:
+  # long-term memory, the knowledge base, vector records, scheduled jobs and
+  # workflow runs. No driver to install — sqlite3 is in the standard library.
+  #
+  # There is no `enabled` key on purpose. Opening this file costs nothing, and a
+  # half-disabled database would surface as four unrelated "why is this empty"
+  # bugs instead of one honest error.
+  #
+  # The file lands in <data>/database/. To move the whole data root off the
+  # system drive, set JARVIS_HOME (e.g. E:\BianChengGongJu\JarvisData).
+  filename: jarvis.db
+  # How long a blocked writer waits before raising "database is locked" (ms).
+  # Two writers exist at most (UI thread + scheduler thread), so 5s is generous.
+  busy_timeout_ms: 5000
+  # WAL lets the HUD read while the scheduler writes; the default rollback
+  # journal would make those two block each other. DELETE/TRUNCATE/PERSIST/
+  # MEMORY/OFF also accepted.
+  journal_mode: WAL
+  # OFF | NORMAL | FULL | EXTRA. NORMAL is the standard pairing with WAL:
+  # durable across process crashes, still fast.
+  synchronous: NORMAL
+
+vector:
+  # Similarity search for the knowledge base and long-term memory.
+  embedding:
+    # hashing (default): offline, deterministic, needs no key or network — a
+    #   fresh install can ingest documents immediately. Good enough to find the
+    #   three passages of a manual that discuss what was just asked.
+    # http: any OpenAI-compatible /embeddings endpoint. Better recall, costs a
+    #   round trip per batch and requires the key below.
+    engine: hashing
+    # Vector width. For `hashing` this IS the index width (changing it requires
+    # re-ingesting). For `http` it is a cross-check; 0 means "trust the endpoint".
+    dimension: 512
+    # --- the keys below apply to engine=http only ---
+    base_url: https://api.openai.com/v1
+    model: text-embedding-3-small
+    # Environment variable holding the key. Never the key itself.
+    api_key_env: OPENAI_API_KEY
+    timeout_seconds: 30.0
+    batch_size: 32
+
+memory:
+  # Long-term memory: what the assistant knows about this user across sessions.
+  # Needs `database` (always on) and `vector`. `auto_extract` additionally needs
+  # an LLM; without a key, memory still stores and recalls, it just will not mine
+  # conversations for facts on its own.
+  enabled: true
+  # How many memories recall returns when the caller does not say.
+  max_recall: 5
+  # Blended-score floor. A wrong memory recited confidently is worse than none,
+  # so this is deliberately not 0.
+  min_score: 0.15
+  # Conversation turns replayed into the prompt for a session.
+  history_turns: 10
+  # Mine each turn for durable facts. A cheap marker filter runs first, so small
+  # talk never reaches the model — only turns containing "我 / 记住 / 以后 / my …".
+  auto_extract: true
+  # Upper bound on memories proposed per turn.
+  max_extract: 3
+  # Compress a session into one summary memory once it holds this many turns.
+  # The raw turns are kept; 0 disables summarisation.
+  summarize_after_turns: 20
+  # Soft cap per scope. Past it, the least-used memories are pruned — pinned ones
+  # and ones that keep being recalled are never candidates.
+  max_memories: 500
+
+knowledge:
+  # RAG over the user's own documents. Ingestion is explicit (`jarvis --ingest`),
+  # never a background crawl of the disk.
+  enabled: true
+  # Target chunk length in characters. ~600 keeps a chunk inside one topic
+  # without splitting mid-paragraph too often.
+  chunk_size: 600
+  # Characters shared between neighbouring chunks, so a sentence split across a
+  # boundary is still recoverable from either side. Must be < chunk_size.
+  chunk_overlap: 120
+  # Chunks retrieved per question when the caller does not say.
+  top_k: 5
+  # Similarity floor for a chunk to count as evidence.
+  min_score: 0.1
+  # Refuse files larger than this rather than reading them into memory (MB).
+  max_file_mb: 20
+
+tools:
+  # The tool framework and its safety policy. Every tool declares a risk level;
+  # the two allow_* switches below are the only ones that can change the machine.
+  enabled: true
+  # Require an explicit confirmation flag on dangerous tools. Leave this on.
+  confirm_dangerous: true
+  # Permit tools that create, modify or delete files. Off by default: reading is
+  # recoverable, overwriting a document is not.
+  allow_write: false
+  # Permit tools that run a shell command. Off by default, and it should stay off
+  # unless the operator has decided otherwise.
+  allow_shell: false
+  # Directories tools may touch. Empty means "the user's home directory".
+  file_roots: []
+  # Truncate tool output before it reaches the model, so one listing of a huge
+  # directory cannot blow the context window.
+  max_result_chars: 4000
+
+scheduler:
+  # Timed jobs, persisted in the shared database and re-registered on boot.
+  enabled: true
+  # IANA zone used to interpret cron expressions.
+  timezone: Asia/Shanghai
+  # How many jobs may run at the same time.
+  max_concurrent: 2
+  # How late a job may still run after its scheduled time. Without a grace window
+  # a laptop that was asleep at 09:00 would never run the 09:00 job.
+  misfire_grace_seconds: 60
+
+workflow:
+  # Trigger -> condition -> action chains, defined as YAML files.
+  enabled: true
+  # Folder under the data root holding *.yaml definitions.
+  directory: workflows
+  # Hard cap on steps per run, so a cycle in a definition cannot spin forever.
+  max_steps: 32
+
+ocr:
+  # Offline text recognition (RapidOCR: ONNX Runtime, no PyTorch). Off by default
+  # because it pulls a native dependency; enable with JARVIS_OCR__ENABLED=true.
+  enabled: false
+  # rapidocr is the only engine for now (offline, ~15 MB of models).
+  engine: rapidocr
+  # Language hints.
+  languages: [ch, en]
+  # Drop text blocks below this confidence: OCR noise in a prompt is worse than
+  # a missing line.
+  min_confidence: 0.5
+
+vision:
+  # Screen capture and image understanding. Off by default: a screenshot is the
+  # most private thing this assistant can touch, so it is never implicit.
+  enabled: false
+  # mss (fast, small) | pillow (already present on many installs).
+  backend: mss
+  # Refuse images larger than this (MB).
+  max_image_mb: 8
+
+browser:
+  # Playwright-driven browsing. Off by default: enabling it downloads a browser
+  # binary (~150 MB). Set PLAYWRIGHT_BROWSERS_PATH to keep it off the C: drive.
+  enabled: false
+  # Run without a visible window.
+  headless: false
+  # Per-navigation timeout (seconds).
+  timeout_seconds: 20.0
+  # Truncate extracted page text before it reaches the model.
+  max_text_chars: 8000
+  # If non-empty, only these domains may be visited.
+  allow_domains: []
+  # Domains never visited, checked before the allow-list.
+  block_domains: []
+
+computer:
+  # Mouse/keyboard control. Off by default, and `dry_run` is on even then: the
+  # controller reports what it *would* do without moving the cursor.
+  enabled: false
+  # Plan actions without executing them.
+  dry_run: true
+  # Permit pointer movement and clicks.
+  allow_mouse: false
+  # Permit typing and key presses.
+  allow_keyboard: false
+  # Require an explicit confirmation flag for risky actions.
+  confirm_dangerous: true
+
+mcp:
+  # Model Context Protocol client: plug external tool servers into the same tool
+  # registry the built-in tools use.
+  enabled: false
+  # How long a server may take to come up (seconds).
+  connect_timeout_seconds: 20.0
+  # How long one tool call may take (seconds).
+  call_timeout_seconds: 60.0
+  # One entry per server. Example (uncomment and edit):
+  #   servers:
+  #     filesystem:
+  #       transport: stdio
+  #       command: npx
+  #       args: ["-y", "@modelcontextprotocol/server-filesystem", "E:\\docs"]
+  #       env: {}
+  #       enabled: true
+  servers: {}
+
+plugins:
+  # Third-party plugins dropped into a folder. Off by default; a plugin runs
+  # arbitrary code, so loading one should be a visible act.
+  enabled: false
+  # Folder under the data root holding one directory per plugin.
+  directory: plugins
+  # Also load plugins advertised through the `jarvis.plugins` entry point.
+  # Off by default: entry points run code from packages the user never chose.
+  allow_entrypoints: false
+
+prompt:
+  # Every prompt JARVIS sends is defined in jarvis/prompt/templates.py and can be
+  # replaced here without touching code — the wording *is* the behaviour for a
+  # prompt-driven assistant, so retuning it for a customer should not need a
+  # developer.
+  #
+  # Keys are template names; values are the complete replacement body. Run
+  #   python -m jarvis --prompts
+  # to list the names, their variables and their current text.
+  #
+  # A name that is not a known template is ignored with a warning rather than
+  # refused, so a typo leaves the assistant working with the shipped prompt.
+  #
+  # Example:
+  #   overrides:
+  #     hud_assistant: "你是小夜。只回答用户问的，不要主动扩展话题。"
+  overrides: {}
+
+planner:
+  # Task decomposition: turn a multi-step request into an ordered plan.
+  # The planner produces and maintains the plan; running the steps belongs to
+  # the orchestration layer, which owns the tools.
+  enabled: true
+  # Hard cap on steps per plan. Also sent to the model — without it, a one-line
+  # request comes back as twelve steps.
+  max_steps: 12
+  # Sampling temperature for decomposition. 0.2 is low on purpose: planning is a
+  # structured-output task, and the model's creativity shows up as tools that
+  # do not exist. Set to null to use the provider default.
+  temperature: 0.2

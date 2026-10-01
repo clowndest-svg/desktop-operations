@@ -41,6 +41,7 @@ from jarvis.core.exceptions import (
     WorkflowError,
 )
 from jarvis.core.result import Err, Ok, Result, UnwrapError
+from jarvis.core.text import is_cjk, keyword_tokens, match_ratio
 
 __all__ = [
     "APP_NAME",
@@ -82,4 +83,7 @@ __all__ = [
     "VoiceStatus",
     "WakeWordError",
     "WorkflowError",
+    "is_cjk",
+    "keyword_tokens",
+    "match_ratio",
 ]

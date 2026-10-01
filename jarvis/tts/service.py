@@ -27,6 +27,7 @@ from dataclasses import dataclass
 
 from jarvis.config.schema import TtsSection
 from jarvis.core.exceptions import TtsError
+from jarvis.core.text import speakable
 from jarvis.tts.engines import CosyVoiceTtsEngine, EdgeTtsEngine
 from jarvis.tts.types import AudioChunk, ShouldStop, SpeechSynthesizer
 
@@ -120,10 +121,20 @@ class TtsService:
         This is the "边合成边播" entry point: the caller plays each chunk as
         it arrives. Pass ``should_stop`` (e.g. wired to VAD ``SPEECH_START``)
         to cancel mid-utterance for Barge-In.
+
+        The text is reduced to what a voice can say (:func:`speakable`) here and
+        nowhere else: this is the one waist every utterance passes, and the caller's
+        string is also what lands in the transcript and on screen, where the
+        punctuation belongs. A reply that was only ever going to be silence
+        (emoji, a code block) yields nothing rather than a breath.
         """
         engine = self._require_engine()
+        spoken = speakable(text)
+        if not spoken:
+            logger.debug("nothing speakable in a %d-character reply; staying silent", len(text))
+            return
         yield from engine.synthesize(
-            text,
+            spoken,
             voice=voice,
             speed=speed,
             volume=volume,

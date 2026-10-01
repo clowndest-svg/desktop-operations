@@ -21,6 +21,7 @@ from jarvis.asr import AsrService, AsrSettings
 from jarvis.config import AppConfig
 from jarvis.core.exceptions import AudioError, LlmError
 from jarvis.llm import ChatMessage, LlmService
+from jarvis.prompt import render_prompt
 from jarvis.tts import TtsService, TtsSettings
 from jarvis.vad import SileroVadEngine, SpeechSegment, VoiceActivitySegmenter
 
@@ -28,13 +29,6 @@ logger = logging.getLogger("jarvis.app.demo")
 
 DEMO_SAMPLE_RATE = 16_000
 """The pipeline-wide capture format the VAD/ASR stages expect."""
-
-DEMO_SYSTEM_PROMPT = (
-    "你是 JARVIS，一个语音助手。用不超过 40 个汉字回答，只说一句结论加一句做法。"
-    "这是要朗读出来的文本：禁止列表、换行、引号、表情和 Markdown 标记。"
-)
-"""Length-capped on purpose: 40 characters is ~8 spoken seconds, and every
-Markdown mark the model emits turns into an audible pause on the way out."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,7 +135,7 @@ class VoiceDemoSession:
         try:
             response = service.client.complete(
                 [
-                    ChatMessage.system(DEMO_SYSTEM_PROMPT),
+                    ChatMessage.system(render_prompt("demo_assistant")),
                     ChatMessage.user(transcript),
                 ]
             )

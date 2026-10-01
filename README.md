@@ -2,13 +2,20 @@
 
 一个面向 Windows 的语音优先、多 Agent 架构的 AI 助手(对标《钢铁侠》JARVIS)。
 
-> 当前进度:**阶段十七 —— 桌面 HUD(pywebview + Vue3)已可用**;语音链路
-> 唤醒→VAD→ASR→LLM→TTS 在**一台真机上用真模型跑通**(6 种音色/语速 24/24 命中唤醒、
-> 磁盘扫描 3 秒 590 行)。注意口径:自动化测试跑的是 fake 引擎,真模型路径靠
-> `scripts/verify_wake_words.py` 与 `docs/desktop-operations.md` 的实测清单保证,
-> 不是靠 CI。共二十阶段,见 `docs/phases/`。
+> 当前进度:**二十个阶段的包全部有实现,没有空壳了** —— 在原有语音链路与桌面 HUD
+> 之上,补齐了长期记忆、RAG 知识库、工具调用、定时任务、工作流、MCP、插件、
+> OCR/视觉、浏览器、桌面控制、任务规划(`planner`)与提示词集中管理(`prompt`)。
+>
+> 语音链路 唤醒→VAD→ASR→LLM→TTS 在**一台真机上用真模型跑通**(6 种音色/语速
+> 24/24 命中唤醒、磁盘扫描 3 秒 590 行)。注意口径:自动化测试跑的是 fake 引擎,
+> 真模型路径靠 `scripts/verify_wake_words.py` 与 `docs/desktop-operations.md`
+> 的实测清单保证,不是靠 CI。
+>
+> **对外报价/写文案之前,先看 `commercial/00-能力清单.md`** —— 那里按
+> 「已实测 / 有条件 / 未实现」三档分开,别拿测试数当实测数。
 >
 > 桌面端怎么装、怎么演示、出问题查哪里 → **[docs/desktop-operations.md](docs/desktop-operations.md)**
+> 阶段十一~十八做了什么、没做什么 → **[docs/phases/phase-11-to-18.md](docs/phases/phase-11-to-18.md)**
 
 ## 设计目标
 
@@ -40,6 +47,19 @@ python -m venv .venv
 #     默认不装;缺 psutil 只会让仪表盘显示"遥测读取失败",不影响窗口打开:
 .venv/Scripts/python -m pip install -e ".[desktop]"
 
+# 2e. 可选能力(各自独立,用到再装):
+#     .[docs]       PDF / DOCX 入库(pypdf + python-docx);txt/md/csv/json/代码不用装
+#     .[vision]     离线 OCR + 截图(rapidocr-onnxruntime + mss + pillow)
+#     .[automation] 浏览器与桌面控制(playwright + pyautogui)
+#
+# 2f. 别让这些装到 C 盘。默认位置全是系统盘:数据根在 %LOCALAPPDATA%\Jarvis,
+#     模型在 %USERPROFILE%\.cache,Playwright 浏览器在 %USERPROFILE%\AppData。
+#     光语音模型就约 900 MB,浏览器再加约 150 MB。先跑一次重定向脚本:
+#         scripts\setup_env_paths.ps1          # 只预览会改哪些变量
+#         scripts\setup_env_paths.ps1 -Apply   # 写入用户级环境变量
+#     (用 PowerShell 执行;不想改系统变量就设 JARVIS_HOME 一个,其余会跟着走。
+#      双击「启动小夜.bat」时脚本自己会设好,不需要预先配置。)
+
 # 2d. 桌面界面是 Vue 构建产物,不入 git(哈希文件名每次变)。首次运行或打包前构建一次,
 #     产物落在 jarvis/ui/web/(已在 package-data 里,会随 wheel 分发):
 .venv/Scripts/python -m pip install -e ".[desktop]" && .venv/Scripts/python scripts/build_desktop.py
@@ -58,7 +78,47 @@ python -m venv .venv
 #    不占麦克风、不需要唤醒词,回复音频写到 --out(默认 <输入名>_reply.wav)
 .venv/Scripts/python -m jarvis --wav assets/demo_question.wav --out assets/demo_answer.wav
 .venv/Scripts/python -m jarvis --wav assets/demo_question.wav --skip-llm   # 只验识别+合成
+
+# 4b. 想要「双击就启动」的 exe(交付给别人时的形态):
+#     产物是 dist/小夜/ 整个文件夹(onedir,约 880 MB),不是单个 exe;
+#     快捷方式必须指向文件夹里的 小夜.exe,不能只拷那个 exe。
+#       .venv/Scripts/python -m pip install -e ".[build]"
+#       .venv/Scripts/python -m PyInstaller ^
+#         --distpath E:/BianChengGongJu/JarvisBuild/r1/dist ^
+#         --workpath E:/BianChengGongJu/JarvisBuild/r1/build packaging/jarvis.spec
+#       (用 -File 执行 scripts/create_shortcut.ps1 把快捷方式放上桌面)
+#     详见 docs/desktop-operations.md 第 8 节。
+
+# 5. 命令行里直接用新能力(不需要开窗口,也不需要麦克风)
+.venv/Scripts/python -m jarvis --tools                    # 列出全部工具及其风险等级
+.venv/Scripts/python -m jarvis --ingest E:/资料/手册.pdf    # 入库一个文件或整个目录
+.venv/Scripts/python -m jarvis --ask "部署前要做什么"       # 一次问答:记忆 + 检索 + 工具
+.venv/Scripts/python -m jarvis --memory                   # 看记住了什么
+.venv/Scripts/python -m jarvis --memory --forget          # 清空长期记忆(要输 yes)
+.venv/Scripts/python -m jarvis --prompts                  # 列出全部提示词及其版本
+.venv/Scripts/python -m jarvis --plan "整理下载目录"        # 把目标拆成步骤(要配 Key)
 ```
+
+## 能力开关
+
+每个能力都有自己的 `enabled`,默认值按"会不会动到机器 / 会不会花钱"来定:
+
+| 能力 | 默认 | 打开方式 | 说明 |
+|---|---|---|---|
+| 长期记忆 `memory` | 开 | — | 自动抽取事实要配大模型;不配也能存与召回 |
+| 知识库 `knowledge` | 开 | `--ingest` 入库 | **不会**自动扫描磁盘,必须显式喂文件 |
+| 工具 `tools` | 开 | — | 只读工具可用;**写盘与执行命令默认禁止** |
+| 定时任务 `scheduler` | 开 | 加 job | APScheduler 已在基础依赖里 |
+| 工作流 `workflow` | 开 | 放 YAML 到 `<data>/workflows` | 条件求值不用 `eval` |
+| 向量检索 `vector` | 开 | — | 默认离线哈希嵌入,不需要 API Key |
+| 任务规划 `planner` | 开 | — | 拆解要配大模型;只出计划,不执行 |
+| 提示词 `prompt` | 开 | `prompt.overrides` | 不改代码就能换掉任意一条措辞 |
+| 插件 `plugins` | 关 | `plugins.enabled=true` | 插件是任意代码,加载要是显式动作 |
+| MCP `mcp` | 关 | 配置 `mcp.servers` | 标准库 JSON-RPC,不依赖官方 SDK |
+| OCR `ocr` | 关 | `.[vision]` + `ocr.enabled=true` | RapidOCR,离线,不拉 PyTorch |
+| 视觉 `vision` | 关 | `.[vision]` + `vision.enabled=true` | 截图是最私密的能力,永不隐式 |
+| 浏览器 `browser` | 关 | `.[automation]` + 开关 | 要下浏览器二进制,先设 `PLAYWRIGHT_BROWSERS_PATH` |
+| 桌面控制 `computer` | 关 | `.[automation]` + 开关 | 即使启用了,`dry_run` 仍为 true |
 
 ## 配置
 
@@ -83,6 +143,18 @@ LLM:`llm.providers` 预置 deepseek / openai / kimi / qwen 四个 OpenAI 兼容�
 .venv/Scripts/python -m pytest
 ```
 
+当前状态:ruff / black / mypy(217 个源文件,strict)/ pytest(1149 项)全绿。
+
+界面自查(不开窗口、不靠外部工具):
+
+```bash
+.venv/Scripts/python -m pytest tests/test_ui_bundle.py -q          # 产物与加载路径
+.venv/Scripts/python scripts/capture_window.py --title 小夜 --out logs/hud.png
+```
+
+窗口一片黑的话先看 [docs/desktop-operations.md](docs/desktop-operations.md) 第 9 节的
+「黑屏」小节 —— 那里写了两个已知原因和对应的诊断输出。
+
 ## 项目结构(阶段二定稿)
 
 ```
@@ -93,16 +165,32 @@ jarvis/
   llm/             L1 LLM 访问层:OpenAI 兼容多供应商 + 流式 + 重试(已实现)
   audio/           L1 音频采集抽象:16kHz/单声道/s16le 帧流水线 + AudioSource 协议(已实现)
   app/             L4 组合根:Application 生命周期 + 离线演示入口 + 对话服务(供 UI 调用)(已实现)
-  prompt/ vad/ asr/ tts/
   wakeword/        L1 唤醒词:OpenWakeWord(默认·离线·免Key)+ Porcupine(可选·AccessKey)
                    + asr(SenseVoice 转写后匹配关键词,中文唤醒走这条·需 orchestration)(已实现)
   vad/             L1 语音活动检测:Silero VAD(离线·TorchScript,模型随 wheel 分发无需下载)流式端点状态机(已实现)
   asr/             L1 语音识别:SenseVoice/FunASR(离线·ONNX)流式识别 + VAD→ASR 切片(已实现)
   tts/             L1 语音合成:Edge-TTS(默认·云端)/ CosyVoice(离线·需按官方指南手动安装);两引擎统一输出 pcm_s16le,边合成边播仅 CosyVoice 成立(已实现)
-  agent/ planner/ memory/ knowledge/ vector/ database/
-  tools/ vision/ ocr/ browser/ computer/ mcp/
-  ui/              L5 桌面 HUD:pywebview 壳 + JS 桥(desktop.py)、语音状态桥(state_bridge.py)、Vue 构建产物(web/,不入 git)。原 PySide6 对话窗口已被 HUD 取代并删除(阶段 17)
-  workflow/ scheduler/ plugins/        # 按阶段逐步实现
+  agent/           L3 多 Agent:chat / tools 两个 worker(阶段 10)
+  planner/         L3 任务分解:模型出步骤,校验器查环/查悬空依赖,再交给执行层;
+                   只维护计划,不执行(阶段 10)
+  prompt/          L2 提示词:全部措辞集中在一处 + 版本号 + 配置可覆盖(阶段 5+)
+  memory/          L2 长期记忆:事实抽取(先过关键词门,省模型调用)、混合召回、
+                   对话持久化、长对话压缩(阶段 11)
+  knowledge/       L2 RAG:文档加载(UTF-8→GB18030 回退)、按句切块带重叠、
+                   混合召回、带引用的问答(阶段 11)
+  vector/          L1 向量索引:SQLite BLOB + 余弦相似度;默认离线哈希嵌入,
+                   也可配 OpenAI 兼容 /embeddings(阶段 11)
+  database/        L1 持久化:单连接 + 可重入锁、按命名空间的迁移、类型化取值助手(阶段 11)
+  tools/           L2 工具框架:JSON Schema 规格、风险/权限双闸、12 个内置工具(阶段 12)
+    builtins/        时钟、算术、文本、文件、系统、网络、Shell
+  ocr/ vision/     L1/L2 离线 OCR 与屏幕理解(RapidOCR;截图默认关闭)(阶段 13)
+  browser/ computer/  L1/L2 Playwright 与鼠标键盘控制(域名黑白名单、演练模式)(阶段 14)
+  mcp/             L2 MCP 客户端:标准库 JSON-RPC 实现,工具桥接进同一个注册表(阶段 15)
+  workflow/ scheduler/  L3 YAML 工作流与持久化定时任务(阶段 16)
+  plugins/         L2 插件发现/装载/热更新(阶段 18)
+  ui/              L5 桌面 HUD:pywebview 壳 + JS 桥(desktop.py)、语音状态桥(state_bridge.py)、
+                   回环 HTTP 静态服务(static_server.py)、Vue 构建产物(web/,不入 git)。
+                   原 PySide6 对话窗口已被 HUD 取代并删除(阶段 17)
 tests/             单元测试
 docs/              architecture.md(模块依赖强制规则)+ phases/ 阶段报告
 scripts/ assets/ logs/

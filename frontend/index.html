@@ -4,6 +4,15 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>小夜</title>
+    <script>
+      // The pet window has to start out transparent. A module script is deferred,
+      // and one painted frame of the HUD's near-black is a dark box sitting on the
+      // operator's desktop -- so the mode is read here, synchronously, before the
+      // first frame.
+      if (new URLSearchParams(location.search).get('mode') === 'pet') {
+        document.documentElement.dataset.mode = 'pet'
+      }
+    </script>
     <style>
       html,
       body,
@@ -11,6 +20,12 @@
         height: 100%;
         margin: 0;
         background: #04070d;
+      }
+
+      html[data-mode='pet'],
+      html[data-mode='pet'] body,
+      html[data-mode='pet'] #app {
+        background: transparent;
       }
     </style>
   </head>

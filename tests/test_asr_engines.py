@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from typing import Any, cast
 
 import pytest
 
@@ -16,7 +17,6 @@ from jarvis.vad.types import SpeechSegment
 
 def asr_section(**overrides: object) -> AsrSection:
     from collections.abc import Mapping
-    from typing import cast
 
     raw = dict(cast(Mapping[str, object], load_defaults()["asr"]))
     raw.update(overrides)
@@ -176,13 +176,16 @@ def _sensevoice_with_fakes(torch: _FakeTorch, model: object) -> object:
 
     from jarvis.asr.engines import SenseVoiceAsrEngine
 
-    engine = object.__new__(SenseVoiceAsrEngine)
-    engine._model = model  # type: ignore[attr-defined]
-    engine._torch = torch  # type: ignore[attr-defined]
-    engine._numpy = numpy  # type: ignore[attr-defined]
-    engine._language = "zh"  # type: ignore[attr-defined]
-    engine._temperature = 0.0  # type: ignore[attr-defined]
-    engine._beam_size = 1  # type: ignore[attr-defined]
+    # ``object.__new__`` bypasses ``__init__`` (which would load weights), so the
+    # result is typed ``object``; ``Any`` here is the honest annotation for "an
+    # engine whose private attributes this test is deliberately setting".
+    engine = cast(Any, object.__new__(SenseVoiceAsrEngine))
+    engine._model = model
+    engine._torch = torch
+    engine._numpy = numpy
+    engine._language = "zh"
+    engine._temperature = 0.0
+    engine._beam_size = 1
     return engine
 
 

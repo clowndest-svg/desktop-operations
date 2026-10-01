@@ -6,6 +6,9 @@ Composition:
     * :mod:`jarvis.ui.state_bridge` — turns voice-pipeline events into immutable
       :class:`~jarvis.ui.state_bridge.UiState` snapshots. Deliberately Qt-free and
       webview-free so it is unit-testable headlessly.
+    * :mod:`jarvis.ui.audio_bridge` — the other direction: synthesized speech going
+      *into* the page, so the visuals can be measured off the voice rather than
+      guessed from a state machine.
     * ``jarvis/ui/web/`` — the built Vue bundle (Vite output). Not in git: rebuild
       with ``python scripts/build_desktop.py`` before packaging a wheel.
 

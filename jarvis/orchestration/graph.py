@@ -19,14 +19,9 @@ from jarvis.agent.tools import ToolAgent
 from jarvis.llm.client import LlmClient
 from jarvis.llm.types import ChatMessage
 from jarvis.orchestration.types import GraphState
+from jarvis.prompt import render_prompt
 
 logger = logging.getLogger("jarvis.orchestration.graph")
-
-_SUPERVISOR_PROMPT = (
-    "你是 JARVIS 的调度器。判断用户这句话应由哪个助手处理，"
-    "只回复一个词：chat（闲聊/问答/通用对话）或 tools（查时间、算数等工具类请求）。"
-    "示例：'现在几点' -> tools；'讲个笑话' -> chat。"
-)
 
 _ROUTE_CHAT = "chat"
 _ROUTE_TOOLS = "tools"
@@ -107,7 +102,7 @@ class AgentGraph:
             return {"next": _ROUTE_FINISH}
         user_text = state.get("user_text", "")
         messages = [
-            ChatMessage.system(_SUPERVISOR_PROMPT),
+            ChatMessage.system(render_prompt("supervisor_routing")),
             ChatMessage.user(user_text),
         ]
         reply = self._llm.complete(messages).content.lower()

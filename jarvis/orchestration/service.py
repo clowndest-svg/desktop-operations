@@ -118,6 +118,8 @@ class OrchestrationService:
         vad_engine_factory: Callable[[], VoiceActivityDetector] | None = None,
         graph_factory: Callable[[], _GraphPort] | None = None,
         on_event: Callable[[PipelineEvent], None] | None = None,
+        voice_provider: Callable[[], str | None] | None = None,
+        transcript_sink: Callable[[str, str], None] | None = None,
     ) -> None:
         self._settings_provider = settings_provider
         self._asr = asr
@@ -128,6 +130,8 @@ class OrchestrationService:
         self._wakeword_engine_factory = wakeword_engine_factory
         self._vad_engine_factory = vad_engine_factory
         self._graph_factory = graph_factory
+        self._voice_provider = voice_provider
+        self._transcript_sink = transcript_sink
         self._on_event = on_event
         self._pipeline: VoicePipeline | None = None
 
@@ -240,6 +244,8 @@ class OrchestrationService:
             player=player,
             barge_in=settings.section.barge_in,
             on_event=self._on_event,
+            voice_provider=self._voice_provider,
+            transcript_sink=self._transcript_sink,
         )
         self._pipeline.start()
         logger.info(

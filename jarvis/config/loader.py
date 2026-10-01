@@ -26,15 +26,15 @@ from typing import cast
 
 import yaml
 
-from jarvis.config.paths import ENV_CONFIG_FILE, ENV_HOME, AppPaths
+from jarvis.config.paths import ENV_CONFIG_FILE, AppPaths
 from jarvis.config.schema import AppConfig
 from jarvis.core.constants import DEFAULT_ENCODING, ENV_PREFIX
 from jarvis.core.exceptions import ConfigurationError
 
 _DEFAULTS_RESOURCE = "defaults.yaml"
 
-# JARVIS_* variables that steer *where* config lives, not *what* it contains.
-_ROUTING_ENV_VARS = frozenset({ENV_HOME, ENV_CONFIG_FILE})
+# The separator that makes a JARVIS_* name an override: JARVIS_SECTION__KEY.
+_OVERRIDE_SEPARATOR = "__"
 
 
 # ---------------------------------------------------------------------------
@@ -109,14 +109,24 @@ def env_overrides(environ: Mapping[str, str] | None = None) -> dict[str, object]
     Key segments are lowercased (env vars are conventionally upper case,
     YAML keys are lower case). Values are parsed as YAML scalars; if parsing
     fails they are kept as raw strings.
+
+    A ``JARVIS_*`` name with no ``SECTION__KEY`` body is not an override at all --
+    it is a routing or launcher variable. ``JARVIS_HOME`` and ``JARVIS_CONFIG`` say
+    where the files live, and ``启动小夜.bat`` exports its own ``JARVIS_ROOT`` as the
+    base for the model-cache variables. Treating those as configuration used to
+    make the double-click launcher die on ``unknown key 'root'`` before it opened
+    a window, which is a hard way to learn that a helper variable and a setting
+    share a prefix.
     """
     env = os.environ if environ is None else environ
     overrides: dict[str, object] = {}
     for name, raw_value in env.items():
-        if not name.startswith(ENV_PREFIX) or name in _ROUTING_ENV_VARS:
+        if not name.startswith(ENV_PREFIX):
             continue
         key_path = name.removeprefix(ENV_PREFIX)
-        segments = [segment.lower() for segment in key_path.split("__")]
+        if _OVERRIDE_SEPARATOR not in key_path:
+            continue
+        segments = [segment.lower() for segment in key_path.split(_OVERRIDE_SEPARATOR)]
         if not all(segments):
             raise ConfigurationError(
                 f"malformed override variable name: {name}",

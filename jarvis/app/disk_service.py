@@ -12,14 +12,56 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from jarvis.core.exceptions import JarvisError
+from jarvis.core.text import human_bytes as _human
 from jarvis.tools.disk_cleaner import JunkItem
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from jarvis.tools.disk_cleaner import DiskCleaner
 
 logger = logging.getLogger("jarvis.app.disk_service")
+
+
+def _items(group: Mapping[str, object]) -> list[dict[str, object]]:
+    """The rows of one scan group.
+
+    Defensively typed because ``DiskPlan.groups`` is ``tuple[dict[str, object], ...]``
+    -- the shape this module itself wrote, but ``object`` is what the dataclass can
+    promise, and an advisory prompt must not be the thing that crashes on a surprise.
+    """
+    raw = group.get("items")
+    if not isinstance(raw, (list, tuple)):
+        return []
+    return [entry for entry in raw if isinstance(entry, dict)]
+
+
+def _as_int(value: object, default: int = 0) -> int:
+    return value if isinstance(value, int) else default
+
+
+@dataclass(frozen=True, slots=True)
+class _Row:
+    """One scan entry, reduced to the line an advisory prompt reads."""
+
+    size: int
+    text: str
+
+    @staticmethod
+    def from_wire(item: Mapping[str, object]) -> _Row:
+        size = _as_int(item.get("size_bytes"))
+        shape = "目录" if item.get("is_directory") else "文件"
+        path = str(item.get("path") or "")
+        if len(path) > 90:
+            path = path[:44] + "…" + path[-42:]
+        text = f"{_human(size)}  {shape}  {path}  ·  {item.get('category') or '未分类'}"
+        members = _as_int(item.get("member_count"), 1)
+        if members > 1:
+            text += f"  ·  含 {members} 个文件"
+        sample = item.get("sample")
+        if isinstance(sample, (list, tuple)) and sample:
+            text += "  ·  例如 " + "、".join(str(name) for name in list(sample)[:3])
+        return _Row(size=size, text=text)
 
 
 def _item_to_dict(item: JunkItem) -> dict[str, object]:
@@ -87,6 +129,7 @@ class DiskService:
     def __init__(self, cleaner_factory: Callable[[], DiskCleaner]) -> None:
         self._cleaner_factory = cleaner_factory
         self._cleaner: DiskCleaner | None = None
+        self._last: DiskPlan | None = None
 
     def start(self) -> None:
         if self._cleaner is not None:
@@ -96,9 +139,20 @@ class DiskService:
 
     def stop(self) -> None:
         self._cleaner = None
+        self._last = None
+
+    @property
+    def last_plan(self) -> DiskPlan | None:
+        """The scan the page is currently looking at, or ``None`` before any."""
+        return self._last
 
     def plan(self) -> DiskPlan:
         """Scan for junk. Read-only; safe to call whenever the page asks."""
+        result = self._scan()
+        self._last = result
+        return result
+
+    def _scan(self) -> DiskPlan:
         cleaner = self._cleaner
         if cleaner is None:
             return DiskPlan((), 0, 0, False, "磁盘服务未启动")
@@ -121,6 +175,38 @@ class DiskService:
             skipped_protected=report.skipped_protected,
             truncated=report.truncated,
         )
+
+    def digest(self, *, limit: int = 12) -> str:
+        """The last scan, written out for a model to read.
+
+        Deliberately a *digest* rather than the raw plan: the page has hundreds of
+        rows, a model given all of them spends its attention on paths it cannot
+        check, and the request costs real money every time it is pressed. So: the
+        per-category totals, then the largest entries across the whole scan, which
+        is where any interesting anomaly actually lives.
+
+        Returns ``""`` when there has been no scan -- the caller turns that into a
+        message for the operator, because "the AI had nothing to say" and "there was
+        nothing to say about it" must not look the same.
+        """
+        plan = self._last
+        if plan is None or plan.error:
+            return ""
+        rows = [_Row.from_wire(item) for group in plan.groups for item in _items(group)]
+        head = f"合计 {_human(plan.total_bytes)}，分 {len(plan.groups)} 类"
+        if plan.skipped_protected:
+            head += f"；另有 {plan.skipped_protected} 项被保护规则挡下，没有列出"
+        if plan.truncated:
+            head += "；某些类别的条目数已达上限，合计只是下限"
+        lines = [head]
+        for group in plan.groups:
+            category = str(group.get("category") or "未分类")
+            size = _human(_as_int(group.get("total_bytes")))
+            lines.append(f"- {category}：{size}（{len(_items(group))} 项）")
+        rows.sort(key=lambda row: row.size, reverse=True)
+        lines.append(f"最大的 {min(limit, len(rows))} 项：")
+        lines.extend(row.text for row in rows[:limit])
+        return "\n".join(lines)
 
     def clean(self, items: list[object], *, confirmed: bool) -> DiskOutcome:
         """Delete exactly what the operator ticked, if they confirmed.

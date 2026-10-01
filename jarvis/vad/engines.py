@@ -89,7 +89,16 @@ class SileroVadEngine:
             # ``load_silero_vad`` returns a TorchScript module whose signature is
             # ``forward(Tensor x, int sr)``: it rejects ndarrays outright, and
             # wants the 1-D frame without a leading batch dimension.
-            out = self._model(self._torch.from_numpy(pcm), self._sample_rate)
+            #
+            # ``no_grad`` is not a speed nicety here -- it is what keeps the process
+            # from growing. The wrapper is *stateful*: it feeds its own RNN state
+            # back into the next call. With grad enabled each frame's graph is
+            # therefore chained onto the previous one, so memory climbs by roughly
+            # 50 MB/minute of silence, in native allocations that tracemalloc never
+            # sees. The library's own helpers wrap the same call (utils_vad.py:127,
+            # :211, :506); calling the model directly has to keep that up.
+            with self._torch.no_grad():
+                out = self._model(self._torch.from_numpy(pcm), self._sample_rate)
         except Exception as exc:  # pragma: no cover - environment specific
             raise VadError("Silero VAD inference failed", details={"cause": repr(exc)}) from exc
         # The graph tensor still carries its autograd history; detach before

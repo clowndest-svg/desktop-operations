@@ -23,14 +23,26 @@
       </li>
     </ul>
     <p v-else class="hud-label disk__empty">未读取到分区信息</p>
+
+    <!--
+      A low-space warning belongs to the panel that shows the space. The top bar's
+      告警 chip is the everywhere-version of the same sentence; this is the version
+      you read while already looking at the bar that is nearly full.
+    -->
+    <p v-for="line in spaceWarnings" :key="line" class="disk__warn">{{ line }}</p>
   </section>
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import { formatBytes } from '@/api/bridge'
 import { useSystemStore } from '@/stores/system'
 
 const store = useSystemStore()
+
+const spaceWarnings = computed(() =>
+  store.warnings.filter((line) => store.disks.some((disk) => line.startsWith(disk.mount))),
+)
 
 function tone(percent: number): string {
   if (percent >= 90) return 'var(--hud-red)'
@@ -80,6 +92,8 @@ function tone(percent: number): string {
 .disk__bar {
   height: 4px;
   margin: 5px 0 3px;
+  border-radius: var(--hud-pill);
+  overflow: hidden;
   background: rgba(77, 216, 255, 0.12);
 }
 
@@ -95,5 +109,16 @@ function tone(percent: number): string {
 
 .disk__empty {
   padding: 8px 0;
+}
+
+.disk__warn {
+  margin: 0;
+  padding: 6px 11px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--hud-amber);
+  border-radius: var(--hud-radius);
+  border-left: 2px solid rgba(255, 181, 71, 0.55);
+  background: rgba(255, 181, 71, 0.07);
 }
 </style>

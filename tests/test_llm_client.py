@@ -17,7 +17,7 @@ from jarvis.llm.errors import (
 )
 from jarvis.llm.openai_compat import OpenAiCompatClient, OpenAiCompatSettings
 from jarvis.llm.transport import TransportStatusError, TransportTimeoutError
-from jarvis.llm.types import ChatMessage, GenerationOptions, Role, ToolCall
+from jarvis.llm.types import ChatMessage, GenerationOptions, Role, ToolCall, Usage
 
 ENV = {"TEST_API_KEY": "sk-unit-test"}
 
@@ -315,3 +315,82 @@ class TestStream:
         record = next(r for r in caplog.records if "stream ok" in r.message)
         assert getattr(record, "tokens_in", None) == 7
         assert getattr(record, "tokens_out", None) == 3
+
+
+class TestCachedTokenParsing:
+    """The cache number the statistics popup shows, and what "unknown" has to mean.
+
+    Two wire shapes exist in the wild and neither implies the other: OpenAI-style
+    providers nest the count under ``prompt_tokens_details``, Anthropic-style ones
+    put it at the top level of ``usage``. Reading only one is how a provider that
+    *does* report caching gets displayed as "no reading" forever.
+    """
+
+    @staticmethod
+    def _with(usage: dict[str, object]) -> Usage | None:
+        transport = FakeTransport()
+        transport.json_replies.append(
+            {
+                "model": "test-model-2024",
+                "choices": [{"message": {"content": "x"}, "finish_reason": "stop"}],
+                "usage": usage,
+            }
+        )
+        response = make_client(transport).complete([ChatMessage.user("hi")])
+        return response.usage
+
+    def test_openai_style_nested_field_is_read(self) -> None:
+        usage = self._with(
+            {
+                "prompt_tokens": 1000,
+                "completion_tokens": 50,
+                "prompt_tokens_details": {"cached_tokens": 640},
+            }
+        )
+        assert usage is not None
+        assert usage.cached_tokens == 640
+        assert usage.cache_hit_percent == pytest.approx(64.0)
+
+    def test_anthropic_style_flat_field_is_read(self) -> None:
+        usage = self._with(
+            {"prompt_tokens": 800, "completion_tokens": 10, "cache_read_input_tokens": 200}
+        )
+        assert usage is not None
+        assert usage.cached_tokens == 200
+
+    def test_a_provider_that_says_nothing_yields_none_not_zero(self) -> None:
+        """The whole honesty of 「无读数」 rests on this distinction."""
+        usage = self._with({"prompt_tokens": 512, "completion_tokens": 128})
+        assert usage is not None
+        assert usage.cached_tokens is None
+        assert usage.cache_hit_percent is None
+
+    def test_a_genuine_zero_is_kept_as_zero(self) -> None:
+        usage = self._with(
+            {
+                "prompt_tokens": 512,
+                "completion_tokens": 1,
+                "prompt_tokens_details": {"cached_tokens": 0},
+            }
+        )
+        assert usage is not None
+        assert usage.cached_tokens == 0
+        assert usage.cache_hit_percent == 0.0
+
+    def test_a_boolean_is_not_a_token_count(self) -> None:
+        usage = self._with(
+            {
+                "prompt_tokens": 10,
+                "completion_tokens": 1,
+                "prompt_tokens_details": {"cached_tokens": True},
+            }
+        )
+        assert usage is not None
+        assert usage.cached_tokens is None
+
+    def test_a_negative_cache_count_is_clamped_not_propagated(self) -> None:
+        usage = self._with(
+            {"prompt_tokens": 10, "completion_tokens": 1, "cache_read_input_tokens": -5}
+        )
+        assert usage is not None
+        assert usage.cached_tokens == 0

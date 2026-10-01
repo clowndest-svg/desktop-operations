@@ -70,7 +70,15 @@ class ConfigService:
         return self._paths
 
     def start(self) -> None:
-        """Resolve paths, create directories, load and validate config."""
+        """Resolve paths, create directories, load and validate config.
+
+        Idempotent, like every other lifecycle component in this project: the
+        composition root has to call it *early* when it needs a path to construct
+        a service (the database file, the audit log), and ``Application.start()``
+        then calls it again as part of the normal start-up walk.
+        """
+        if self._config is not None:
+            return
         paths = AppPaths.resolve(self._environ)
         paths.ensure()
         self._redirect_model_cache(paths)

@@ -24,6 +24,10 @@ dependencies = [
     "PyYAML>=6.0.1",  # phase 3: configuration system
     "langgraph>=0.2.0",  # phase 10: multi-agent orchestration graph
     "qq-botpy>=1.2.1",  # QQ official bot gateway and message APIs
+    # phase 16: the scheduler. Pure Python, no native code, and scheduler.enabled
+    # defaults to true — so it belongs in the base install rather than an extra
+    # that a default configuration would immediately miss.
+    "APScheduler>=3.10,<4",
 ]
 
 [project.optional-dependencies]
@@ -57,9 +61,44 @@ voice = [
 desktop = [
     "pywebview>=6.2,<7",  # WebView2 shell and the JS bridge
     "psutil>=6.0",       # CPU / memory / disk sampler
+    # The notification-area icon that lets the X mean "hide". pystray talks to the
+    # tray through plain ctypes and brings Pillow with it to draw the bitmap, which
+    # is the same Pillow the vision extra already uses for screen capture.
+    "pystray>=0.19.5",
+    "pillow>=10.0.0",
+    # The six desktop-control tools the HUD advertises are wired to this. Without it
+    # every mouse and keyboard action answers "未执行：缺少 pyautogui" at *any* tier,
+    # which makes the 控制 button on the top bar decoration -- measured on 2026-10-02.
+    # It is ctypes + Pillow underneath, so it costs the bundle nothing the tray did not
+    # already bring. playwright stays out: that one really is 2 GB of browser.
+    "pyautogui>=0.9.54",
 ]
 build = [
     "pyinstaller>=6.6",  # onedir windowed executable packaging
+]
+# Phase 13: reading text off the screen. RapidOCR is the offline engine because
+# it runs on ONNX Runtime and needs no PyTorch — the alternative (PaddleOCR)
+# would add ~2 GB to an install that already carries a speech model.
+vision = [
+    "rapidocr-onnxruntime>=1.3.0",  # offline OCR, ONNX Runtime backend
+    "mss>=9.0.1",                   # fast multi-monitor screen capture
+    "pillow>=10.0.0",               # fallback capture backend + image decoding
+]
+# Phase 14: driving a browser and the desktop. Both are heavy and both can change
+# the machine, so neither is installed by default.
+#   playwright needs its browser binary too, and that binary defaults to the
+#   system drive: set PLAYWRIGHT_BROWSERS_PATH before `playwright install`.
+automation = [
+    "playwright>=1.44.0",  # browser automation
+    "pyautogui>=0.9.54",   # mouse / keyboard control
+]
+# Phase 11: PDF and DOCX ingestion for the knowledge base. Plain text, Markdown,
+# CSV, JSON and source files are read by the standard library; these two formats
+# need a real parser, so they are an extra rather than a reason to make every
+# install carry one.
+docs = [
+    "pypdf>=4.2.0",       # PDF text extraction
+    "python-docx>=1.1.0",  # DOCX text extraction
 ]
 
 [project.scripts]
@@ -100,8 +139,12 @@ select = [
 ]
 
 # Fullwidth Chinese punctuation (，：；（）etc.) is intentional in user-facing
-# prompts and messages for this Chinese assistant; do not flag it.
-ignore = ["RUF001"]
+# prompts and messages for this Chinese assistant; do not flag it. RUF002 is the
+# same rule applied to "attribute docstrings" -- the string that follows an
+# assignment -- which is how the sentence-splitting regex in
+# jarvis/knowledge/chunker.py gets flagged: the full-width marks ARE the pattern,
+# so replacing them with their ASCII lookalikes would silently change behaviour.
+ignore = ["RUF001", "RUF002"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["jarvis"]
@@ -145,6 +188,22 @@ module = [
     "langchain_core.*",
     "botpy",
     "botpy.*",
+    # Phase 11-18 optional capabilities. Each is imported lazily behind a typed
+    # adapter, so the missing stubs stay inside that adapter.
+    "apscheduler",
+    "apscheduler.*",
+    "rapidocr_onnxruntime",
+    "mss",
+    "mss.*",
+    "PIL",
+    "PIL.*",
+    "playwright",
+    "playwright.*",
+    "pyautogui",
+    "pystray",
+    # The CLR types pywebview hands back (a pet window's background colour).
+    "System",
+    "System.*",
 ]
 ignore_missing_imports = true
 

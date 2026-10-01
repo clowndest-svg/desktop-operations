@@ -36,6 +36,7 @@ class FakeTtsEngine:
     def __init__(self, section: TtsSection | None = None) -> None:
         self.section = section
         self.closed = False
+        self.texts: list[str] = []
 
     @property
     def name(self) -> str:
@@ -55,6 +56,7 @@ class FakeTtsEngine:
         should_stop: Callable[[], bool] | None = None,
     ) -> Iterator[AudioChunk]:
         del voice, speed, volume
+        self.texts.append(text)
         for index in range(3):
             if should_stop is not None and should_stop() is True:
                 return
@@ -166,3 +168,41 @@ def test_default_engine_factory_unknown_engine_hard_fails() -> None:
     )
     with pytest.raises(TtsError, match="unknown tts engine"):
         default_engine_factory(bad_section)
+
+
+class TestSpeakableBoundary:
+    """The voice says words and numbers, never the names of punctuation.
+
+    These pin *where* the reduction happens: at the one waist every utterance
+    passes, so the transcript and the screen keep their punctuation while the
+    engine receives the speakable form.
+    """
+
+    def _service(self, engine: FakeTtsEngine) -> TtsService:
+        service = TtsService(lambda: settings(enabled=True), engine_factory=lambda s: engine)
+        service.start()
+        return service
+
+    def test_engine_receives_the_speakable_form(self) -> None:
+        engine = FakeTtsEngine()
+        service = self._service(engine)
+        list(service.synthesize("CPU：45.0%（12 核），内存 1.5 GB。"))
+        service.stop()
+        assert engine.texts == ["CPU 百分之45.0 12 核 内存 1.5 GB"]
+
+    def test_numbers_keep_their_separators(self) -> None:
+        # "45.0" is forty-five; "45 0" is forty-five and a zero. Same for 3,000
+        # and 19:32 -- a sanitizer that shaves these off is a corruption.
+        engine = FakeTtsEngine()
+        service = self._service(engine)
+        list(service.synthesize("19:32 与 3,000 与 45.0"))
+        service.stop()
+        assert engine.texts == ["19:32 与 3,000 与 45.0"]
+
+    def test_a_reply_with_nothing_speakable_stays_silent(self) -> None:
+        engine = FakeTtsEngine()
+        service = self._service(engine)
+        chunks = list(service.synthesize("** 😀 \n```x = 1```"))
+        service.stop()
+        assert chunks == []
+        assert engine.texts == []

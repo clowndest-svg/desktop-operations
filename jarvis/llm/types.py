@@ -11,6 +11,7 @@ every OpenAI-compatible API); actually executing tools is phase 12.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -63,6 +64,14 @@ class ChatMessage:
     tool_calls: tuple[ToolCall, ...] = ()
     """Set on assistant messages that requested tool invocations."""
 
+    images: tuple[str, ...] = ()
+    """Data URLs or http URLs attached to a *user* message.
+
+    Empty for everything except a turn the operator attached pictures to. Providers
+    that cannot see images get the text alone; the attachment is still described in
+    the text so the model knows it was handed something it cannot open.
+    """
+
     @staticmethod
     def system(content: str) -> ChatMessage:
         return ChatMessage(role=Role.SYSTEM, content=content)
@@ -87,6 +96,17 @@ class GenerationOptions:
     temperature: float | None = None
     max_tokens: int | None = None
     top_p: float | None = None
+    tools: tuple[Mapping[str, object], ...] = ()
+    """Function-calling schemas, in the provider's ``tools`` array shape.
+
+    ``jarvis.llm`` deliberately does not build these: the shape belongs to
+    whoever owns the tool list (:class:`jarvis.tools.registry.ToolRegistry`
+    renders it), and keeping the two apart is what stops this package from
+    learning what a tool *is*.
+    """
+
+    tool_choice: str | None = None
+    """``auto`` / ``none`` / ``required``. ``None`` lets the provider decide."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,10 +115,28 @@ class Usage:
 
     prompt_tokens: int
     completion_tokens: int
+    cached_tokens: int | None = None
+    """Prompt tokens the provider served out of its cache, when it says so at all.
+
+    ``None`` means the provider did not report it and every screen must then read
+    「无读数」. A real ``0`` means it answered and nothing was cached. Collapsing
+    those two is how a cache-hit rate quietly turns into a made-up number.
+    """
 
     @property
     def total_tokens(self) -> int:
         return self.prompt_tokens + self.completion_tokens
+
+    @property
+    def cache_hit_percent(self) -> float | None:
+        """Share of the prompt that was cached, or ``None`` when unknowable.
+
+        Clamped to 100 because a provider that counts cached prompt tokens
+        separately from the prompt total can report more cached than input.
+        """
+        if self.cached_tokens is None or self.prompt_tokens <= 0:
+            return None
+        return 100.0 * min(self.cached_tokens, self.prompt_tokens) / self.prompt_tokens
 
 
 @dataclass(frozen=True, slots=True)
