@@ -119,6 +119,28 @@ class AppPaths:
         """
         return self.data_dir / PREFERENCES_FILENAME
 
+    @property
+    def mobile_dir(self) -> Path:
+        """TLS key/certificate and the paired-device list for the phone endpoint.
+
+        Its own directory rather than ``config_dir`` or the data root itself: this
+        tree holds a private key, so it has to be a place a person can point at and
+        delete, and a directory that an operator browsing "what files does 小夜 keep"
+        can open on purpose.
+        """
+        return self.data_dir / "mobile"
+
+    @property
+    def voices_dir(self) -> Path:
+        """Recorded reference clips for cloned voices, plus their index.
+
+        Its own directory for the same reason ``mobile_dir`` has one: this tree is
+        a person's own recorded voice, so it has to be a place they can open and
+        delete without hunting through a shared cache. Not ``models_dir`` either
+        -- these are inputs somebody made, not weights something downloaded.
+        """
+        return self.data_dir / "voices"
+
     def ensure(self) -> None:
         """Create every directory of the layout (idempotent)."""
         for directory in (

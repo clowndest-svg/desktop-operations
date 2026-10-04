@@ -22,9 +22,42 @@ export const talking = ref(false)
 /** Preview mode only: the feed is synthesized here, not spoken by anyone. */
 export const previewing = ref(false)
 
+/**
+ * How long a page waits for the next chunk before it stops calling it "speaking".
+ *
+ * ``talking`` used to be a latch: set by any chunk, cleared only by a ``flush``
+ * message. One lost flush -- a cancelled turn, a page that mounted mid-answer, a
+ * shell that never spoke at all -- and it stayed true forever, which pinned the
+ * desktop figure to the speaking pose and made her refuse to sit down while she
+ * thought. A rolling deadline cannot get stuck: silence itself is the thing that
+ * ends the pose.
+ *
+ * The HUD does not depend on this: ``VoiceCore`` re-asserts ``markTalking`` from the
+ * audio graph on every sample it reads, so a real answer outlives the deadline by
+ * re-arming it sixty times a second. The pet page has no audio graph at all -- it is
+ * the window that only ever drew the latch -- and that is the one that got stuck.
+ */
+const TALKING_HOLD_MS = 2500
+
 let detach: (() => void) | undefined
 let unlock: (() => void) | undefined
 let previewTimer: ReturnType<typeof setTimeout> | undefined
+let talkingTimer: ReturnType<typeof setTimeout> | undefined
+
+/** Say she is speaking, and re-arm the moment that stops saying it. */
+function holdTalking(): void {
+  talking.value = true
+  clearTimeout(talkingTimer)
+  talkingTimer = setTimeout(() => {
+    talking.value = false
+  }, TALKING_HOLD_MS)
+}
+
+function dropTalking(): void {
+  clearTimeout(talkingTimer)
+  talkingTimer = undefined
+  talking.value = false
+}
 
 const apply = (state: { output: string; reason?: string }): void => {
   output.value = state.output === 'browser' ? 'browser' : 'speaker'
@@ -45,11 +78,11 @@ export async function startAudioChannel(): Promise<void> {
   detach = onSpeech((message) => {
     if (message.flush) {
       speech.flush()
-      talking.value = false
+      dropTalking()
       return
     }
     speech.push(message)
-    talking.value = true
+    holdTalking()
   })
   const readiness = await speech.ensure()
   try {
@@ -96,13 +129,13 @@ export function stopAudioChannel(): void {
   unlock = undefined
   clearTimeout(previewTimer)
   previewing.value = false
-  talking.value = false
+  dropTalking()
 }
 
 /** Tell Python to stop producing audio and retract what it already sent. */
 export async function stopSpeech(): Promise<void> {
   speech.flush()
-  talking.value = false
+  dropTalking()
   previewing.value = false
   clearTimeout(previewTimer)
   try {

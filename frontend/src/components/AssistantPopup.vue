@@ -83,7 +83,7 @@
       </template>
 
       <!-- ===================================================== 知识库 -->
-      <template v-else>
+      <template v-else-if="tab === 'knowledge'">
         <p v-if="notice" class="assistant__note" :class="{ 'assistant__note--bad': noticeBad }">{{ notice }}</p>
         <div class="assistant__headrow">
           <span class="hud-label">
@@ -121,47 +121,160 @@
         </ul>
         <p v-else-if="probed" class="assistant__empty">没有命中任何片段。</p>
       </template>
+
+      <!-- ===================================================== 自动化 -->
+      <template v-else>
+        <p v-if="notice" class="assistant__note" :class="{ 'assistant__note--bad': noticeBad }">{{ notice }}</p>
+
+        <div class="assistant__headrow">
+          <span class="hud-label">
+            定时任务 {{ num(overview.scheduler, 'jobs') }}（启用 {{ num(overview.scheduler, 'enabled_jobs') }}）
+            · 工作流 {{ num(overview.workflow, 'definitions') }}
+            · 执行 {{ num(overview.scheduler, 'runs') }} 次 · 失败 {{ num(overview.scheduler, 'failures') }}
+          </span>
+          <button class="hud-btn" type="button" @click="load('automation')">刷新</button>
+        </div>
+
+        <!-- ------------------------------------------------ 定时任务 -->
+        <h3 class="hud-label assistant__section">定时任务</h3>
+        <p class="assistant__hint">
+          提醒归「提醒」页签管，这里只管其余的定时任务（带 <code>trigger: cron</code> 的工作流会出现在这里）。
+        </p>
+        <p v-if="!jobs.length" class="assistant__empty">还没有别的定时任务。</p>
+        <ul v-else class="assistant__list">
+          <li
+            v-for="row in jobs"
+            :key="row.job_id"
+            class="assistant__row"
+            :class="{ 'assistant__row--off': !row.enabled }"
+          >
+            <span class="hud-chip">{{ row.trigger }}</span>
+            <span class="assistant__text">{{ row.name }}</span>
+            <span v-if="row.enabled && row.next_run" class="hud-label assistant__meta">下次 {{ row.next_run }}</span>
+            <span v-else-if="!row.enabled" class="hud-chip">已停</span>
+            <!--
+              The last outcome is on the row rather than behind a click: "it has been
+              failing every night" is the one thing a schedule list exists to say.
+            -->
+            <span
+              v-if="row.last"
+              class="hud-chip"
+              :class="{ 'assistant__chip--bad': !row.last.ok }"
+              :title="row.last.detail || row.last.error"
+            >
+              {{ row.last.ok ? '上次成功' : '上次失败' }}
+            </span>
+            <button class="hud-btn" type="button" @click="flipJob(row)">
+              {{ row.enabled ? '停用' : '启用' }}
+            </button>
+            <button class="hud-btn" type="button" @click="tryJob(row.job_id)">试跑</button>
+            <button class="hud-btn" type="button" @click="dropJob(row.job_id)">删除</button>
+          </li>
+        </ul>
+
+        <!-- -------------------------------------------------- 工作流 -->
+        <h3 class="hud-label assistant__section">工作流</h3>
+        <div class="assistant__headrow">
+          <span class="assistant__hint">定义放在数据目录的 workflows 文件夹里。</span>
+          <button class="hud-btn" type="button" @click="reloadWf">重新读取</button>
+        </div>
+        <p v-if="!workflows.length" class="assistant__empty">还没有工作流定义。</p>
+        <ul v-else class="assistant__list">
+          <li v-for="row in workflows" :key="row.name" class="assistant__row">
+            <span class="hud-chip">{{ row.trigger }}</span>
+            <span class="assistant__text">{{ row.name }}</span>
+            <span class="hud-label assistant__meta">{{ row.steps.length }} 步</span>
+            <button class="hud-btn" type="button" @click="tryWorkflow(row.name)">跑一次</button>
+          </li>
+        </ul>
+        <p class="assistant__hint">
+          手动跑<b>不会绕过安全开关</b>：里面的每一步照旧吃各自的档位 —— 命令行停在「关闭」时，
+          需要跑命令的那一步一样会被拒。
+        </p>
+
+        <!-- ---------------------------------------------------- 计划 -->
+        <h3 class="hud-label assistant__section">计划</h3>
+        <form class="assistant__form" @submit.prevent="makePlan">
+          <input v-model="goal" class="hud-field" placeholder="要达成什么，例如「把 C 盘清出 10G」" />
+          <button class="hud-btn hud-btn--primary" type="submit" :disabled="planning">
+            {{ planning ? '拆解中…' : '拆成步骤' }}
+          </button>
+        </form>
+        <p class="assistant__hint">
+          这里<b>只出计划、不执行</b>：没有哪一步会被真的跑起来。要花一次模型调用。
+          <span v-if="!overview.planner_enabled">当前配置里 planner 是关闭的。</span>
+        </p>
+        <div v-if="plan" class="assistant__plan">
+          <p class="assistant__plan-goal">{{ plan.goal }}</p>
+          <p v-if="plan.rationale" class="assistant__hint">{{ plan.rationale }}</p>
+          <ol class="assistant__steps">
+            <li v-for="step in plan.steps" :key="step.step_id" class="assistant__step">
+              <span class="hud-chip">{{ step.status }}</span>
+              <span class="assistant__text">{{ step.title }}</span>
+              <span v-if="step.action" class="hud-label assistant__meta">{{ step.action }}</span>
+            </li>
+          </ol>
+        </div>
+      </template>
     </section>
   </div>
 </template>
 
 <script setup lang="ts">
 /**
- * The three capabilities that were already built and had no door.
+ * The capabilities that were already built and had no door.
  *
- * One popup with tabs rather than three buttons on the top bar: the bar had seven
+ * One popup with tabs rather than four buttons on the top bar: the bar had seven
  * controls and the row is what the operator scans for machine state -- an
  * "open the drawer of everything else" entry belongs at the end of it, not spread
  * across it.
  *
- * Nothing polls. Each tab is read when it is opened, because all three of these
- * are things a person looks at deliberately, and a timer that reads the memory
- * table every second would be pure cost for a panel that is closed.
+ * Nothing polls. Each tab is read when it is opened, because all four of these are
+ * things a person looks at deliberately, and a timer that reads the memory table
+ * every second would be pure cost for a panel that is closed.
+ *
+ * 「自动化」 is the newest and the one that was missing for two rounds: the scheduler
+ * and the workflow engine have had ``stats()`` methods whose docstrings say "for the
+ * HUD's automation panel" since they were written, and the panel did not exist.
  */
 import { onMounted, ref, watch } from 'vue'
 import {
   addReminder,
   cancelReminder,
+  fetchAutomationOverview,
   fetchMemories,
   fetchKnowledge,
   fetchReminders,
+  fetchScheduledJobs,
+  fetchWorkflows,
   forgetAllMemories,
   forgetKnowledge,
   forgetMemory,
   ingestKnowledge,
+  planGoal,
   probeKnowledge,
+  reloadWorkflows,
+  removeScheduledJob,
+  runScheduledJob,
+  runWorkflow,
   toggleReminder,
+  toggleScheduledJob,
+  type AutomationOverview,
   type KnowledgeBoard,
   type MemoryRow,
+  type PlanRow,
   type ReminderRow,
+  type ScheduledJobRow,
+  type WorkflowRow,
 } from '@/api/bridge'
 
-type TabId = 'reminders' | 'memory' | 'knowledge'
+type TabId = 'reminders' | 'memory' | 'knowledge' | 'automation'
 
 const TABS: readonly { id: TabId; label: string }[] = [
   { id: 'reminders', label: '提醒' },
   { id: 'memory', label: '记忆' },
   { id: 'knowledge', label: '知识库' },
+  { id: 'automation', label: '自动化' },
 ]
 
 const KINDS: Record<string, string> = {
@@ -195,6 +308,31 @@ const probeQuery = ref('')
 const hits = ref<Record<string, unknown>[]>([])
 const probed = ref(false)
 
+const overview = ref<AutomationOverview>({
+  scheduler: {},
+  workflow: {},
+  planner: {},
+  planner_enabled: false,
+  error: '',
+})
+const jobs = ref<ScheduledJobRow[]>([])
+const workflows = ref<WorkflowRow[]>([])
+const goal = ref('')
+const planning = ref(false)
+const plan = ref<PlanRow | null>(null)
+
+/**
+ * One counter out of a block that is ``{}`` when this build has no such engine.
+ *
+ * ``--`` rather than 0 would be the honest reading, but a count line with dashes in
+ * it reads as broken; the empty block is already reported by the tab's own empty
+ * states, which say "this process has no scheduler" in words.
+ */
+function num(block: Record<string, unknown>, key: string): number {
+  const value = block[key]
+  return typeof value === 'number' ? value : 0
+}
+
 function say(message: string, bad = false): void {
   notice.value = message
   noticeBad.value = bad
@@ -217,11 +355,24 @@ async function load(which: TabId): Promise<void> {
       const board = await fetchMemories()
       memories.value = board.rows
       if (board.error) say(board.error, true)
-    } else {
+    } else if (which === 'knowledge') {
       const board: KnowledgeBoard = await fetchKnowledge()
       docs.value = board.documents
       stats.value = board.stats
       if (board.error) say(board.error, true)
+    } else {
+      // Three calls in parallel: the tab draws one screen, and doing them in series
+      // would make the counters and the rows arrive at visibly different times.
+      const [board, workflow, counters] = await Promise.all([
+        fetchScheduledJobs(),
+        fetchWorkflows(),
+        fetchAutomationOverview(),
+      ])
+      jobs.value = board.rows
+      workflows.value = workflow.rows
+      overview.value = counters
+      const problem = board.error || workflow.error || counters.error
+      if (problem) say(problem, true)
     }
   } catch (err) {
     say(err instanceof Error ? err.message : String(err), true)
@@ -302,6 +453,64 @@ async function probe(): Promise<void> {
   const answer = await probeKnowledge(probeQuery.value)
   hits.value = answer.hits
   if (answer.error) say(answer.error, true)
+}
+
+async function flipJob(row: ScheduledJobRow): Promise<void> {
+  const answer = await toggleScheduledJob(row.job_id, !row.enabled)
+  if (!answer.ok) say(answer.error, true)
+  await load('automation')
+}
+
+/**
+ * "试一下" is the whole reason this tab is worth having.
+ *
+ * A schedule that has never fired is a guess; running it once by hand, from the same
+ * path the clock takes, is how an operator finds out whether it works *before*
+ * trusting it with a nightly job.
+ */
+async function tryJob(jobId: string): Promise<void> {
+  const answer = await runScheduledJob(jobId)
+  if (!answer.ok) say(answer.error || '试跑失败', true)
+  else if (answer.run) say(answer.run.detail || '试跑完成')
+  await load('automation')
+}
+
+async function dropJob(jobId: string): Promise<void> {
+  const answer = await removeScheduledJob(jobId)
+  if (!answer.ok) say(answer.error, true)
+  else say(answer.removed ? '已删除' : '那个任务已经不在了')
+  await load('automation')
+}
+
+async function tryWorkflow(name: string): Promise<void> {
+  const answer = await runWorkflow(name)
+  if (!answer.ok && answer.error) say(answer.error, true)
+  else if (answer.run) say(`${name}：${answer.run.ok ? '跑完了' : '失败了'}`)
+  await load('automation')
+}
+
+async function reloadWf(): Promise<void> {
+  const answer = await reloadWorkflows()
+  if (!answer.ok) say(answer.error, true)
+  else say(`重新读取：${answer.count} 个工作流`)
+  await load('automation')
+}
+
+async function makePlan(): Promise<void> {
+  if (planning.value) return
+  planning.value = true
+  notice.value = ''
+  try {
+    const answer = await planGoal(goal.value)
+    if (!answer.ok) {
+      plan.value = null
+      say(answer.error || '没能拆解这个目标', true)
+    } else {
+      plan.value = answer.plan
+    }
+  } finally {
+    planning.value = false
+  }
 }
 
 watch(
@@ -446,5 +655,55 @@ onMounted(() => {
   margin: 10px 0;
   color: var(--hud-dim);
   font-size: 12px;
+}
+
+/* The four blocks of the automation tab need a divider: without one the tab reads as
+   a single long list and the operator has to guess where the workflows start. */
+.assistant__section {
+  margin: 14px 0 4px;
+  padding-bottom: 3px;
+  border-bottom: 1px solid rgba(77, 216, 255, 0.14);
+  color: var(--hud-cyan);
+}
+
+.assistant__chip--bad {
+  border-color: rgba(255, 93, 93, 0.45);
+  color: #ff9b9b;
+}
+
+.assistant__plan {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(77, 216, 255, 0.16);
+  border-radius: var(--hud-radius);
+  background: rgba(77, 216, 255, 0.04);
+}
+
+.assistant__plan-goal {
+  margin: 0 0 6px;
+  color: var(--hud-text);
+  font-size: 13px;
+}
+
+.assistant__steps {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.assistant__step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--hud-text);
+  font-size: 12px;
+}
+
+.assistant__step .hud-chip {
+  min-width: 56px;
+  text-align: center;
 }
 </style>

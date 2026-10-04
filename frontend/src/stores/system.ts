@@ -1,6 +1,6 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import { fetchSnapshot, onBackground, type Metrics } from '@/api/bridge'
+import { fetchSnapshot, onBackground, type AlertRow, type Metrics } from '@/api/bridge'
 
 const HISTORY_LIMIT = 60
 
@@ -17,6 +17,13 @@ export const useSystemStore = defineStore('system', () => {
   const cpuHistory = ref<Point[]>([])
   const memoryHistory = ref<Point[]>([])
   const warnings = ref<string[]>([])
+  /**
+   * What the alert centre has open. Kept separate from ``warnings`` because the two
+   * answer different questions: a warning is "this reading is incomplete", an alert is
+   * "this machine is past a line you set", and merging them would let a full disk look
+   * like a broken sensor.
+   */
+  const alerts = ref<AlertRow[]>([])
   const error = ref('')
   const connected = ref(false)
   const lastUpdated = ref(0)
@@ -124,6 +131,7 @@ export const useSystemStore = defineStore('system', () => {
       }
       metrics.value = report.metrics
       warnings.value = report.warnings ?? []
+      alerts.value = report.alerts ?? []
       connected.value = true
       error.value = ''
       const at = (report.metrics.taken_at ?? Date.now() / 1000) * 1000
@@ -198,6 +206,7 @@ export const useSystemStore = defineStore('system', () => {
     cpuHistory,
     memoryHistory,
     warnings,
+    alerts,
     error,
     connected,
     lastUpdated,

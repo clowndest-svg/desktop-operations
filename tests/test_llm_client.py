@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 
 import pytest
 
+from jarvis.core.events import UsageEvent
 from jarvis.llm.errors import (
     LlmAuthError,
+    LlmError,
     LlmRateLimitError,
     LlmRequestError,
     LlmResponseError,
@@ -27,7 +29,7 @@ class FakeTransport:
 
     def __init__(self) -> None:
         self.json_replies: list[Mapping[str, object] | Exception] = []
-        self.sse_replies: list[list[str] | Exception] = []
+        self.sse_replies: list[list[str] | Iterator[str] | Exception] = []
         self.json_calls: list[dict[str, object]] = []
         self.sse_calls: list[dict[str, object]] = []
 
@@ -68,6 +70,7 @@ def make_client(
     max_retries: int = 2,
     cost_input_per_1m: float = 0.0,
     cost_output_per_1m: float = 0.0,
+    on_usage: Callable[[UsageEvent], None] | None = None,
 ) -> OpenAiCompatClient:
     settings = OpenAiCompatSettings(
         provider_name="testai",
@@ -81,7 +84,9 @@ def make_client(
         cost_output_per_1m=cost_output_per_1m,
     )
     recorded = sleeps if sleeps is not None else []
-    return OpenAiCompatClient(settings, transport, sleep=recorded.append, environ=environ)
+    return OpenAiCompatClient(
+        settings, transport, sleep=recorded.append, environ=environ, on_usage=on_usage
+    )
 
 
 def ok_response(content: str = "hello") -> dict[str, object]:
@@ -275,10 +280,17 @@ class TestStream:
         )
         chunks = list(make_client(transport).stream([ChatMessage.user("hi")]))
         assert "".join(chunk.text for chunk in chunks) == "你好"
-        assert chunks[-1].finish_reason == "stop"
+        # The trailing usage-only chunk is yielded as well. Whoever assembles a reply
+        # cannot tell "the model spent 800 tokens thinking" from "the provider never
+        # said" unless the chunk that says it arrives -- and dropping it is how every
+        # 用量 number goes missing for streamed turns, which is now most of them.
+        assert [chunk.finish_reason for chunk in chunks if chunk.finish_reason] == ["stop"]
+        assert chunks[-1].usage is not None
+        assert chunks[-1].usage.prompt_tokens == 10
         payload = transport.sse_calls[0]["payload"]
         assert isinstance(payload, dict)
         assert payload["stream"] is True
+        assert payload["stream_options"] == {"include_usage": True}
 
     def test_stream_retries_before_first_chunk(self) -> None:
         transport = FakeTransport()
@@ -315,6 +327,260 @@ class TestStream:
         record = next(r for r in caplog.records if "stream ok" in r.message)
         assert getattr(record, "tokens_in", None) == 7
         assert getattr(record, "tokens_out", None) == 3
+
+
+def sse_reasoning(text: str) -> str:
+    delta: dict[str, object] = {"reasoning_content": text}
+    return json.dumps({"choices": [{"delta": delta, "finish_reason": None}]})
+
+
+def sse_tool_fragment(fragment: dict[str, object]) -> str:
+    delta: dict[str, object] = {"tool_calls": [fragment]}
+    return json.dumps({"choices": [{"delta": delta, "finish_reason": None}]})
+
+
+def leaking_stream(lines: list[str], closed: list[str]) -> Iterator[str]:
+    """A scripted SSE stream that says so when its consumer walks away.
+
+    Stands in for the socket: the whole point of a stop button is that nobody keeps
+    reading the answer after it is pressed, and a test that cannot tell "finished" from
+    "abandoned" cannot show that the button does anything.
+    """
+    try:
+        yield from lines
+    finally:
+        closed.append("closed")
+
+
+def dying_stream(lines: list[str], error: Exception) -> Iterator[str]:
+    """A stream that dies partway through: the connection drops after an answer began.
+
+    The error has to be raised from inside the generator, since that is the only way to
+    put a failure *between* two chunks -- which is the position where retrying stops
+    being safe.
+    """
+    yield from lines
+    raise error
+
+
+class TestCompleteStream:
+    """The path every HUD turn now takes, and the only one a 停止 button can act on.
+
+    :meth:`OpenAiCompatClient.complete` hands back one opaque block after twenty
+    seconds and leaves no handle to pull away, so streaming is not a presentation
+    preference here -- it is what makes both advertised behaviours (watch it think,
+    stop it mid-thought) possible at all.
+    """
+
+    def test_the_callback_sees_the_whole_partial_every_time(self) -> None:
+        """Deltas are state, not increments.
+
+        The UI pump coalesces snapshots and is allowed to drop an intermediate one, so
+        a renderer of increments would keep a hole in the answer forever.
+        """
+        transport = FakeTransport()
+        transport.sse_replies.append([sse_chunk("你"), sse_chunk("好"), sse_chunk("！"), "[DONE]"])
+        seen: list[str] = []
+        response = make_client(transport).complete_stream(
+            [ChatMessage.user("hi")], on_text=seen.append
+        )
+        assert seen == ["你", "你好", "你好！"]
+        assert response.content == "你好！"
+        assert response.finish_reason == "stop" or response.finish_reason is None
+
+    def test_a_stop_request_lands_within_one_chunk_and_keeps_the_partial(self) -> None:
+        transport = FakeTransport()
+        transport.sse_replies.append([sse_chunk(c) for c in "abcdefgh"] + ["[DONE]"])
+        asked: list[bool] = []
+
+        def stop_after_two_chunks() -> bool:
+            asked.append(True)
+            return len(asked) > 2
+
+        response = make_client(transport).complete_stream(
+            [ChatMessage.user("hi")], on_text=lambda _: None, should_stop=stop_after_two_chunks
+        )
+        assert response.content == "abc"
+        assert response.finish_reason == "cancelled"
+        assert len(asked) == 3
+
+    def test_stopping_walks_away_from_the_socket(self) -> None:
+        """The client-side half of 停止: abandoning the iterator reaches the transport.
+
+        What the caller can promise is only this -- it stops asking for the next chunk
+        and the stream it was handed is closed on the way out. That the closed stream is
+        then a closed *connection* is the transport's promise, and it is pinned where it
+        belongs, in ``test_llm_transport.py``. Both ends matter: a stop that left the
+        client reading to the end would keep paying for an answer nobody watches.
+        """
+        transport = FakeTransport()
+        closed: list[str] = []
+        transport.sse_replies.append(
+            leaking_stream([sse_chunk("a"), sse_chunk("b"), sse_chunk("c"), "[DONE]"], closed)
+        )
+        response = make_client(transport).complete_stream(
+            [ChatMessage.user("hi")], should_stop=lambda: True
+        )
+        assert response.content == "a"
+        assert response.finish_reason == "cancelled"
+        assert closed == ["closed"]
+
+    def test_an_answer_that_ran_to_the_end_is_not_reported_as_abandoned(self) -> None:
+        transport = FakeTransport()
+        closed: list[str] = []
+        transport.sse_replies.append(leaking_stream([sse_chunk("a"), "[DONE]"], closed))
+        make_client(transport).complete_stream([ChatMessage.user("hi")])
+        assert closed == ["closed"]
+
+    def test_an_abandoned_turn_still_appears_in_the_ledger(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Cost of the stopped request is reported as unknown, never as nothing.
+
+        Providers put ``usage`` in the last chunk, so a cancelled turn usually has no
+        numbers to give. The line and the event still have to be written: a turn that
+        cost a request and left no trace is indistinguishable from one never asked, and
+        the panel's 无读数 depends on seeing that distinction.
+        """
+        events: list[UsageEvent] = []
+        transport = FakeTransport()
+        transport.sse_replies.append([sse_chunk("a"), sse_chunk("b"), "[DONE]"])
+        client = make_client(transport, on_usage=events.append)
+        with caplog.at_level(logging.INFO, logger="jarvis.llm.client"):
+            client.complete_stream([ChatMessage.user("hi")], should_stop=lambda: True)
+        assert next(r for r in caplog.records if "stream abandoned" in r.message) is not None
+        assert events == []
+
+    def test_a_stop_after_the_usage_chunk_still_bills_the_turn(self) -> None:
+        transport = FakeTransport()
+        usage_chunk = json.dumps(
+            {"choices": [], "usage": {"prompt_tokens": 40, "completion_tokens": 5}}
+        )
+        events: list[UsageEvent] = []
+        transport.sse_replies.append([sse_chunk("a"), usage_chunk, sse_chunk("b"), "[DONE]"])
+        asked: list[bool] = []
+
+        def stop_after_the_usage_arrives() -> bool:
+            asked.append(True)
+            return len(asked) > 2
+
+        client = make_client(transport, on_usage=events.append)
+        response = client.complete_stream(
+            [ChatMessage.user("hi")], should_stop=stop_after_the_usage_arrives
+        )
+        assert response.finish_reason == "cancelled"
+        assert response.usage is not None
+        assert [e.prompt_tokens for e in events] == [40]
+
+    def test_the_task_the_request_belongs_to_reaches_the_ledger(self) -> None:
+        """Twelve requests answer one round-table task; only an id on each sorts them.
+
+        Not a wire field: the payload must stay exactly as wide as the provider asked.
+        """
+        events: list[UsageEvent] = []
+        transport = FakeTransport()
+        usage_chunk = json.dumps(
+            {"choices": [], "usage": {"prompt_tokens": 3, "completion_tokens": 4}}
+        )
+        transport.sse_replies.append([sse_chunk("a"), usage_chunk, "[DONE]"])
+        client = make_client(transport, on_usage=events.append)
+        client.complete_stream(
+            [ChatMessage.user("hi")], options=GenerationOptions(task_id="task-7")
+        )
+        assert [e.task_id for e in events] == ["task-7"]
+        payload = transport.sse_calls[0]["payload"]
+        assert isinstance(payload, dict)
+        assert "task_id" not in payload
+
+    def test_reasoning_arrives_on_its_own_thread(self) -> None:
+        transport = FakeTransport()
+        transport.sse_replies.append(
+            [sse_reasoning("先看温度"), sse_chunk("有点热"), sse_reasoning("再看湿度"), "[DONE]"]
+        )
+        response = make_client(transport).complete_stream([ChatMessage.user("hi")])
+        assert response.reasoning == "先看温度\n\n再看湿度"
+        assert response.content == "有点热"
+
+    def test_tool_calls_arrive_in_pieces_and_leave_as_whole_calls(self) -> None:
+        transport = FakeTransport()
+        transport.sse_replies.append(
+            [
+                sse_tool_fragment(
+                    {
+                        "index": 0,
+                        "id": "call_1",
+                        "function": {"name": "get_weather", "arguments": ""},
+                    }
+                ),
+                sse_tool_fragment({"index": 0, "function": {"arguments": '{"city"'}}),
+                sse_tool_fragment({"index": 0, "function": {"arguments": ': "Beijing"}'}}),
+                json.dumps({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}),
+                "[DONE]",
+            ]
+        )
+        response = make_client(transport).complete_stream([ChatMessage.user("weather?")])
+        assert response.tool_calls == (
+            ToolCall(id="call_1", name="get_weather", arguments='{"city": "Beijing"}'),
+        )
+        assert response.content == ""
+
+    def test_a_provider_that_rejects_the_usage_block_is_re_asked_once_without_it(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """``stream_options`` is a real 400 on strict endpoints, not a free extra.
+
+        Remembers the answer: re-probing per turn would put a failed request in front of
+        every single answer the operator gets.
+        """
+        transport = FakeTransport()
+        transport.sse_replies = [
+            TransportStatusError(400, "unknown field stream_options"),
+            [sse_chunk("ok"), "[DONE]"],
+        ]
+        with caplog.at_level(logging.WARNING, logger="jarvis.llm.client"):
+            response = make_client(transport).complete_stream([ChatMessage.user("hi")])
+        assert response.content == "ok"
+        first, second = (call["payload"] for call in transport.sse_calls)
+        assert isinstance(first, dict) and isinstance(second, dict)
+        assert first["stream_options"] == {"include_usage": True}
+        assert "stream_options" not in second
+        assert any("rejected the streaming request" in r.message for r in caplog.records)
+
+    def test_a_provider_that_takes_no_streaming_at_all_answers_in_one_block(self) -> None:
+        transport = FakeTransport()
+        transport.sse_replies = [
+            TransportStatusError(400, "streaming not supported"),
+            TransportStatusError(400, "streaming not supported"),
+        ]
+        transport.json_replies = [ok_response("一次给完"), ok_response("一次给完")]
+        client = make_client(transport)
+        assert client.complete_stream([ChatMessage.user("hi")]).content == "一次给完"
+        assert len(transport.sse_calls) == 2
+        assert len(transport.json_calls) == 1
+        transport.sse_calls.clear()
+        assert client.complete_stream([ChatMessage.user("hi again")]).content == "一次给完"
+        assert transport.sse_calls == []
+        assert len(transport.json_calls) == 2
+
+    def test_failing_after_half_an_answer_raises_instead_of_replaying(self) -> None:
+        """Retrying here would put two halves of an answer on the screen.
+
+        The screen has already been shown the first half, chunk by chunk.
+        """
+        transport = FakeTransport()
+        transport.sse_replies.append(
+            dying_stream([sse_chunk("前半句")], TransportStatusError(500, "boom"))
+        )
+        with pytest.raises(LlmError):
+            make_client(transport).complete_stream([ChatMessage.user("hi")])
+        assert len(transport.sse_calls) == 1
+
+    def test_an_empty_stream_is_an_empty_answer_not_a_crash(self) -> None:
+        transport = FakeTransport()
+        transport.sse_replies.append(["[DONE]"])
+        response = make_client(transport).complete_stream([ChatMessage.user("hi")])
+        assert response.content == ""
+        assert response.usage is None
 
 
 class TestCachedTokenParsing:

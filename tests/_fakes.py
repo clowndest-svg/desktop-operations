@@ -7,7 +7,7 @@ engines without pulling in real models, network, or microphones.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 
 from jarvis.asr.types import AsrResultType, RecognitionResult
@@ -42,6 +42,27 @@ class FakeLlmClient:
         self, messages: Sequence[ChatMessage], *, options: GenerationOptions | None = None
     ) -> Iterator[StreamChunk]:
         yield from ()
+
+    def complete_stream(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        options: GenerationOptions | None = None,
+        on_text: Callable[[str], None] | None = None,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> ChatResponse:
+        """The canned answer, delivered in the shape a streamed turn expects.
+
+        One ``on_text`` call with the whole reply rather than a token dribble: what the
+        chat loop is being tested on is that it forwards the callback and honours the
+        stop flag, not that it can parse SSE. The real assembly is covered in
+        ``test_llm_client.py`` against a scripted stream.
+        """
+        del should_stop
+        response = self.complete(messages, options=options)
+        if on_text is not None and response.content:
+            on_text(response.content)
+        return response
 
 
 class ScriptedVadEngine:

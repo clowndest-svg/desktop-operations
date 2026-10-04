@@ -228,3 +228,137 @@ class TestConstruction:
         assert engine.frame_samples == 512
         engine.close()
         assert engine.process(b"\x00" * FRAME_BYTES) == ()
+
+
+class LiveKeywords:
+    """A keyword list the test can move, standing in for the settings panel's box."""
+
+    def __init__(self, words: list[str]) -> None:
+        self.words = list(words)
+        self.reads = 0
+        self.failing = False
+        """Flip this to make the read throw -- the way a settings store throws mid-session."""
+
+    def __call__(self) -> list[str]:
+        self.reads += 1
+        if self.failing:
+            raise RuntimeError("preferences.json is on a disk that just stopped answering")
+        return list(self.words)
+
+
+def build_live(
+    keywords: LiveKeywords,
+    texts: list[str],
+    events_by_call: dict[int, list[SimpleNamespace]],
+) -> tuple[AsrWakeWordEngine, FakeTranscriber, FakeSegmenter]:
+    """The same wiring as :func:`build`, but the words come from a provider."""
+    transcriber = FakeTranscriber(texts)
+    segmenter = FakeSegmenter(events_by_call)
+    engine = AsrWakeWordEngine(keywords=keywords, transcriber=transcriber, segmenter=segmenter)
+    return engine, transcriber, segmenter
+
+
+class TestTheKeywordsAreLive:
+    """Renaming her in the panel must take effect on the next sentence, not the next restart."""
+
+    def test_a_renamed_word_wakes_without_rebuilding_the_engine(self) -> None:
+        words = LiveKeywords(["你好小夜"])
+        engine, transcriber, _segmenter = build_live(
+            words,
+            ["你好小夜", "辛苦你了"],
+            {2: [make_event(0, 512)], 4: [make_event(0, 512)]},
+        )
+
+        engine.process(b"\x00" * FRAME_BYTES)
+        first = engine.process(b"\x01" * FRAME_BYTES)
+        assert [hit.keyword for hit in first] == ["你好小夜"]
+
+        words.words = ["辛苦你了"]
+
+        engine.process(b"\x02" * FRAME_BYTES)
+        second = engine.process(b"\x03" * FRAME_BYTES)
+        assert [hit.keyword for hit in second] == ["辛苦你了"], "改了名还得重启才生效就是没生效"
+        assert transcriber.calls == 2
+
+    def test_the_old_word_stops_waking_after_the_rename(self) -> None:
+        """The other half: a name nobody chose must not keep answering.
+
+        Without this the test above would also pass on an engine that reads its list once
+        and simply unions every list it has ever seen.
+        """
+        words = LiveKeywords(["你好小夜"])
+        engine, _transcriber, _segmenter = build_live(
+            words,
+            ["你好小夜", "你好小夜"],
+            {2: [make_event(0, 512)], 4: [make_event(0, 512)]},
+        )
+
+        engine.process(b"\x00" * FRAME_BYTES)
+        assert len(engine.process(b"\x01" * FRAME_BYTES)) == 1
+
+        words.words = ["辛苦你了"]
+
+        engine.process(b"\x02" * FRAME_BYTES)
+        assert engine.process(b"\x03" * FRAME_BYTES) == (), "旧名字该当场不认了"
+
+    def test_the_list_is_reread_every_frame_not_once(self) -> None:
+        words = LiveKeywords(["贾维斯"])
+        engine, _transcriber, _segmenter = build_live(words, [], {})
+
+        feed_frames(engine, 3)
+
+        # once at construction + once per frame; that is what makes a rename free
+        assert words.reads == 4
+        assert engine.current() == ("贾维斯",)
+
+    def test_a_settings_read_that_throws_keeps_the_last_good_words(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        words = LiveKeywords(["贾维斯"])
+        engine, transcriber, _segmenter = build_live(
+            words,
+            ["贾维斯在吗"],
+            {2: [make_event(0, 512)]},
+        )
+        assert engine.current() == ("贾维斯",)
+        words.failing = True
+
+        with caplog.at_level("ERROR", logger="jarvis.wakeword.asr_engine"):
+            engine.process(b"\x00" * FRAME_BYTES)
+            hits = engine.process(b"\x01" * FRAME_BYTES)
+
+        assert [hit.keyword for hit in hits] == ["贾维斯"], "读设置炸了不该把耳朵也弄聋"
+        assert "唤醒词读不出来" in caplog.text, "静默降级是最难查的那种降级"
+        assert transcriber.calls == 1
+
+    def test_an_empty_read_keeps_the_last_good_words(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        words = LiveKeywords(["贾维斯"])
+        engine, _transcriber, _segmenter = build_live(words, [], {})
+
+        with caplog.at_level("WARNING", logger="jarvis.wakeword.asr_engine"):
+            words.words = []
+            engine.process(b"\x00" * FRAME_BYTES)
+
+        assert engine.current() == ("贾维斯",), "回答不出任何名字像是麦克风坏了，不是配置空了"
+        assert "一个都不成" in caplog.text
+
+    def test_a_provider_that_starts_empty_still_fails_fast(self) -> None:
+        with pytest.raises(AsrError):
+            AsrWakeWordEngine(
+                keywords=LiveKeywords(["", "  "]),
+                transcriber=FakeTranscriber([]),
+                segmenter=FakeSegmenter(),
+            )
+
+    def test_the_folded_form_is_what_matches_not_the_spelling(self) -> None:
+        """A rename keeps the same folding the shipped words have."""
+        words = LiveKeywords(["Hey Jarvis"])
+        engine, _transcriber, _segmenter = build_live(
+            words, ["嗨贾维斯 heyjarvis 在吗"], {1: [make_event(0, 512)]}
+        )
+
+        hits = engine.process(b"\x00" * FRAME_BYTES)
+
+        assert [hit.keyword for hit in hits] == ["Hey Jarvis"]

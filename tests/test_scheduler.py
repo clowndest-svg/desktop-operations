@@ -17,6 +17,7 @@ from jarvis.config.schema import SchedulerSection
 from jarvis.core.exceptions import SchedulerError
 from jarvis.database import SqliteStore
 from jarvis.scheduler import JobSpec, SchedulerService, TriggerKind
+from jarvis.scheduler.store import MIGRATIONS, NAMESPACE, SchedulerRepository
 
 
 def _section(**overrides: object) -> SchedulerSection:
@@ -450,3 +451,70 @@ class TestOneShotDateTrigger:
         service.add_job(_spec())
         service._run_job("job-1")
         assert service.get_job("job-1").enabled is True  # type: ignore[union-attr]
+
+
+def _record(repo: SchedulerRepository, index: int) -> None:
+    """One run record, with row order and timestamp order deliberately agreeing."""
+    repo.record_run(
+        job_id="reminder:喝水",
+        started_at=f"2026-10-03T09:0{index}:00",
+        finished_at=f"2026-10-03T09:0{index}:01",
+        ok=True,
+        detail="已开口，已弹托盘",
+        error="",
+    )
+
+
+class TestHistoryRetention:
+    """The run history is capped, because this process is meant to run for weeks.
+
+    The table was append-only in the strongest sense: nothing ever deleted from it.
+    A reminder firing every day on a machine that is left on turns "history" into a
+    leak, and every ``COUNT(*)`` the panel does has to pay for the whole of it.
+    """
+
+    def test_prune_keeps_the_newest_rows(self) -> None:
+        store = _store()
+        store.migrate(NAMESPACE, MIGRATIONS)
+        repo = SchedulerRepository(store)
+        for index in range(10):
+            _record(repo, index)
+        assert repo.prune_runs(4) == 6
+        assert repo.count_runs() == 4
+        # The survivors are the newest: that is what the panel shows and what the
+        # failure count is about.
+        assert [run.started_at for run in repo.history(limit=10)] == [
+            "2026-10-03T09:09:00",
+            "2026-10-03T09:08:00",
+            "2026-10-03T09:07:00",
+            "2026-10-03T09:06:00",
+        ]
+
+    def test_prune_reports_zero_when_there_is_nothing_to_drop(self) -> None:
+        store = _store()
+        store.migrate(NAMESPACE, MIGRATIONS)
+        repo = SchedulerRepository(store)
+        _record(repo, 0)
+        assert repo.prune_runs(10) == 0
+        assert repo.count_runs() == 1
+
+    def test_a_non_positive_keep_deletes_nothing(self) -> None:
+        """A misconfigured limit must not be read as "delete everything"."""
+        store = _store()
+        store.migrate(NAMESPACE, MIGRATIONS)
+        repo = SchedulerRepository(store)
+        _record(repo, 0)
+        assert repo.prune_runs(0) == 0
+        assert repo.count_runs() == 1
+
+    def test_start_applies_the_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Wired into the lifecycle, not merely available as a method."""
+        monkeypatch.setattr("jarvis.scheduler.service.RUN_HISTORY_LIMIT", 2)
+        store = _store()
+        store.migrate(NAMESPACE, MIGRATIONS)
+        repo = SchedulerRepository(store)
+        for index in range(5):
+            _record(repo, index)
+        service, _, _ = _build(store, RecordingRunner())
+        service.start()
+        assert repo.count_runs() == 2

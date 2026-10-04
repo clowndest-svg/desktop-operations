@@ -21,7 +21,16 @@
           <th class="procs__pick"></th>
           <th>进程</th>
           <th class="procs__num">内存</th>
-          <th class="procs__num">CPU</th>
+          <!--
+            The window is in the header because the number used to change meaning
+            without saying so: psutil's per-process percentage covers whatever
+            interval elapsed since its own last call on that object, so the same
+            process read 74.7% on one paint and 16.9% two paints later while doing
+            nothing different. It is a plain average over the last 10 s now.
+          -->
+          <th class="procs__num" title="最近 10 秒的平均占用；一个核 = 100%，多线程可超过 100%">
+            CPU(10s)
+          </th>
         </tr>
       </thead>
       <tbody>
@@ -57,6 +66,29 @@
       minute old -- the name is re-checked at the moment of the act, so what is
       written here is what the tool will refuse if it no longer matches.
     -->
+    <!--
+      She can ask; only you can end. A proposal came from the chat -- "关掉记事本" --
+      and stopped at the queue, because a model naming a pid is not the same thing as a
+      person ticking a row they can see. Confirming sends this one entry through the
+      same 二次确认 path as a tick, where the name is re-read before anything happens.
+    -->
+    <div v-if="proposals.length" class="procs__proposals">
+      <p class="hud-label">
+        小夜提议结束下面 {{ proposals.length }} 个进程（她无权自己结束，点了才算）
+      </p>
+      <div v-for="entry in proposals" :key="entry.pid" class="procs__proposal">
+        <span class="procs__row-name">{{ entry.name }}</span>
+        <span class="hud-label">PID {{ entry.pid }} · {{ humanAge(entry.age_seconds) }}前</span>
+        <span class="procs__reason">{{ entry.reason || '她没说要为什么' }}</span>
+        <span class="procs__proposal-actions">
+          <button class="hud-btn danger" type="button" :disabled="busy" @click="confirmProposal(entry)">
+            确认结束
+          </button>
+          <button class="hud-btn" type="button" :disabled="busy" @click="ignore(entry)">忽略</button>
+        </span>
+      </div>
+    </div>
+
     <div v-if="confirming" class="procs__confirm">
       <p>
         即将<strong>结束</strong> {{ pickedList.length }} 个进程：{{ names }}。
@@ -82,6 +114,16 @@
     </div>
 
     <p v-else-if="error" class="procs__error">{{ error }}</p>
+
+    <!--
+      表格下面的那半张卡：四件抬眼就该知道的事。放在这儿不是因为它和进程有关，
+      而是因为这一格本来就空着 —— 她站在桌面上时，这张卡是目光停留最久的地方。
+    -->
+    <OverviewGrid
+      @reminders="emit('reminders')"
+      @usage="emit('usage')"
+      @actions="emit('actions')"
+    />
   </section>
 </template>
 
@@ -93,11 +135,24 @@
  * redrawn every poll, and a tick that only stored a number would silently follow
  * that number if the process exited and Windows handed it to something else.
  */
-import { computed, ref } from 'vue'
-import { formatBytes, killProcesses, type ProcessTarget } from '@/api/bridge'
+import { computed, onMounted, ref, watch } from 'vue'
+import {
+  dismissProcessProposal,
+  fetchProcessProposals,
+  formatBytes,
+  killProcesses,
+  type ProcessProposal,
+  type ProcessTarget,
+} from '@/api/bridge'
 import { useSystemStore } from '@/stores/system'
+import OverviewGrid from '@/components/OverviewGrid.vue'
 
 const store = useSystemStore()
+const emit = defineEmits<{
+  (e: 'reminders'): void
+  (e: 'usage'): void
+  (e: 'actions'): void
+}>()
 
 const picked = ref<Record<number, string>>({})
 const confirming = ref(false)
@@ -112,6 +167,63 @@ const pickedList = computed<ProcessTarget[]>(() =>
 )
 
 const names = computed(() => pickedList.value.map((entry) => entry.name).join('、'))
+const proposals = ref<ProcessProposal[]>([])
+
+async function loadProposals(): Promise<void> {
+  try {
+    proposals.value = await fetchProcessProposals()
+  } catch {
+    // A panel that cannot reach the queue still shows the ranking; the error belongs
+    // with the proposal strip, not in place of the whole table.
+    proposals.value = []
+  }
+}
+
+async function confirmProposal(entry: ProcessProposal): Promise<void> {
+  if (busy.value) return
+  busy.value = true
+  error.value = ''
+  try {
+    // The proposal carries the name it was made under, and the controller re-reads the
+    // pid's real name at the moment of the act -- so a recycled number is refused here
+    // exactly as it is for a ticked row.
+    const report = await killProcesses([{ pid: entry.pid, name: entry.name }])
+    outcomes.value = report.results
+    error.value = report.error
+    await loadProposals()
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    busy.value = false
+  }
+}
+
+async function ignore(entry: ProcessProposal): Promise<void> {
+  const outcome = await dismissProcessProposal(entry.pid).catch(() => ({ ok: false, error: '没答复' }))
+  if (!outcome.ok && outcome.error) error.value = outcome.error
+  await loadProposals()
+}
+
+function humanAge(seconds: number): string {
+  if (seconds < 60) return '不到 1 分钟'
+  return `${Math.floor(seconds / 60)} 分钟`
+}
+
+onMounted(loadProposals)
+
+// No timer of our own: the metrics poll is already beating every 1.5 s (10 s with the
+// window hidden), so ride that and re-read the queue every eighth beat. A proposal
+// arriving mid-conversation then shows up within about twelve seconds without this
+// panel adding a second interval to a window that is measured on how little it idles.
+let beats = 0
+watch(
+  () => store.lastUpdated,
+  () => {
+    beats += 1
+    if (beats % 8 !== 0) return
+    void loadProposals()
+  },
+)
 
 function toggle(pid: number, name: string): void {
   const next = { ...picked.value }
@@ -221,6 +333,36 @@ function cpuTone(percent: number | null): string {
 
 .procs__empty {
   padding: 6px 0;
+}
+
+/* The proposal strip sits above the tick table on purpose: it is the thing that needs
+   an answer, and burying it under a ranking nobody asked for is how it becomes noise. */
+.procs__proposals {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--hud-amber);
+  border-radius: var(--hud-radius);
+  background: rgba(255, 181, 71, 0.07);
+}
+
+.procs__proposal {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+  margin-top: 6px;
+}
+
+.procs__reason {
+  flex: 1 1 140px;
+  color: var(--hud-text);
+  font-size: 0.92em;
+}
+
+.procs__proposal-actions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
 }
 
 .procs__confirm {

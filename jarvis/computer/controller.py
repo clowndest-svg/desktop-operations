@@ -13,6 +13,7 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
+from jarvis.computer.app_launcher import bring_to_front, launch_target
 from jarvis.computer.types import ActionKind, PlannedAction
 from jarvis.core.exceptions import ComputerControlError
 
@@ -69,6 +70,14 @@ class PyAutoGuiController:
         params = action.params
         try:
             match action.kind:
+                case ActionKind.LAUNCH:
+                    pid = _int_param(params, "pid")
+                    if pid and bring_to_front(pid):
+                        return
+                    target = _str_param(params, "target")
+                    if not target:
+                        raise ComputerControlError("没有可启动的路径，也没有可置前的窗口")
+                    launch_target(target)
                 case ActionKind.MOVE:
                     pyautogui.moveTo(_int_param(params, "x"), _int_param(params, "y"))
                 case ActionKind.CLICK:

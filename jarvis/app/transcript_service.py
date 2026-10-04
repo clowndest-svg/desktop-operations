@@ -37,6 +37,10 @@ MESSAGES_KEPT_IN_MEMORY = 10
 """How many past exchanges a switched-to session replays to the model. Same number
 the in-memory chat always used; the rest stay on disk and are still readable."""
 
+MAX_SEARCH_RESULTS = 20
+"""Ceiling on :meth:`TranscriptService.search`. A tool result goes into a prompt, and
+an unbounded substring match over somebody's year of conversation would fill it."""
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         namespace=NAMESPACE,
@@ -78,7 +82,32 @@ MIGRATIONS: tuple[Migration, ...] = (
             """,
         ),
     ),
+    Migration(
+        namespace=NAMESPACE,
+        version=3,
+        statements=(
+            # Which model answered, and which turn of the task table it belongs to.
+            # Both exist because the panel now holds several conversations and a round
+            # table puts several models inside one of them: 「她说了什么」 no longer says
+            # *who* said it, and a cost that cannot be attributed to the task that caused
+            # it is a bill nobody can explain afterwards.
+            """
+            ALTER TABLE chat_messages ADD COLUMN model TEXT NOT NULL DEFAULT ''
+            """,
+            """
+            ALTER TABLE chat_messages ADD COLUMN task_id TEXT NOT NULL DEFAULT ''
+            """,
+        ),
+    ),
 )
+
+
+def _text(row: sqlite3.Row, key: str) -> str:
+    """A column that may not exist yet, read without an exception path per row."""
+    try:
+        return str(row[key] or "")
+    except (IndexError, KeyError):
+        return ""
 
 
 def _turn(row: sqlite3.Row) -> dict[str, Any]:
@@ -106,6 +135,11 @@ def _turn(row: sqlite3.Row) -> dict[str, Any]:
         "content": row["content"],
         "at": row["at"],
         "attachments": attachments,
+        # Read defensively like the attachments above: a connection opened before
+        # migration 3 ran has no such column, and a transcript that refused to open
+        # over that would throw away every turn in the conversation for a label.
+        "model": _text(row, "model"),
+        "task_id": _text(row, "task_id"),
     }
 
 
@@ -132,13 +166,20 @@ class TranscriptService:
 
     # -- sessions ----------------------------------------------------------
 
-    def new_session(self, title: str = "") -> str:
-        session_id = uuid.uuid4().hex
+    def new_session(self, title: str = "", session_id: str = "") -> str:
+        """Open a conversation row. Returns its id, or ``""`` when nothing was created.
+
+        ``session_id`` is accepted because the caller may already have one: a tab opened
+        in the panel gets an id before it has any turns, and that id has to survive being
+        stored -- a conversation whose id changes halfway through leaves the running turn
+        writing into a row the tab is not showing.
+        """
+        session_id = str(session_id or "") or uuid.uuid4().hex
         stamp = format_timestamp(utc_now())
         try:
             with self._store.transaction() as conn:
                 conn.execute(
-                    "INSERT INTO chat_sessions (id, title, created_at, updated_at)"
+                    "INSERT OR IGNORE INTO chat_sessions (id, title, created_at, updated_at)"
                     " VALUES (?, ?, ?, ?)",
                     (session_id, title, stamp, stamp),
                 )
@@ -197,12 +238,25 @@ class TranscriptService:
 
     # -- turns -------------------------------------------------------------
 
-    def append(self, session_id: str, role: str, content: str, attachments: str = "[]") -> bool:
+    def append(
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        attachments: str = "[]",
+        *,
+        model: str = "",
+        task_id: str = "",
+    ) -> bool:
         """One turn. Also touches the session's ``updated_at`` so the list re-sorts.
 
         ``attachments`` arrives as already-serialised JSON from the caller, which is
         the side that knows what an attachment is; this layer only promises to give
         it back exactly as it came.
+
+        ``model`` is recorded per turn rather than per session because a round-table
+        conversation has several models answering inside one session, and "which model
+        said this" is the question the panel is asked to answer.
         """
         if not session_id or not content.strip():
             return False
@@ -210,9 +264,10 @@ class TranscriptService:
         try:
             with self._store.transaction() as conn:
                 conn.execute(
-                    "INSERT INTO chat_messages (session_id, role, content, at, attachments)"
-                    " VALUES (?, ?, ?, ?, ?)",
-                    (session_id, role, content, stamp, attachments),
+                    "INSERT INTO chat_messages"
+                    " (session_id, role, content, at, attachments, model, task_id)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (session_id, role, content, stamp, attachments, model, task_id),
                 )
                 conn.execute(
                     "UPDATE chat_sessions SET updated_at = ? WHERE id = ?", (stamp, session_id)
@@ -235,8 +290,8 @@ class TranscriptService:
             with self._store.connection() as conn:
                 rows = conn.execute(
                     """
-                    SELECT role, content, at, attachments FROM (
-                        SELECT id, role, content, at, attachments
+                    SELECT role, content, at, attachments, model, task_id FROM (
+                        SELECT id, role, content, at, attachments, model, task_id
                           FROM chat_messages
                          WHERE session_id = ?
                          ORDER BY id DESC
@@ -250,14 +305,53 @@ class TranscriptService:
             return []
         return [_turn(row) for row in rows]
 
+    def search(self, query: str, *, limit: int = 8) -> list[dict[str, Any]]:
+        """Find turns across every stored conversation that contain ``query``.
+
+        Substring matching, not ``LIKE``: the term is a plain parameter to ``instr``,
+        so a ``%`` or an underscore in what the user typed stays what it is instead of
+        turning into a wildcard. Sessions are deleted only by a person, so "where did
+        we talk about that" has an answer for as long as the history exists.
+        """
+        term = query.strip()
+        if not term or limit <= 0:
+            return []
+        try:
+            with self._store.connection() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT m.role, m.content, m.at, m.session_id,
+                           s.title, substr(m.content, 1, 400) AS excerpt
+                      FROM chat_messages AS m
+                      LEFT JOIN chat_sessions AS s ON s.id = m.session_id
+                     WHERE instr(m.content, ?) > 0
+                     ORDER BY m.id DESC
+                     LIMIT ?
+                    """,
+                    (term, min(int(limit), MAX_SEARCH_RESULTS)),
+                ).fetchall()
+        except sqlite3.Error:
+            logger.exception("could not search the conversation history")
+            return []
+        return [
+            {
+                "role": row["role"],
+                "at": row["at"],
+                "session_id": row["session_id"],
+                "title": row["title"] or "",
+                "excerpt": row["excerpt"],
+            }
+            for row in rows
+        ]
+
     def whole_session(self, session_id: str, limit: int = 200) -> list[dict[str, Any]]:
         """Every turn the HUD wants to draw, oldest first, capped for the page."""
         try:
             with self._store.connection() as conn:
                 rows = conn.execute(
                     """
-                    SELECT role, content, at, attachments FROM (
-                        SELECT id, role, content, at, attachments
+                    SELECT role, content, at, attachments, model, task_id FROM (
+                        SELECT id, role, content, at, attachments, model, task_id
                           FROM chat_messages
                          WHERE session_id = ?
                          ORDER BY id DESC

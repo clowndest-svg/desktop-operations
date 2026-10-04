@@ -80,12 +80,19 @@ let calm = false
 
 const driver = new FaceDriver()
 
+/**
+ * Samples first, then the turn, then the microphone -- in that order because that is
+ * the order of evidence. A typed question has no microphone but is still something she
+ * is thinking about, and the old order put `phase !== 'running'` first, which put the
+ * figure to sleep for every conversation held without the microphone.
+ */
 function moodNow(): Mood {
-  if (voice.phase === 'failed') return 'dormant'
-  if (voice.phase !== 'running') return 'dormant'
-  if (talking.value || voice.turn === 'processing') return 'speaking'
+  if (talking.value) return 'speaking'
+  if (voice.turn === 'processing') return 'thinking'
   if (voice.turn === 'listening') return 'listening'
-  return 'armed'
+  // 「聆听」关着不等于她睡着了：muted 是"模型还装着、只是不听"，那一身灯该是醒的。
+  // 只有真的什么都没加载（off / loading / failed）才打盹。
+  return voice.phase === 'running' || voice.phase === 'muted' ? 'armed' : 'dormant'
 }
 
 function frame(): void {

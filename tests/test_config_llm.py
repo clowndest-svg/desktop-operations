@@ -20,7 +20,8 @@ def _section(**overrides: object) -> dict[str, object]:
         "providers": {
             "test": {
                 "base_url": "https://api.test.example/v1/",
-                "model": "test-model",
+                "models": ["test-model", "test-model-large"],
+                "default_model": "test-model",
                 "api_key_env": "TEST_API_KEY",
                 "cost_input_per_1m": 0.0,
                 "cost_output_per_1m": 0.0,
@@ -63,6 +64,92 @@ class TestLlmSection:
         provider["api_key"] = "sk-plaintext"  # storing a key inline is a config error
         with pytest.raises(ConfigurationError, match=r"llm.providers.test.api_key"):
             LlmSection.from_mapping(data)
+
+    def test_the_old_single_model_field_says_how_to_rename_it(self) -> None:
+        """One field became a list, so an old file is a hard failure -- and the
+        message is the migration. Accepting both spellings would leave every reader
+        guessing which one wins, which is how the picker and the panel end up
+        showing different sets of models."""
+        data = _section()
+        providers = data["providers"]
+        assert isinstance(providers, dict)
+        provider = providers["test"]
+        assert isinstance(provider, dict)
+        del provider["models"]
+        del provider["default_model"]
+        provider["model"] = "test-model"
+
+        with pytest.raises(ConfigurationError) as caught:
+            LlmSection.from_mapping(data)
+
+        message = str(caught.value)
+        assert "llm.providers.test.model" in message
+        assert "models" in message and "default_model" in message
+
+    def test_an_empty_model_list_is_rejected(self) -> None:
+        """A provider with no models is one the picker cannot show and the client
+        factory cannot build, so it is a config error rather than an empty dropdown."""
+        data = _section()
+        providers = data["providers"]
+        assert isinstance(providers, dict)
+        provider = providers["test"]
+        assert isinstance(provider, dict)
+        provider["models"] = []
+
+        with pytest.raises(ConfigurationError, match=r"llm.providers.test.models"):
+            LlmSection.from_mapping(data)
+
+    def test_a_default_model_that_is_not_listed_is_rejected(self) -> None:
+        data = _section()
+        providers = data["providers"]
+        assert isinstance(providers, dict)
+        provider = providers["test"]
+        assert isinstance(provider, dict)
+        provider["default_model"] = "not-in-the-list"
+
+        with pytest.raises(ConfigurationError, match=r"llm.providers.test.default_model"):
+            LlmSection.from_mapping(data)
+
+    def test_a_duplicated_model_id_is_rejected(self) -> None:
+        """Two rows with one id make the second unreachable: the picker keys on the
+        id, so the duplicate would simply never be selectable."""
+        data = _section()
+        providers = data["providers"]
+        assert isinstance(providers, dict)
+        provider = providers["test"]
+        assert isinstance(provider, dict)
+        provider["models"] = ["test-model", "test-model"]
+
+        with pytest.raises(ConfigurationError, match=r"重复|duplicate"):
+            LlmSection.from_mapping(data)
+
+    def test_a_model_entry_may_be_a_bare_string_or_a_mapping_with_a_label(self) -> None:
+        """The display name is optional: most of the time the wire name is what the
+        operator wants to see, and forcing a mapping for every row would be noise."""
+        data = _section()
+        providers = data["providers"]
+        assert isinstance(providers, dict)
+        provider = providers["test"]
+        assert isinstance(provider, dict)
+        provider["models"] = ["bare-name", {"id": "wire-name", "label": "显示名"}]
+        provider["default_model"] = "wire-name"
+
+        section = LlmSection.from_mapping(data)
+
+        specs = section.providers["test"].models
+        assert [(spec.id, spec.display) for spec in specs] == [
+            ("bare-name", "bare-name"),
+            ("wire-name", "显示名"),
+        ]
+
+    def test_an_unknown_model_id_falls_back_to_the_default_rather_than_raising(self) -> None:
+        """A stale stored preference is normal; blanking the chat header is not."""
+        data = _section()
+        section = LlmSection.from_mapping(data)
+
+        spec = section.providers["test"].model_spec("gone-in-a-refactor")
+
+        assert spec.id == "test-model"
 
     def test_provider_must_be_a_mapping(self) -> None:
         with pytest.raises(ConfigurationError, match=r"llm.providers.bad"):

@@ -173,6 +173,19 @@ class ProcessController:
             return f"PID {target.pid} 属于小夜自己的进程树"
         return ""
 
+    def real_name(self, pid: int) -> str | None:
+        """What that number is running right now, or ``None`` if nothing is.
+
+        Exposed for the *proposal* step, where a name the model got wrong is cheap to
+        catch. It is not a substitute for the re-read inside :meth:`_kill_one`: a pid
+        can be handed to a different process between the two calls, and only the second
+        check happens next to the act.
+        """
+        try:
+            return str(self._module().Process(pid).name())
+        except Exception:
+            return None
+
     # -- the act -------------------------------------------------------------
 
     def kill(self, targets: Sequence[ProcessTarget], *, confirmed: bool) -> list[KillOutcome]:

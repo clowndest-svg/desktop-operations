@@ -152,6 +152,23 @@ class WorkflowRepository(Repository):
             value = self.scalar("SELECT COUNT(*) FROM workflow_runs WHERE ok = ?", (int(ok),))
         return int(value) if isinstance(value, (int, float)) else 0
 
+    def prune_runs(self, keep: int) -> int:
+        """Keep only the newest ``keep`` runs; return how many rows were dropped.
+
+        Same reasoning as the scheduler's copy: this table only ever grew, and a
+        cron workflow running every few minutes makes it grow for as long as the app
+        is left open. The newest rows are the ones the panel shows.
+        """
+        if keep <= 0:
+            return 0
+        return self.execute(
+            """
+            DELETE FROM workflow_runs
+            WHERE id NOT IN (SELECT id FROM workflow_runs ORDER BY id DESC LIMIT ?)
+            """,
+            (keep,),
+        )
+
     def last_run_at(self, workflow: str) -> str:
         """Timestamp of a workflow's most recent run, or ``""`` if never run."""
         value = self.scalar(

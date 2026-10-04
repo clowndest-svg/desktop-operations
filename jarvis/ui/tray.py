@@ -127,6 +127,8 @@ def _menu_items(
     pet_shown: Callable[[], bool],
     on_toggle_autostart: Callable[[], object] | None = None,
     autostart_on: Callable[[], bool] = lambda: False,
+    on_toggle_mobile: Callable[[], object] | None = None,
+    mobile_on: Callable[[], bool] = lambda: False,
 ) -> tuple[Any, ...]:
     """The right-click menu, as a tuple a test can read without pystray installed.
 
@@ -144,6 +146,14 @@ def _menu_items(
         items.append(
             builder.MenuItem("开机自启", on_toggle_autostart, checked=lambda _item: autostart_on())
         )
+    if on_toggle_mobile is not None:
+        # The tick is whether the *port is open*, read the same way as 开机自启. A
+        # menu that says 手机接入 is on while the bind failed would be the worst lie
+        # this app can tell: it would mean a network listener the operator thinks
+        # they closed.
+        items.append(
+            builder.MenuItem("手机接入", on_toggle_mobile, checked=lambda _item: mobile_on())
+        )
     items.append(builder.Menu.SEPARATOR)
     items.append(builder.MenuItem("退出小夜", on_quit))
     return tuple(items)
@@ -155,6 +165,14 @@ class TrayIcon:
     Nothing here knows about pywebview: the shell passes callbacks in and this
     object calls them on pystray's own thread. That keeps the privacy-relevant
     decisions (what the icon claims, when it stops existing) in one testable place.
+
+    Args:
+        on_toggle_mobile: Called by 「手机接入」. Optional -- a build without the LAN
+            endpoint (no ``mobile`` config) must not show a menu item that opens a
+            port it cannot then serve.
+        mobile_on: Whether the listener is open right now, read from the gateway
+            each time the menu is drawn. The tick is a claim about a socket, so it
+            is asked, not remembered: after a bind failure the honest tick is off.
     """
 
     def __init__(
@@ -167,6 +185,8 @@ class TrayIcon:
         pet_shown: Callable[[], bool] = lambda: False,
         on_toggle_autostart: Callable[[], object] | None = None,
         autostart_on: Callable[[], bool] = lambda: False,
+        on_toggle_mobile: Callable[[], object] | None = None,
+        mobile_on: Callable[[], bool] = lambda: False,
     ) -> None:
         self._name = name
         self._on_activate = on_activate
@@ -175,6 +195,8 @@ class TrayIcon:
         self._pet_shown = pet_shown
         self._on_toggle_autostart = on_toggle_autostart
         self._autostart_on = autostart_on
+        self._on_toggle_mobile = on_toggle_mobile
+        self._mobile_on = mobile_on
         self._icon: Any | None = None
         self._status = STATUS_OFF
         self._reason = ""
@@ -217,6 +239,8 @@ class TrayIcon:
                     pet_shown=self._pet_shown,
                     on_toggle_autostart=self._call_toggle_autostart,
                     autostart_on=self._autostart_on,
+                    on_toggle_mobile=self._call_toggle_mobile,
+                    mobile_on=self._mobile_on,
                 )
             )
             icon = pystray.Icon(
@@ -300,6 +324,11 @@ class TrayIcon:
 
     def _call_toggle_autostart(self) -> None:
         handler = self._on_toggle_autostart
+        if handler is not None:
+            handler()
+
+    def _call_toggle_mobile(self) -> None:
+        handler = self._on_toggle_mobile
         if handler is not None:
             handler()
 

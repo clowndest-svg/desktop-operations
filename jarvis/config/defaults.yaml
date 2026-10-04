@@ -49,28 +49,52 @@ llm:
   # names the environment variable that holds the key.
   # cost_*_per_1m are USD prices per 1M tokens, used only for cost logging
   # (0 disables cost reporting).
+  #
+  # A provider holds a LIST of models. `default_model` names the one the
+  # chat panel starts on; every entry may be a bare string, or a mapping
+  # `{id, label}` when the display name should differ from the wire name.
   providers:
     deepseek:
       base_url: https://api.deepseek.com/v1
-      model: deepseek-chat
+      models:
+        - id: deepseek-chat
+          label: DeepSeek Chat
+        - id: deepseek-reasoner
+          label: DeepSeek Reasoner
+      default_model: deepseek-chat
       api_key_env: DEEPSEEK_API_KEY
       cost_input_per_1m: 0.0
       cost_output_per_1m: 0.0
     openai:
       base_url: https://api.openai.com/v1
-      model: gpt-4o-mini
+      models:
+        - id: gpt-4o-mini
+          label: GPT-4o mini
+        - id: gpt-4o
+          label: GPT-4o
+      default_model: gpt-4o-mini
       api_key_env: OPENAI_API_KEY
       cost_input_per_1m: 0.0
       cost_output_per_1m: 0.0
     kimi:
       base_url: https://api.moonshot.cn/v1
-      model: moonshot-v1-8k
+      models:
+        - id: moonshot-v1-8k
+          label: Moonshot v1 8K
+        - id: moonshot-v1-32k
+          label: Moonshot v1 32K
+      default_model: moonshot-v1-8k
       api_key_env: MOONSHOT_API_KEY
       cost_input_per_1m: 0.0
       cost_output_per_1m: 0.0
     qwen:
       base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
-      model: qwen-plus
+      models:
+        - id: qwen-plus
+          label: Qwen Plus
+        - id: qwen-max
+          label: Qwen Max
+      default_model: qwen-plus
       api_key_env: DASHSCOPE_API_KEY
       cost_input_per_1m: 0.0
       cost_output_per_1m: 0.0
@@ -169,7 +193,10 @@ tts:
   # cosyvoice (offline, ONNX) | edge_tts (cloud, pure-Python).
   # ``voice`` is engine-specific — the two ids below must move together.
   # edge_tts ships as a clean wheel and works out of the box; cosyvoice does
-  # not (it needs a manual ModelScope + git-clone install), so it is opt-in.
+  # not (it needs a manual ModelScope + git-clone install, and its transformers
+  # ceiling does not fit this environment's), so it is opt-in.  Selecting
+  # ``cosyvoice`` runs the model in a separate process from the voice virtualenv,
+  # discovered at <data root>/voice-venv — see jarvis/tts/sidecar.py.
   engine: edge_tts
   # Engine-specific voice / speaker id:
   #   cosyvoice -> e.g. 中文女 / 中文男 / 英文女 / 英文男 / 日语男
@@ -183,6 +210,12 @@ tts:
   device: cpu
   # Offline model id / path (CosyVoice2 on ModelScope, auto-downloaded).
   model: iic/CosyVoice2-0.5B
+  # Environment variable holding the Alibaba DashScope key, used only by cloud
+  # cloned voices ("录一段我的声音" with 上传 to the vendor). A recording is
+  # private by default; uploading it makes the phone call answer in a few
+  # hundred milliseconds instead of ~16 seconds on a 4 GB GPU. Empty key =
+  # local-only cloning, which still works, just slowly. See jarvis/tts/cloud.py.
+  cloud_api_key_env: DASHSCOPE_API_KEY
 
 orchestration:
   # End-to-end voice pipeline: wake-word -> VAD -> ASR -> multi-agent -> TTS.
@@ -361,10 +394,32 @@ computer:
   dry_run: true
   # Permit pointer movement and clicks.
   allow_mouse: false
-  # Permit typing and key presses.
+  # Permit key presses (window switching, enter, escape).
   allow_keyboard: false
+  # Permit typing text. Independent of the tiers and off by default: what gets typed
+  # may land in someone else's chat box. Turning this on IS the confirmation -- there
+  # is no `confirmed` flag for a tool to pass, on purpose.
+  allow_typing: false
   # Require an explicit confirmation flag for risky actions.
   confirm_dangerous: true
+
+mobile:
+  # The phone endpoint. Off by default because turning it on opens a port other
+  # machines on the Wi-Fi can reach; the tray's 「手机接入」 is the switch.
+  enabled: false
+  # Which interface to listen on. 0.0.0.0 = every LAN interface, which is what a
+  # phone on Wi-Fi needs; use 127.0.0.1 to keep it local-only.
+  bind_host: 0.0.0.0
+  # Fixed port so the pairing screen can print a number that stays true.
+  port: 8737
+  # How long a 6-digit pairing code lives. Long enough to type it from a phone,
+  # short enough that a code left on screen is not an open door.
+  pair_minutes: 5
+  # Wrong codes accepted before the current one burns. 10^6 codes are brute-
+  # forcible in a minute on a LAN, so the counter, not the math, is the lock.
+  max_pair_attempts: 6
+  # Ceiling on paired devices; revoke to make room.
+  max_devices: 8
 
 mcp:
   # Model Context Protocol client: plug external tool servers into the same tool

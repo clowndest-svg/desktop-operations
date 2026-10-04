@@ -10,8 +10,7 @@
     -->
     <div class="core__readout" role="status" aria-live="polite" aria-atomic="true">
       <span class="core__state">{{ voice.label }}</span>
-      <span class="core__hint">{{ caption }}</span>
-      <!--
+      <span class="core__hint">{{ caption }}</span>      <!--
         Only a page that is itself the loudspeaker can stop the sentence. When the
         audio is coming out of Python's PortAudio stream, this window has no way to
         retract it and a button implying otherwise would be a lie with an icon on it.
@@ -40,6 +39,47 @@
         试听
       </button>
     </div>
+    <!--
+      The two switches, deliberately outside the live region above: that one announces
+      "what is happening to my voice", and a button pressed into it would make every
+      status change read out the whole control panel too.
+
+      Both report the shell's answer rather than a local guess -- 聆听 is the microphone
+      phase and 朗读 is the saved preference, each pushed back on the next snapshot. A
+      switch that paints itself green before the save was refused is the mistake this
+      component has been written against from the start.
+    -->
+    <div class="core__switches">
+      <button
+        class="core__switch"
+        :class="{ 'core__switch--on': listening }"
+        type="button"
+        :disabled="voice.busy || voice.loading"
+        :title="
+          listening
+            ? '麦克风开着；点这里释放（只关耳朵，她照样念给你听）'
+            : '麦克风已释放；点这里重新开（朗读和打字的回答不受影响）'
+        "
+        @click="toggleListening"
+      >
+        聆听
+      </button>
+      <button
+        class="core__switch"
+        :class="{ 'core__switch--on': voice.speaksTyped }"
+        type="button"
+        :disabled="readingBusy"
+        :title="
+          voice.speaksTyped
+            ? '打字问的问题也会念出来；点这里关掉'
+            : '打字问的问题只出字；点这里让她念出来'
+        "
+        @click="toggleReading"
+      >
+        朗读
+      </button>
+    </div>
+    <p v-if="switchProblem" class="core__problem">{{ switchProblem }}</p>
   </div>
 </template>
 
@@ -73,7 +113,7 @@
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useVoiceStore } from '@/stores/voice'
-import { runningMocked } from '@/api/bridge'
+import { runningMocked, saveSettings } from '@/api/bridge'
 import {
   isBrowserOutput,
   levels,
@@ -136,6 +176,50 @@ const FRAME_INTERVAL_MS = 66
 const SPEAKING_FRAME_INTERVAL_MS = 33
 
 const voice = useVoiceStore()
+
+/**
+ * The two switches beside the status.
+ *
+ * ``listening`` is the shell's microphone phase, not a local optimistic flag: enabling
+ * can fail (no device, a refused permission, a model still loading) and a switch that
+ * painted itself on before that answer arrived would be lying about the one thing this
+ * panel exists to say truthfully.
+ */
+const listening = computed(() => voice.phase === 'running')
+const readingBusy = ref(false)
+const switchProblem = ref('')
+
+async function toggleListening(): Promise<void> {
+  switchProblem.value = ''
+  if (listening.value) {
+    await voice.mute()
+    return
+  }
+  await voice.enable()
+  // ``enable`` reports through the store: it leaves the phase alone and sets ``error``.
+  // Checking the phase rather than trusting the call to have finished is the difference
+  // between a switch that shows the microphone and one that shows the attempt.
+  if (!listening.value) switchProblem.value = voice.error || '麦克风没能开起来'
+}
+
+async function toggleReading(): Promise<void> {
+  readingBusy.value = true
+  switchProblem.value = ''
+  try {
+    const snapshot = await saveSettings({ auto_speak_typed: !voice.speaksTyped })
+    // The snapshot coming back is the truth about what was stored; a refusal lands in
+    // ``problems`` and leaves the switch where it was.
+    if (typeof snapshot.auto_speak_typed === 'boolean') {
+      voice.speaksTyped = snapshot.auto_speak_typed
+    }
+    const problem = snapshot.problems?.auto_speak_typed
+    if (problem) switchProblem.value = String(problem)
+  } catch (err) {
+    switchProblem.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    readingBusy.value = false
+  }
+}
 const canvas = ref<HTMLCanvasElement | null>(null)
 
 /**
@@ -145,6 +229,11 @@ const canvas = ref<HTMLCanvasElement | null>(null)
  * to distrust the one light that matters.
  */
 const current = computed<MoodKey>((): MoodKey => {
+  // Thinking is a turn, not a microphone state. A typed question takes the same six
+  // seconds with the voice stack never loaded, and a figure that sits motionless for
+  // six seconds while it is being answered is indistinguishable from a hung app --
+  // which is the complaint this line exists to answer.
+  if (voice.turn === 'processing') return voice.interrupted ? 'broken' : 'thinking'
   switch (voice.phase) {
     case 'loading':
       return 'waking'
@@ -155,7 +244,6 @@ const current = computed<MoodKey>((): MoodKey => {
     case 'running':
       if (voice.interrupted) return 'broken'
       if (voice.turn === 'listening') return 'listening'
-      if (voice.turn === 'processing') return 'thinking'
       return 'armed'
     default:
       return 'dormant'
@@ -176,10 +264,13 @@ const caption = computed(() => {
  * be inferred from the turn state. That is a weaker claim than a measurement, and the
  * caption says so instead of showing a still picture and letting the operator assume
  * silence.
+ *
+ * And note what is *not* in here: whether the microphone is on. 「思考中」 is a turn, and
+ * a turn can be a typed one -- conditioning this on ``voice.enabled`` made the ring go
+ * dead for every question asked with 聆听 switched off, which is the same conflation the
+ * read-aloud used to have.
  */
-const speakingSomewhere = computed(
-  () => talking.value || (voice.enabled && voice.turn === 'processing'),
-)
+const speakingSomewhere = computed(() => talking.value || voice.turn === 'processing')
 
 /**
  * ``speaking`` is layered on rather than replacing a mood: "it is answering" and
@@ -481,6 +572,66 @@ watch(talking, repaint)
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+/*
+ * The two switches. They read as switches rather than as the HUD's rectangular
+ * command buttons because what they report is a state, and the state comes from the
+ * shell: a button that was pressed and did not change anything has to look unchanged,
+ * which is the opposite of what a normal button does.
+ */
+.core__switches {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 3px;
+  flex: none;
+}
+
+.core__switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 9px 2px 7px;
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--hud-dim);
+  background: rgba(10, 20, 34, 0.62);
+  border: 1px solid rgba(120, 160, 200, 0.24);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.core__switch::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: rgba(150, 170, 190, 0.35);
+}
+
+.core__switch--on {
+  color: var(--core-accent, var(--hud-cyan));
+  border-color: var(--core-accent, var(--hud-cyan));
+}
+
+.core__switch--on::before {
+  background: var(--core-accent, var(--hud-cyan));
+  box-shadow: 0 0 8px var(--core-glow, rgba(77, 216, 255, 0.5));
+}
+
+.core__switch:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.core__problem {
+  margin: 2px 0 0;
+  font-size: 11px;
+  color: var(--hud-red);
+  text-align: center;
 }
 
 .core--armed {

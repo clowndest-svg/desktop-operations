@@ -37,7 +37,23 @@ from jarvis.workflow.types import (
 logger = logging.getLogger("jarvis.workflow.service")
 
 JOB_PREFIX: str = "workflow:"
+
+ACTION_PREFIX: str = "workflow:"
+"""How a scheduled job says "run this workflow" instead of "call this tool".
+
+The scheduler stores one string per job and hands it to whatever runner the
+composition root injected, and that runner only knows the tool registry. Without a
+prefix a workflow name is looked up as a tool and every cron workflow fails at fire
+time. Namespaced here rather than in the registry, because the alternative is
+registering a dynamic tool per YAML file -- name collisions and a risk level nobody
+chose. ``JOB_PREFIX`` happens to be the same text; it is a *different* namespace (a
+row id in the job table) and renaming one must not silently rename the other, which is
+why they are separate constants.
+"""
 """Scheduler job ids are namespaced so a workflow cannot collide with a job."""
+
+RUN_HISTORY_LIMIT: int = 2000
+"""How many execution records to keep; see the scheduler's copy for the reasoning."""
 
 
 class WorkflowService:
@@ -88,8 +104,23 @@ class WorkflowService:
         # but an operator needs somewhere to *put* a definition. Without this the
         # only way to learn the folder name was to read a warning on every boot.
         self._ensure_directory()
+        self._trim_history()
         definitions = self.reload()
         logger.info("workflow service started with %d definition(s)", len(definitions))
+
+    def _trim_history(self) -> None:
+        """Cap the run history at start-up, the same way the scheduler does.
+
+        Not worth failing a start over: the worst case is one more launch with the
+        old rows still in place.
+        """
+        try:
+            dropped = self._repo.prune_runs(RUN_HISTORY_LIMIT)
+        except Exception:  # pragma: no cover - depends on the database
+            logger.exception("trimming the workflow run history failed")
+            return
+        if dropped:
+            logger.info("trimmed %d old workflow run record(s)", dropped)
 
     def _ensure_directory(self) -> None:
         """Create the definitions folder, tolerating a read-only data root."""
@@ -322,30 +353,76 @@ class WorkflowService:
         }
 
     def _sync_schedule(self) -> None:
-        """Register every cron workflow with the injected scheduler."""
+        """Make the scheduler's job list match the definitions, in both directions.
+
+        Registering used to be the only half that existed, so a definition that was
+        deleted, renamed, or switched from ``cron`` to ``manual`` left its job behind.
+        The scheduler kept firing it, ``run(name)`` could not find the definition, and
+        every fire was recorded as a failure -- a permanent error with nothing on
+        screen connecting it back to the edit that caused it.
+
+        Only jobs in this package's namespace are touched. ``reminder:`` and anything
+        another component registered have to survive a workflow reload untouched.
+        """
         scheduler = self._scheduler
         if scheduler is None:
             return
         settings = self._settings_provider()
+        wanted: set[str] = set()
         if not settings.enabled:
+            # Nothing should be scheduled, so ``wanted`` stays empty and the sweep
+            # below withdraws whatever an earlier enabled run had registered.
             logger.info("workflow scheduling disabled by config")
+        else:
+            for definition in self._definitions.values():
+                if definition.trigger is not TriggerKind.CRON:
+                    continue
+                wanted.add(f"{JOB_PREFIX}{definition.name}")
+                try:
+                    scheduler.add_job(
+                        SchedulerJobSpec(
+                            job_id=f"{JOB_PREFIX}{definition.name}",
+                            name=definition.name,
+                            # Prefixed, and dispatched by the composition root. This used to
+                            # store ``definition.name`` bare, which made the scheduler call
+                            # ``tools.invoke("<workflow name>")`` -- and no workflow is ever
+                            # registered as a tool, so every cron workflow failed at fire
+                            # time with "未注册的工具". It stayed invisible because the
+                            # folder had zero definitions in it, not because the path worked.
+                            action=f"{ACTION_PREFIX}{definition.name}",
+                            arguments={},
+                            trigger=SchedulerTriggerKind.CRON,
+                            expression=definition.schedule,
+                        )
+                    )
+                except Exception as exc:
+                    logger.warning("registering workflow %s failed: %s", definition.name, exc)
+        self._drop_stale_jobs(wanted)
+
+    def _drop_stale_jobs(self, wanted: set[str]) -> None:
+        """Withdraw our own jobs that no definition asks for any more.
+
+        Scoped by prefix on purpose: a job this package did not create is not this
+        package's to remove, and a sweep that trusted the id shape alone would take
+        the reminders with it.
+        """
+        scheduler = self._scheduler
+        if scheduler is None:  # pragma: no cover - only reached with one wired
             return
-        for definition in self._definitions.values():
-            if definition.trigger is not TriggerKind.CRON:
+        try:
+            existing = scheduler.list_jobs()
+        except Exception:  # pragma: no cover - the scheduler guards its own reads
+            logger.exception("listing scheduled jobs failed; stale workflows left alone")
+            return
+        for job in existing:
+            job_id = str(getattr(job, "job_id", "") or "")
+            if not job_id.startswith(JOB_PREFIX) or job_id in wanted:
                 continue
             try:
-                scheduler.add_job(
-                    SchedulerJobSpec(
-                        job_id=f"{JOB_PREFIX}{definition.name}",
-                        name=definition.name,
-                        action=definition.name,
-                        arguments={},
-                        trigger=SchedulerTriggerKind.CRON,
-                        expression=definition.schedule,
-                    )
-                )
-            except Exception as exc:
-                logger.warning("registering workflow %s failed: %s", definition.name, exc)
+                if scheduler.remove_job(job_id):
+                    logger.info("withdrew stale workflow job %s", job_id)
+            except Exception as exc:  # pragma: no cover - depends on the backend
+                logger.warning("could not withdraw stale workflow job %s: %s", job_id, exc)
 
 
-__all__ = ["JOB_PREFIX", "WorkflowService"]
+__all__ = ["ACTION_PREFIX", "JOB_PREFIX", "WorkflowService"]

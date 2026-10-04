@@ -152,7 +152,7 @@ class MemoryService:
         self,
         content: str,
         *,
-        kind: MemoryKind = MemoryKind.FACT,
+        kind: MemoryKind | str = MemoryKind.FACT,
         scope: MemoryScope = MemoryScope.USER,
         importance: float = 0.5,
         pinned: bool = False,
@@ -160,23 +160,34 @@ class MemoryService:
     ) -> MemoryRecord:
         """Store a memory, deduplicated, and index it for semantic recall.
 
+        Args:
+            kind: A :class:`MemoryKind` or its wire name — a tool handering the
+                model's ``kind`` parameter in has only the string, and this is the
+                one place that knows how to turn it into an enum.
+
         Raises:
-            JarvisError: if the service has not been started.
+            JarvisError: if the service has not been started, or ``kind`` is not a
+                known kind.
         """
         self._require()
         text = content.strip()
         if not text:
             raise JarvisError("记忆内容不能为空")
+        try:
+            # ``MemoryKind`` is a StrEnum, so an already-correct member round-trips.
+            resolved = MemoryKind(kind)
+        except ValueError as exc:
+            raise JarvisError(f"未知的记忆类型：{kind}") from exc
         record = self._repo.upsert(
             scope=scope,
-            kind=kind,
+            kind=resolved,
             content=text,
             source=source,
             importance=min(1.0, max(0.0, importance)),
             pinned=pinned,
         )
         self._index(record)
-        logger.debug("remembered %s/%s: %s", scope.value, kind.value, text[:60])
+        logger.debug("remembered %s/%s: %s", scope.value, resolved.value, text[:60])
         return record
 
     def remember_many(

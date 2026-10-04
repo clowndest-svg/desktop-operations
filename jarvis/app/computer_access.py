@@ -18,7 +18,7 @@ import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Final
 
-from jarvis.app.preferences import COMPUTER_TIER, Preferences
+from jarvis.app.preferences import COMPUTER_ALLOW_TYPING, COMPUTER_TIER, Preferences
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from jarvis.config.schema import ComputerSection
@@ -87,9 +87,27 @@ class ComputerAccess:
         value = self._prefs.number(COMPUTER_TIER, default=DEFAULT_TIER)
         return value if any(entry[0] == value for entry in TIERS) else DEFAULT_TIER
 
+    def typing_allowed(self) -> bool:
+        """是否允许打字：窗口里拨过就用窗口的，没拨过听配置文件的。
+
+        三态读取而不是 ``flag(default=False)``：少了这一层，"没拨过"和"拨过关了"就是同一个
+        值，配置文件里明确写的 ``allow_typing: true`` 会被静默压成 false —— 那正是这个项目最
+        讨厌的"存了但不生效"。窗口里拨过一次之后，它才压住配置文件。
+        """
+        stored = self._prefs.get(COMPUTER_ALLOW_TYPING)
+        if isinstance(stored, bool):
+            return stored
+        return self._base().allow_typing
+
     def section(self) -> ComputerSection:
-        """What :class:`~jarvis.computer.service.ComputerService` should enforce."""
-        return section_for_tier(self._base(), self.tier())
+        """What :class:`~jarvis.computer.service.ComputerService` should enforce.
+
+        The typing switch is applied **after** the tier, so a tier never turns it on
+        and never turns it off: a window that opened 键鼠全开 does not thereby consent
+        to writing into someone else's chat box.
+        """
+        section = section_for_tier(self._base(), self.tier())
+        return dataclasses.replace(section, allow_typing=self.typing_allowed())
 
     def current(self) -> dict[str, object]:
         tier = self.tier()
@@ -103,6 +121,7 @@ class ComputerAccess:
             "dry_run": section.dry_run,
             "allow_mouse": section.allow_mouse,
             "allow_keyboard": section.allow_keyboard,
+            "allow_typing": section.allow_typing,
         }
 
     def levels(self) -> dict[str, object]:
@@ -114,6 +133,14 @@ class ComputerAccess:
                 for tier, label, describe, _flags in TIERS
             ],
         }
+
+    def set_typing(self, value: object) -> dict[str, object]:
+        """Turn the typing switch on or off. Returns the same payload ``levels`` does."""
+        if not isinstance(value, bool):
+            return {**self.levels(), "error": f"这个开关只认 true/false：{value!r}"}
+        self._prefs.set(COMPUTER_ALLOW_TYPING, value)
+        logger.warning("desktop typing %s", "allowed" if value else "forbidden")
+        return {"error": "", **self.levels()}
 
     def set_tier(self, value: object) -> dict[str, object]:
         raw = value if isinstance(value, (int, str)) and not isinstance(value, bool) else None

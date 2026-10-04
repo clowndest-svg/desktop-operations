@@ -32,7 +32,8 @@
                 {{ row.name }}
               </button>
               <span class="settings__model-meta">
-                {{ row.model }} · {{ row.source }}<template v-if="row.edited"> · 已改</template>
+                {{ row.models.length }} 个模型 · 起始 {{ row.default_model }}
+                · {{ row.source }}<template v-if="row.edited"> · 已改</template>
                 · key {{ row.key_set ? '已设置' : '未设置' }}
               </span>
               <span class="settings__model-ops">
@@ -49,7 +50,7 @@
                   设为当前
                 </button>
                 <button
-                  v-if="row.source === '界面添加'"
+                  v-if="!row.current && row.source === '界面添加'"
                   class="hud-btn settings__del"
                   type="button"
                   :disabled="saving"
@@ -57,18 +58,113 @@
                 >
                   删除
                 </button>
+                <button
+                  v-else-if="!row.current"
+                  class="hud-btn"
+                  type="button"
+                  :disabled="saving"
+                  title="配置文件里那一行不动，只是不再出现在下拉框里"
+                  @click="hideRow(row.name)"
+                >
+                  藏起来
+                </button>
               </span>
             </li>
           </ul>
 
           <p class="settings__why">
             点名字编辑那一行的地址和模型名；「设为当前」立刻生效，不用重启。
-            配置文件里的行要删请去 config.yaml——界面上删不掉它们，是故意的。
+            配置文件里的行删不掉、也改不回文件——界面上能改的是这一行怎么用，
+            要真删请自己开 config.yaml。
           </p>
+
+          <div v-if="hiddenRows.length" class="settings__hidden">
+            <p class="hud-label">已藏起来 {{ hiddenRows.length }} 行（下拉框里看不到，配置没动）</p>
+            <ul class="settings__models">
+              <li v-for="row in hiddenRows" :key="`hidden-${row.name}`" class="settings__model">
+                <span class="settings__model-pick">{{ row.name }}</span>
+                <span class="settings__model-meta">
+                  {{ row.models }} 个模型 · {{ row.source }}
+                </span>
+                <span class="settings__model-ops">
+                  <button class="hud-btn" type="button" :disabled="saving" @click="showRow(row.name)">
+                    找回
+                  </button>
+                </span>
+              </li>
+            </ul>
+          </div>
 
           <label class="settings__row">
             <span class="hud-label">正在编辑：{{ editing }}</span>
           </label>
+
+          <!--
+            A provider's models, editable one row at a time. This is the list the chat
+            header's second dropdown reads, so adding here and adding there are the same
+            edit -- the panel is just somewhere with room to see the whole set.
+
+            The last row cannot be removed: a provider with no models is one neither the
+            picker nor the client factory can use, so the backend refuses it and this
+            disables the button rather than letting the click fail.
+          -->
+          <div class="settings__mlist">
+            <span class="hud-label">该服务商的模型 · {{ editingModels.length }}</span>
+            <ul class="settings__mrow">
+              <li v-for="spec in editingModels" :key="spec.id" class="settings__mitem">
+                <span class="settings__mname">{{ spec.label }}</span>
+                <span v-if="spec.id !== spec.label" class="settings__mid hud-label">{{ spec.id }}</span>
+                <span v-if="spec.id === editingRow?.default_model" class="settings__mtag hud-label">起始</span>
+                <!--
+                  实测一次：问它一句能不能答，再递一张红方块问是什么颜色。
+                  新加的模型不用按 —— 保存这条自己就会测，连不上就原样退回。这个按钮是给
+                  config.yaml 里那些从来没被测过的老行补一次测量的，看图能力只有测过才知道。
+                -->
+                <button
+                  class="hud-btn"
+                  type="button"
+                  :disabled="testing !== ''"
+                  title="问它两句：能不能答、这张红图看不看得见"
+                  @click="testModel(spec.id)"
+                >
+                  {{ testing === spec.id ? '测中…' : '测一下' }}
+                </button>
+                <small v-if="verdicts[`${editing}/${spec.id}`]" class="settings__why">{{ verdicts[`${editing}/${spec.id}`] }}</small>
+                <button
+                  class="hud-btn settings__del"
+                  type="button"
+                  :disabled="saving || editingModels.length <= 1"
+                  :title="editingModels.length <= 1 ? '至少要留一个模型' : `从 ${editing} 里删掉 ${spec.id}`"
+                  @click="removeModel(spec.id)"
+                >
+                  删
+                </button>
+              </li>
+            </ul>
+            <div class="settings__madd">
+              <input
+                v-model.trim="newModel"
+                class="settings__minput"
+                type="text"
+                spellcheck="false"
+                placeholder="模型 id，如 deepseek-chat"
+                @keydown.enter.prevent="addModel"
+              />
+              <input
+                v-model.trim="newLabel"
+                class="settings__minput"
+                type="text"
+                spellcheck="false"
+                placeholder="显示名（可选）"
+                @keydown.enter.prevent="addModel"
+              />
+              <button class="hud-btn" type="button" :disabled="saving || !newModel" @click="addModel">
+                ＋ 加模型
+              </button>
+            </div>
+            <p v-if="modelNote" class="settings__why">{{ modelNote }}</p>
+          </div>
+
           <label class="settings__row">
             <span class="hud-label">调用地址</span>
             <input v-model.trim="form.base_url" type="text" spellcheck="false" :placeholder="editingRow?.base_url" />
@@ -76,9 +172,10 @@
           <p class="settings__why">留空 = 不覆盖，用这一行本来的地址。</p>
 
           <label class="settings__row">
-            <span class="hud-label">模型名称</span>
-            <input v-model.trim="form.model" type="text" spellcheck="false" :placeholder="editingRow?.model" />
+            <span class="hud-label">起始模型（该服务商默认用哪个）</span>
+            <input v-model.trim="form.model" type="text" spellcheck="false" :placeholder="editingRow?.default_model" />
           </label>
+          <p class="settings__why">对话区第一次选到这个服务商时用它；留空 = 用第一个。</p>
 
           <div class="settings__row">
             <span class="hud-label">API Key（{{ editingRow?.key_env || '未配置' }}）</span>
@@ -103,7 +200,11 @@
           </p>
 
           <details class="settings__add">
-            <summary class="hud-label">＋ 添加一个模型</summary>
+            <summary class="hud-label">＋ 添加一个服务商</summary>
+            <p class="settings__why">
+              下面这三格说的是一家**新的**服务商（一个新地址、一把新钥匙）。
+              已经在这张表里的服务商，点它的名字进去改地址、改起始模型、加它的其它模型。
+            </p>
             <label class="settings__row">
               <span class="hud-label">名字（小写字母数字 - _）</span>
               <input v-model.trim="draft.name" type="text" spellcheck="false" placeholder="如 deepseek-v4" />
@@ -113,9 +214,10 @@
               <input v-model.trim="draft.base_url" type="text" spellcheck="false" placeholder="https://api.example.com/v1" />
             </label>
             <label class="settings__row">
-              <span class="hud-label">模型名称</span>
+              <span class="hud-label">起始模型</span>
               <input v-model.trim="draft.model" type="text" spellcheck="false" placeholder="deepseek-chat" />
             </label>
+            <p class="settings__why">先是这一个；加好这个服务商后，在上面那一行里继续加它别的模型。</p>
             <label class="settings__row">
               <span class="hud-label">API Key（可选，存进 {{ draftKeyEnv }}）</span>
               <input v-model="draft.api_key" type="password" autocomplete="off" spellcheck="false" />
@@ -128,9 +230,65 @@
           <legend>语音</legend>
           <label class="settings__row settings__row--inline">
             <input v-model="form.auto_speak_typed" type="checkbox" />
-            <span class="hud-label">打字问的问题也念出来</span>
+            <span class="hud-label">打字问的问题也念出来{{ tag('auto_speak_typed') }}</span>
           </label>
           <p class="settings__why">关掉后只有语音问句会得到语音回答，文字回合只出字。</p>
+
+          <label class="settings__row">
+            <span class="hud-label">思考状态 Loader</span>
+            <select v-model="form.thinking_loader" class="hud-field">
+              <option v-for="kind in loaderChoices" :key="kind" :value="kind">
+                {{ loaderLabels[kind] ?? kind }}
+              </option>
+            </select>
+          </label>
+          <p class="settings__why">
+            「思考中」文案左边那种动效。对话气泡和桌面人物头上那张卡一起换 ——
+            同一个等待不该长成两个样子。
+          </p>
+
+          <label class="settings__row">
+            <span class="hud-label">唤醒问候语</span>
+            <input
+              v-model="form.wake_greeting"
+              type="text"
+              :maxlength="greetingMax"
+              :placeholder="original?.wake_greeting_default ?? ''"
+            />
+          </label>
+          <p class="settings__why">
+            说「你好小夜」之后她先回的这一句。要等桌面人物完全显形才开口；
+            宠物没开、或者主界面正开着的时候不等，直接说。清空就是不说。
+          </p>
+
+          <label v-if="wakeKeywordMax" class="settings__row">
+            <span class="hud-label">唤醒词{{ tag('wake_keywords') }}</span>
+            <input
+              v-model="form.wake_keywords"
+              type="text"
+              spellcheck="false"
+              :placeholder="wakeKeywordDefault"
+            />
+          </label>
+          <p v-if="wakeKeywordMax" class="settings__why">
+            说其中任何一个就算叫她。改完**下一句就生效**，不用重开麦克风 ——
+            重启会把正在说的半句话吃掉。用顿号或空格分开，最多
+            {{ wakeKeywordMax }} 个、每个 {{ wakeKeywordMinChars }}–{{ wakeKeywordMaxChars }} 个字：
+            太短会在日常说话里撞到，太长是句子不是名字。
+            <b>清空 = 交回配置里的那几个</b>（{{ wakeKeywordDefault }}），
+            那几个是同音写法都认的版本，别改名把它们弄丢了。
+          </p>
+
+          <div class="settings__row">
+            <span class="hud-label">音色{{ tag('tts_voice') }}</span>
+            <div class="settings__keyline">
+              <span class="settings__state">{{ voiceSummary }}</span>
+              <button class="hud-btn" type="button" @click="emit('voice')">换音色</button>
+            </div>
+          </div>
+          <p class="settings__why">
+            {{ voiceNote }}
+          </p>
 
           <div class="settings__row">
             <span class="hud-label">麦克风自动待命</span>
@@ -145,9 +303,100 @@
         </fieldset>
 
         <fieldset class="settings__group">
+          <legend>思考与上下文</legend>
+          <label class="settings__row settings__row--inline">
+            <input v-model="form.thinking_enabled" type="checkbox" />
+            <span class="hud-label">要她给出思考过程{{ tag('thinking_enabled') }}</span>
+          </label>
+          <p class="settings__why">
+            开了之后每条回答下面会出现可展开的「思考过程」。这是向模型额外要的 token，
+            不要就关掉；没开的模型不回这段，框也就是空的。
+          </p>
+
+          <label class="settings__row">
+            <span class="hud-label">思考预算（token）{{ tag('thinking_budget') }}</span>
+            <input
+              v-model.number="form.thinking_budget"
+              type="number"
+              :min="budgetBounds[0]"
+              :max="budgetBounds[1]"
+              step="64"
+            />
+          </label>
+          <p class="settings__why">
+            {{ budgetBounds[0] }}–{{ budgetBounds[1] }} 之间。这是真的预算不是「高/中/低」：
+            到数了她就停止思考直接答，回答里的思考 token 数能和这个值对上，所以能验证它没变成摆设。
+          </p>
+
+          <label class="settings__row">
+            <span class="hud-label">上下文轮数{{ tag('history_turns') }}</span>
+            <input
+              v-model.number="form.history_turns"
+              type="number"
+              :min="turnBounds[0]"
+              :max="turnBounds[1]"
+              step="1"
+            />
+          </label>
+          <p class="settings__why">
+            每次提问带上前几轮对话，{{ turnBounds[0] }}–{{ turnBounds[1] }} 之间，0 表示只看这一句。
+            调大能接得上「接着刚才那个说」，但每一轮都要把这段重付一遍。
+          </p>
+        </fieldset>
+
+        <fieldset v-if="alertRules.length" class="settings__group">
+          <legend>告警</legend>
+          <p class="settings__why">
+            每一行是一条线：连续超过 {{ alertSustain }} 秒才算一次，恢复了才会关掉。
+            关掉某一行只是不再盯它，不影响概览里的其它读数。
+          </p>
+          <div v-for="rule in alertRules" :key="rule.code" class="settings__rule">
+            <label class="settings__row settings__row--inline">
+              <input v-model="form.alert_rules[rule.code].enabled" type="checkbox" />
+              <span class="hud-label">{{ rule.label }}{{ tag(`alerts_rules:${rule.code}`) }}</span>
+            </label>
+            <label class="settings__row settings__row--inline">
+              <span class="hud-label">{{ rule.direction === 'above' ? '高于' : '低于' }}</span>
+              <input
+                v-model.number="form.alert_rules[rule.code].threshold"
+                type="number"
+                :min="rule.low"
+                :max="rule.high"
+                :step="rule.unit === 'GB' ? 1 : 0.5"
+                class="settings__small"
+              />
+              <span class="hud-label">{{ rule.unit }}（可调 {{ rule.low }}–{{ rule.high }}）</span>
+            </label>
+            <p class="settings__why">{{ rule.help }}</p>
+          </div>
+
+          <label class="settings__row">
+            <span class="hud-label">重复提醒间隔（分钟）{{ tag('alerts_cooldown_minutes') }}</span>
+            <input
+              v-model.number="form.alert_cooldown"
+              type="number"
+              :min="cooldownBounds[0]"
+              :max="cooldownBounds[1]"
+              step="1"
+            />
+          </label>
+          <p class="settings__why">
+            同一条告警在这一段时间里只说一次。设得太短，一块快满的盘会一直打断你。
+          </p>
+
+          <label class="settings__row settings__row--inline">
+            <input v-model="form.alert_speak" type="checkbox" />
+            <span class="hud-label">严重告警用语音提醒{{ tag('alerts_speak_critical') }}</span>
+          </label>
+          <p class="settings__why">
+            只有「严重」这一档会开口，普通告警只在概览里亮着。语音没启用时这条本来就不会响。
+          </p>
+        </fieldset>
+
+        <fieldset class="settings__group">
           <legend>界面</legend>
           <label class="settings__row">
-            <span class="hud-label">遥测轮询间隔（毫秒）</span>
+            <span class="hud-label">遥测轮询间隔（毫秒）{{ tag('telemetry_interval_ms') }}</span>
             <input v-model.number="form.telemetry_interval_ms" type="number" min="500" max="60000" step="100" />
           </label>
           <p class="settings__why">
@@ -185,17 +434,39 @@
  */
 import { computed, ref, watch } from 'vue'
 
-import { fetchSettings, saveSettings, type ModelRow, type SettingsSnapshot } from '@/api/bridge'
+import {
+  addProviderModel,
+  fetchSettings,
+  fetchVoices,
+  llmTest,
+  removeProviderModel,
+  saveSettings,
+  type AlertRuleSetting,
+  type HiddenRow,
+  type ModelRow,
+  type ModelSpec,
+  type SettingsSnapshot,
+  type VoiceList,
+} from '@/api/bridge'
 
-const props = defineProps<{ open: boolean }>()
-const emit = defineEmits<{ (e: 'close'): void; (e: 'saved', snapshot: SettingsSnapshot): void }>()
+const props = defineProps<{ open: boolean; voiceClosed?: number }>()
+const emit = defineEmits<{ (e: 'close'): void; (e: 'saved', snapshot: SettingsSnapshot): void; (e: 'voice'): void }>()
 
 const original = ref<SettingsSnapshot | null>(null)
 const form = ref<{
   base_url: string
   model: string
   auto_speak_typed: boolean
+  wake_greeting: string
+  wake_keywords: string
+  thinking_loader: string
   telemetry_interval_ms: number
+  thinking_enabled: boolean
+  thinking_budget: number
+  history_turns: number
+  alert_rules: Record<string, { enabled: boolean; threshold: number }>
+  alert_cooldown: number
+  alert_speak: boolean
 } | null>(null)
 const editing = ref('')
 const apiKey = ref('')
@@ -206,9 +477,119 @@ const loadError = ref('')
 const problems = ref<Record<string, string>>({})
 const savedNote = ref('')
 const draft = ref({ name: '', base_url: '', model: '', api_key: '' })
+const newModel = ref('')
+const newLabel = ref('')
+const modelNote = ref('')
+const voices = ref<VoiceList | null>(null)
+const voiceError = ref('')
 
 const models = computed<ModelRow[]>(() => original.value?.models ?? [])
+/** Rows this window hides. Their rows are absent from ``models`` by design, so the list of
+ *  what is *not* shown has to come from the shell rather than be inferred from the menu. */
+const hiddenRows = computed<HiddenRow[]>(() => original.value?.hidden_models ?? [])
+/** The range the panel advertises is the range the save enforces, read from the same
+ * snapshot -- a hardcoded min/max here is a second copy that will drift. */
+/** The same ceiling the save enforces, read from the snapshot rather than repeated here. */
+const greetingMax = computed(() => original.value?.wake_greeting_max ?? 200)
+/** The wake-word bounds and the shipped words, read from the shell -- same rule as above:
+ *  a second copy of a limit here is a second limit that can disagree with the real one. */
+const wakeKeywordMax = computed(() => original.value?.wake_keywords_max ?? 0)
+const wakeKeywordMinChars = computed(() => original.value?.wake_keyword_min_chars ?? 2)
+const wakeKeywordMaxChars = computed(() => original.value?.wake_keyword_max_chars ?? 12)
+const wakeKeywordDefault = computed(() =>
+  (original.value?.wake_keywords_default ?? []).join('、'),
+)
+
+/** The kinds the shell will accept, read from the snapshot -- same rule as the ranges. */
+const loaderChoices = computed<string[]>(
+  () => original.value?.thinking_loader_choices ?? ['dots', 'matrix', 'ring', 'bars'],
+)
+
+const loaderLabels: Record<string, string> = {
+  dots: '三个点（默认）',
+  matrix: '矩阵雨',
+  ring: '圆环',
+  bars: '竖条',
+}
+
+const budgetBounds = computed<[number, number]>(() => {
+  const raw = original.value?.thinking_budget_bounds ?? []
+  return raw.length === 2 ? [raw[0], raw[1]] : [64, 16000]
+})
+const turnBounds = computed<[number, number]>(() => {
+  const raw = original.value?.history_turns_bounds ?? []
+  return raw.length === 2 ? [raw[0], raw[1]] : [0, 50]
+})
+/** The shipped alert lines, read from the engine that owns them -- a second list here
+ *  would be a menu of rules the shell may not even have. */
+const alertRules = computed<AlertRuleSetting[]>(() => original.value?.alerts?.rules ?? [])
+/**
+ * Which voice she speaks with, in the engine's own words.
+ *
+ * Read from ``tts_voices`` rather than kept in the settings snapshot: the picker is a
+ * second reader of the same list, and a copy here would be a second copy that can go
+ * stale the moment a voice is picked in the dialog this row opens.
+ */
+const voiceSummary = computed(() => {
+  if (voiceError.value) return voiceError.value
+  const list = voices.value
+  if (!list) return '读取中…'
+  if (list.error) return list.error
+  const chosen = list.choices.find((row) => row.id === list.current)
+  if (chosen) return `${chosen.label} · ${list.engine} · 共 ${list.choices.length} 个`
+  return list.current || '没选过，用引擎默认的那个'
+})
+const voiceNote = computed(() =>
+  voiceError.value || voices.value?.error
+    ? '读不到就不装能改：这一项要等语音那侧答得出来才动得了。'
+    : '「换音色」开的是对话区那同一个弹窗 —— 能试听，选完下一句就用它讲。',
+)
+const alertSustain = computed(() => original.value?.alerts?.sustain_seconds ?? 0)
+const cooldownBounds = computed<[number, number]>(() => {
+  const raw = original.value?.alerts?.cooldown_bounds ?? []
+  return raw.length === 2 ? [raw[0], raw[1]] : [1, 180]
+})
+/**
+ * The fields the engine owns, read off a snapshot rather than kept where the operator left them.
+ *
+ * One function for both the first load and every save, because after a refused patch the box
+ * has to show what is actually in force -- a rejected wake-word list still sitting in the
+ * input, or a threshold the machine is not watching, is the panel showing one line while the
+ * engine draws another. That is the failure this section exists to avoid.
+ */
+function engineFormValues(snapshot: SettingsSnapshot): {
+  alert_rules: Record<string, { enabled: boolean; threshold: number }>
+  alert_cooldown: number
+  alert_speak: boolean
+  wake_keywords: string
+} {
+  const section = snapshot.alerts
+  const stored = snapshot.wake_keywords_stored ?? []
+  return {
+    alert_rules: Object.fromEntries(
+      (section?.rules ?? []).map((rule) => [
+        rule.code,
+        { enabled: rule.enabled, threshold: rule.threshold },
+      ]),
+    ),
+    alert_cooldown: section?.cooldown_minutes ?? 10,
+    alert_speak: section?.speak_critical ?? true,
+    wake_keywords: (stored.length ? stored : (snapshot.wake_keywords ?? [])).join('、'),
+  }
+}
 const editingRow = computed(() => models.value.find((row) => row.name === editing.value))
+/** The models of the row being edited -- the same list the chat header's picker reads. */
+const editingModels = computed<ModelSpec[]>(() => editingRow.value?.models ?? [])
+/**
+ * Marks a row the assistant changed and nobody has re-saved by hand.
+ *
+ * She is allowed to move a handful of her own settings; this is the condition that
+ * makes that acceptable -- the change is not just reversible, it says who made it.
+ */
+function tag(key: string): string {
+  return original.value?.ai_edited?.includes(key) ? ' · 小夜改的' : ''
+}
+
 const problemList = computed(() =>
   Object.entries(problems.value).map(([key, why]) => `${key}：${why}`),
 )
@@ -218,6 +599,17 @@ const keyPlaceholder = computed(() =>
 const draftKeyEnv = computed(() =>
   draft.value.name ? `${draft.value.name.toUpperCase().replace(/-/g, '_')}_API_KEY` : '—',
 )
+
+async function loadVoices(): Promise<void> {
+  try {
+    const list = await fetchVoices()
+    voices.value = list
+    voiceError.value = ''
+  } catch (err) {
+    voices.value = null
+    voiceError.value = err instanceof Error ? err.message : String(err)
+  }
+}
 
 async function load() {
   loading.value = true
@@ -230,9 +622,16 @@ async function load() {
       base_url: '',
       model: '',
       auto_speak_typed: snapshot.auto_speak_typed,
+      wake_greeting: snapshot.wake_greeting,
+      thinking_loader: snapshot.thinking_loader || 'dots',
       telemetry_interval_ms: snapshot.telemetry_interval_ms,
+      thinking_enabled: snapshot.thinking_enabled,
+      thinking_budget: snapshot.thinking_budget,
+      history_turns: snapshot.history_turns,
+      ...engineFormValues(snapshot),
     }
     loadError.value = snapshot.error ?? ''
+    await loadVoices()
   } catch (err) {
     loadError.value = `读取设置失败：${err instanceof Error ? err.message : String(err)}`
   } finally {
@@ -249,6 +648,98 @@ function editRow(name: string): void {
     form.value.model = ''
   }
   apiKey.value = ''
+  newModel.value = ''
+  newLabel.value = ''
+  modelNote.value = ''
+}
+
+/**
+ * Add one model to the row being edited.
+ *
+ * A separate bridge call rather than part of the form's save: the model list is a
+ * small change with its own verdict, and folding it into one big save would make a
+ * rejected model name look like the whole form failed.
+ */
+/** The model row being measured, or empty. One at a time: it is a network call. */
+const testing = ref('')
+/** Verdicts from this visit only. The durable copy lives on the seat list in 对话. */
+const verdicts = ref<Record<string, string>>({})
+
+/** Ask one model the two questions. Results are written inline, never as a toast. */
+async function testModel(modelId: string): Promise<void> {
+  if (testing.value) return
+  testing.value = modelId
+  const key = `${editing.value}/${modelId}`
+  try {
+    const verdict = await llmTest(editing.value, modelId)
+    verdicts.value = {
+      ...verdicts.value,
+      [key]: verdict.ok
+        ? `能答，${Math.round(verdict.latency_ms)}ms；看图${
+            verdict.vision === null ? '没测出来' : verdict.vision ? '可以' : '不行'
+          }`
+        : `连不上：${verdict.detail || '它一个字也没回'}`,
+    }
+  } catch (err) {
+    verdicts.value = {
+      ...verdicts.value,
+      [key]: `测不了：${err instanceof Error ? err.message : String(err)}`,
+    }
+  } finally {
+    testing.value = ''
+  }
+}
+
+async function addModel(): Promise<void> {
+  const wanted = newModel.value.trim()
+  if (!wanted || saving.value) return
+  saving.value = true
+  modelNote.value = ''
+  try {
+    const result = await addProviderModel(editing.value, wanted, newLabel.value)
+    if (!result.ok) {
+      modelNote.value = result.error
+      return
+    }
+    await reload()
+    newModel.value = ''
+    newLabel.value = ''
+    modelNote.value = `已加上 ${wanted}`
+    emit('saved', original.value as SettingsSnapshot)
+  } catch (err) {
+    modelNote.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    saving.value = false
+  }
+}
+
+async function removeModel(modelId: string): Promise<void> {
+  if (saving.value) return
+  if (!window.confirm(`从「${editing.value}」里删掉模型 ${modelId}？`)) return
+  saving.value = true
+  modelNote.value = ''
+  try {
+    const result = await removeProviderModel(editing.value, modelId)
+    if (!result.ok) {
+      modelNote.value = result.error
+      return
+    }
+    await reload()
+    modelNote.value = `已删掉 ${modelId}`
+    emit('saved', original.value as SettingsSnapshot)
+  } catch (err) {
+    modelNote.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    saving.value = false
+  }
+}
+
+/** Re-read the snapshot without moving the editor off the row it is on. */
+async function reload(): Promise<void> {
+  const snapshot = await fetchSettings()
+  const keep = editing.value
+  original.value = snapshot
+  editing.value = keep || snapshot.provider
 }
 
 async function useRow(name: string): Promise<void> {
@@ -260,6 +751,15 @@ async function removeRow(name: string): Promise<void> {
   await send({ remove_model: name }, `已删除 ${name}`)
 }
 
+/** Hide a row that came from the file. Reversible, and it never touches config.yaml. */
+async function hideRow(name: string): Promise<void> {
+  await send({ hide_provider: name }, `已把 ${name} 藏起来，下面「找回」它`)
+}
+
+async function showRow(name: string): Promise<void> {
+  await send({ show_provider: name }, `${name} 回来了`)
+}
+
 async function send(patch: Record<string, unknown>, note: string): Promise<void> {
   if (saving.value) return
   saving.value = true
@@ -268,6 +768,7 @@ async function send(patch: Record<string, unknown>, note: string): Promise<void>
   try {
     const result = await saveSettings(patch)
     original.value = result
+    if (form.value) Object.assign(form.value, engineFormValues(result))
     problems.value = result.problems ?? {}
     if (!Object.keys(result.problems ?? {}).length) savedNote.value = note
     if (result.models) editing.value = result.provider || editing.value
@@ -284,7 +785,18 @@ async function save() {
   const patch: Record<string, unknown> = {
     target: editing.value,
     auto_speak_typed: form.value.auto_speak_typed,
+    wake_greeting: form.value.wake_greeting.trim(),
+    wake_keywords: form.value.wake_keywords.trim(),
+    thinking_loader: form.value.thinking_loader,
     telemetry_interval_ms: form.value.telemetry_interval_ms,
+    thinking_enabled: form.value.thinking_enabled,
+    thinking_budget: form.value.thinking_budget,
+    history_turns: form.value.history_turns,
+  }
+  if (alertRules.value.length) {
+    patch.alerts_rules = form.value.alert_rules
+    patch.alerts_cooldown_minutes = form.value.alert_cooldown
+    patch.alerts_speak_critical = form.value.alert_speak
   }
   if (form.value.base_url) patch.base_url = form.value.base_url
   if (form.value.model) patch.model = form.value.model
@@ -301,6 +813,7 @@ async function save() {
   try {
     const result = await saveSettings(patch)
     original.value = result
+    if (form.value) Object.assign(form.value, engineFormValues(result))
     problems.value = result.problems ?? {}
     const done = Object.keys(result.applied ?? {}).length
     savedNote.value = done ? `已保存并立即生效：${Object.keys(result.applied ?? {}).join('、')}` : '没有字段被改动'
@@ -320,6 +833,14 @@ watch(
   () => props.open,
   (isOpen) => {
     if (isOpen) void load()
+  },
+)
+/** The picker is a different window reading the same list: re-read it when that one
+ *  closes, or this row keeps naming the voice the operator just replaced. */
+watch(
+  () => props.voiceClosed,
+  () => {
+    if (props.open) void loadVoices()
   },
 )
 </script>
@@ -437,6 +958,74 @@ watch(
   color: var(--hud-red);
 }
 
+/*
+ * The per-provider model list. Its own bordered block rather than another form row:
+ * it is a set of things, not a value, and drawing it as one more input would hide the
+ * fact that the chat dropdown reads exactly these rows.
+ */
+.settings__mlist {
+  margin-top: 10px;
+  border: 1px solid var(--hud-line);
+  border-radius: var(--hud-radius);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.settings__mrow {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.settings__mitem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 4px;
+  border-radius: var(--hud-radius);
+  background: rgba(77, 216, 255, 0.04);
+}
+
+.settings__mname {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--hud-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings__mid {
+  flex: none;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings__mtag {
+  color: var(--hud-cyan);
+}
+
+.settings__madd {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.settings__minput {
+  flex: 1;
+  min-width: 0;
+}
+
 .settings__add {
   margin-top: 10px;
   border-top: 1px dashed var(--hud-line);
@@ -448,6 +1037,16 @@ watch(
   color: var(--hud-cyan);
   font-size: 11px;
   letter-spacing: 0.06em;
+}
+
+.settings__rule {
+  margin-top: 10px;
+  padding-top: 6px;
+  border-top: 1px dashed rgba(120, 190, 220, 0.22);
+}
+
+.settings__small {
+  width: 92px;
 }
 
 .settings__row {

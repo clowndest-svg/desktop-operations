@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 from jarvis.core.exceptions import JarvisError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from jarvis.tools.monitor import SystemMonitor
 
@@ -37,12 +37,21 @@ class SystemReport:
     warnings: tuple[str, ...] = field(default_factory=tuple)
     error: str = ""
     """Non-empty when the whole reading failed; the UI shows this, not zeros."""
+    alerts: tuple[Mapping[str, Any], ...] = ()
+    """What the alert centre has open after this reading.
+
+    Carried on the telemetry report rather than pushed on its own because the HUD
+    already polls this every second and a half: an alert that appears up to that long
+    after the machine got into trouble is the same to a person at the desk, and a second
+    channel to the same box would be a second channel that can fall behind.
+    """
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "metrics": self.metrics,
             "warnings": list(self.warnings),
             "error": self.error,
+            "alerts": [dict(alert) for alert in self.alerts],
         }
 
 
@@ -51,10 +60,13 @@ class SystemService:
 
     name = "system"
 
-    def __init__(self, monitor_factory: Callable[[], SystemMonitor]) -> None:
+    def __init__(
+        self, monitor_factory: Callable[[], SystemMonitor], alerts: Any | None = None
+    ) -> None:
         self._monitor_factory = monitor_factory
         self._monitor: SystemMonitor | None = None
         self._failure = ""
+        self._alerts = alerts
 
     def start(self) -> None:
         """Build the monitor, downgrading to ``error`` reports when it is absent.
@@ -101,4 +113,20 @@ class SystemService:
         warnings = tuple(snapshot.warnings)
         if warnings:
             logger.warning("system snapshot partial: %s", "; ".join(warnings))
-        return SystemReport(metrics=payload, warnings=warnings)
+        return SystemReport(metrics=payload, warnings=warnings, alerts=self._alerts_of(snapshot))
+
+    def _alerts_of(self, snapshot: Any) -> tuple[Mapping[str, Any], ...]:
+        """Ask the alert centre about this reading, if one is wired.
+
+        Guarded, and the guard is the point: the alert box is a consumer of telemetry,
+        not a dependency of it. A rule that throws must cost a missing line in a corner
+        of the HUD, not the whole dashboard -- which is the same reason ``report`` itself
+        never raises.
+        """
+        if self._alerts is None:
+            return ()
+        try:
+            return tuple(alert.to_dict() for alert in self._alerts.evaluate(snapshot))
+        except Exception:  # pragma: no cover - needs a rule that misbehaves
+            logger.exception("告警评估出错；这一轮界面上少一行，读数照常给")
+            return ()

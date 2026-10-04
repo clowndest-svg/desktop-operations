@@ -14,7 +14,7 @@ from typing import Any, cast
 
 import pytest
 
-from jarvis.app.preferences import TTS_VOICE, Preferences
+from jarvis.app.preferences import TTS_SPEED, TTS_VOICE, TTS_VOLUME, Preferences
 from jarvis.app.voice_picker import EDGE_VOICES, PREVIEW_TEXT, VoicePicker
 from jarvis.config.schema import TtsSection
 from jarvis.tts.types import AudioChunk
@@ -27,6 +27,19 @@ def _section(engine: str = "edge_tts", voice: str = "zh-CN-XiaoxiaoNeural") -> T
         voice=voice,
         speed=1.0,
         volume=1.0,
+        device="cpu",
+        model="",
+    )
+
+
+def _section_replacing(*, speed: float = 1.0, volume: float = 1.0) -> TtsSection:
+    """The same section with different style values, the way a config file would say it."""
+    return TtsSection(
+        enabled=True,
+        engine="edge_tts",
+        voice="zh-CN-XiaoxiaoNeural",
+        speed=speed,
+        volume=volume,
         device="cpu",
         model="",
     )
@@ -48,11 +61,19 @@ class _StubEngine:
     def __init__(self, section: TtsSection) -> None:
         self.section = section
         self.calls: list[tuple[str, str | None]] = []
+        self.styles: list[tuple[float | None, float | None]] = []
 
     def synthesize(
-        self, text: str, *, voice: str | None = None, **_kwargs: Any
+        self,
+        text: str,
+        *,
+        voice: str | None = None,
+        speed: float | None = None,
+        volume: float | None = None,
+        **_kwargs: Any,
     ) -> Iterator[AudioChunk]:
         self.calls.append((text, voice))
+        self.styles.append((speed, volume))
         yield AudioChunk(audio=b"\x01\x02", sample_rate=24_000, is_final=False)
         yield AudioChunk(audio=b"\x03\x04", sample_rate=24_000, is_final=True)
 
@@ -174,3 +195,99 @@ class TestPreview:
 
         assert result["ok"] is False
         assert "页面" in str(result["error"])
+
+
+class TestTheStyleSliders:
+    """Rate and volume: the other two halves of "how does she sound".
+
+    The panel grew them because choosing a voice and then hearing it at the wrong
+    speed is half a decision -- and because until now the engine ignored ``tts.speed``
+    and ``tts.volume`` from the config entirely (the pipeline passed only a voice), so
+    there was no working way to change either.
+    """
+
+    def test_they_start_from_the_config_values(self, tmp_path: Any) -> None:
+        picker, _ = _picker(tmp_path)
+        picker._section = lambda: _section_replacing(speed=1.25, volume=0.4)
+
+        assert picker.effective_speed() == pytest.approx(1.25)
+        assert picker.effective_volume() == pytest.approx(0.4)
+
+    def test_setting_one_writes_it_and_reports_the_new_state(self, tmp_path: Any) -> None:
+        picker, prefs = _picker(tmp_path)
+
+        listing = picker.set_style(speed=1.3)
+
+        assert listing["error"] == ""
+        assert listing["speed"] == pytest.approx(1.3)
+        assert prefs.real(TTS_SPEED) == pytest.approx(1.3)
+        assert picker.effective_speed() == pytest.approx(1.3)
+
+    def test_a_stored_value_survives_a_round_trip_as_a_float(self, tmp_path: Any) -> None:
+        """``Preferences.number`` drops floats; the sliders needed a real accessor."""
+        picker, prefs = _picker(tmp_path)
+
+        picker.set_style(volume=0.85)
+
+        assert prefs.real(TTS_VOLUME) == pytest.approx(0.85)
+        assert picker.effective_volume() == pytest.approx(0.85)
+
+    def test_a_value_out_of_range_is_refused_and_nothing_is_written(self, tmp_path: Any) -> None:
+        picker, prefs = _picker(tmp_path)
+
+        listing = picker.set_style(speed=9.0)
+
+        assert "超出范围" in str(listing["error"])
+        assert prefs.real(TTS_SPEED, default=-1.0) == pytest.approx(-1.0)
+        assert picker.effective_speed() == pytest.approx(1.0)
+
+    def test_a_slider_that_sends_a_word_does_not_become_one(self, tmp_path: Any) -> None:
+        picker, prefs = _picker(tmp_path)
+
+        listing = picker.set_style(speed="fast")
+
+        assert "不是数字" in str(listing["error"])
+        assert prefs.real(TTS_SPEED, default=-1.0) == pytest.approx(-1.0)
+
+    def test_the_listing_carries_the_current_style_and_the_ranges(self, tmp_path: Any) -> None:
+        """The panel must not hardcode 0.5–1.5: the range lives where it is enforced."""
+        picker, _ = _picker(tmp_path)
+
+        listing = picker.voices()
+
+        assert listing["speed"] == pytest.approx(1.0)
+        assert listing["speed_min"] == pytest.approx(0.5)
+        assert listing["speed_max"] == pytest.approx(1.5)
+        assert listing["volume_min"] == pytest.approx(0.0)
+        assert listing["volume_max"] == pytest.approx(1.0)
+
+    def test_the_preview_speaks_at_the_slider_values(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Judging a rate without hearing it is what the preview exists to avoid."""
+        import jarvis.tts.engines as engines
+
+        stubs: list[_StubEngine] = []
+
+        def factory(section: TtsSection) -> _StubEngine:
+            stub = _StubEngine(section)
+            stubs.append(stub)
+            return stub
+
+        monkeypatch.setattr(engines, "EdgeTtsEngine", factory)
+        picker, _ = _picker(tmp_path, emit=lambda *a: True)
+        picker.set_style(speed=1.3, volume=0.5)
+
+        assert picker.preview("zh-CN-YunxiNeural")["ok"] is True
+
+        speed_used, volume_used = stubs[0].styles[0]
+        assert speed_used is not None and speed_used == pytest.approx(1.3)
+        assert volume_used is not None and volume_used == pytest.approx(0.5)
+
+    def test_a_clamped_config_value_never_leaves_the_slider_range(self, tmp_path: Any) -> None:
+        """A config file saying 3.0 must not hand the engine a rate it will refuse."""
+        picker, _ = _picker(tmp_path)
+        picker._section = lambda: _section_replacing(speed=3.0, volume=-2.0)
+
+        assert picker.effective_speed() == pytest.approx(1.5)
+        assert picker.effective_volume() == pytest.approx(0.0)

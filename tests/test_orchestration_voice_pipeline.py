@@ -35,6 +35,17 @@ from tests._fakes import (
     ScriptedWakeWordEngine,
 )
 
+
+def _spoken(events: list[PipelineEvent]) -> list[str]:
+    """What was said, in order: the transcript and the answer, whichever kind each is.
+
+    The two used to share one kind and be told apart by arrival order, which is how a
+    single half-finished turn (an error, a barge-in) could file the operator's own
+    sentence under 小夜 forever.
+    """
+    return [event.text for event in events if event.kind in ("user_text", "reply")]
+
+
 # One capture frame at 16 kHz / s16le == 512 samples == 1024 bytes.
 _FRAME = b"\x00" * 1024
 
@@ -137,9 +148,8 @@ def test_happy_path_runs_full_chain() -> None:
     assert "wake" in kinds
     assert "speech_start" in kinds
     assert "speech_end" in kinds
-    # First reply is the transcript, second is the agent's answer.
-    replies = [e.text for e in h.events if e.kind == "reply"]
-    assert replies == ["你好", "好的"]
+    # ``user_text`` is what the microphone heard, ``reply`` is what she answered.
+    assert _spoken(h.events) == ["你好", "好的"]
 
     assert len(h.asr.calls) == 1
     assert len(h.graph.calls) == 1
@@ -170,7 +180,7 @@ def test_wake_command_is_answered_in_one_breath() -> None:
     kinds = [e.kind for e in h.events]
     assert "wake" in kinds
     assert "speech_end" not in kinds
-    assert [e.text for e in h.events if e.kind == "reply"] == ["帮我看下订单", "今天有三单"]
+    assert _spoken(h.events) == ["帮我看下订单", "今天有三单"]
 
 
 def test_bare_wake_word_still_waits_for_a_command() -> None:
@@ -194,7 +204,7 @@ def test_empty_transcript_is_a_noop() -> None:
 
     assert len(h.graph.calls) == 0
     assert len(h.tts.calls) == 0
-    assert not any(e.kind == "reply" for e in h.events)
+    assert _spoken(h.events) == [], "没听到话就不该有一问一答"
 
 
 def test_barge_in_interrupts() -> None:
@@ -250,7 +260,7 @@ def test_speak_now_runs_a_turn_without_the_wake_word() -> None:
     h.pipeline.stop()
 
     assert len(h.asr.calls) == 1
-    assert [e.text for e in h.events if e.kind == "reply"] == ["你好", "好的"]
+    assert _spoken(h.events) == ["你好", "好的"]
     assert not [e for e in h.events if e.kind == "wake"], (
         "a manual turn must not fabricate a wake: the wake event is what the "
         "cooldown and the keyword label are built on"
@@ -338,12 +348,20 @@ class GatedTts:
         self._chunks = chunks
         self.calls: list[str] = []
         self.voices: list[str | None] = []
+        self.styles: list[tuple[float | None, float | None]] = []
 
     def synthesize(
-        self, text: str, *, voice: str | None = None, should_stop: Any = None
+        self,
+        text: str,
+        *,
+        voice: str | None = None,
+        speed: float | None = None,
+        volume: float | None = None,
+        should_stop: Any = None,
     ) -> Iterator[AudioChunk]:
         self.calls.append(text)
         self.voices.append(voice)
+        self.styles.append((speed, volume))
         yield self._chunks[0]
         self._gate.wait(timeout=2.0)
         for chunk in self._chunks[1:]:
@@ -411,6 +429,63 @@ class TestReadAloud:
         finally:
             pipeline.stop()
 
+    def test_the_rate_and_volume_sliders_travel_with_each_utterance(self) -> None:
+        """The sliders in the voice panel are read per sentence, like the voice.
+
+        A value captured at boot would make them restart-only settings -- the exact
+        class of bug where a control appears to save and does nothing.
+        """
+        gate = Event()
+        tts = GatedTts(gate, [AudioChunk(audio=b"a" * 4, sample_rate=16_000, is_final=True)])
+        speed = [1.0]
+        volume = [0.8]
+        pipeline = _bare_pipeline(
+            tts=tts,
+            speed_provider=lambda: speed[0],
+            volume_provider=lambda: volume[0],
+        )
+        pipeline.start()
+        try:
+            assert pipeline.utter("第一段") is True
+            assert _wait_for(lambda: tts.styles == [(1.0, 0.8)])
+            speed[0], volume[0] = 1.3, 0.4
+            gate.set()
+            assert _wait_for(lambda: not pipeline.reading)
+            gate.clear()
+            assert pipeline.utter("第二段") is True
+            assert _wait_for(lambda: tts.styles[-1] == (1.3, 0.4))
+        finally:
+            pipeline.stop()
+
+    def test_no_style_provider_means_the_engine_keeps_its_own_setting(self) -> None:
+        """``None`` is not 1.0: it says "do not override", which is what a console
+        run and every install that never opened the panel get."""
+        gate = Event()
+        tts = GatedTts(gate, [AudioChunk(audio=b"a" * 4, sample_rate=16_000, is_final=True)])
+        pipeline = _bare_pipeline(tts=tts)
+        pipeline.start()
+        try:
+            assert pipeline.utter("第一段") is True
+            gate.set()
+            assert _wait_for(lambda: tts.styles == [(None, None)])
+        finally:
+            pipeline.stop()
+
+    def test_a_style_provider_that_raises_does_not_take_the_sentence_with_it(self) -> None:
+        def broken() -> float | None:
+            raise RuntimeError("prefs unreadable")
+
+        gate = Event()
+        tts = GatedTts(gate, [AudioChunk(audio=b"a" * 4, sample_rate=16_000, is_final=True)])
+        pipeline = _bare_pipeline(tts=tts, speed_provider=broken, volume_provider=broken)
+        pipeline.start()
+        try:
+            assert pipeline.utter("第一段") is True
+            gate.set()
+            assert _wait_for(lambda: tts.styles == [(None, None)])
+        finally:
+            pipeline.stop()
+
     def test_reading_does_not_move_the_state_machine(self) -> None:
         """The wake word has to stay audible while it talks. Flipping to PROCESSING
         would close the microphone on the person who wants to interrupt."""
@@ -429,6 +504,95 @@ class TestReadAloud:
 
         assert h.pipeline.utter("你好") is False
         assert h.tts.calls == []
+
+
+class TestReleasingTheMicrophoneKeepsHerVoice:
+    """「聆听」 关掉的是耳朵。播放器、引擎、模型都该留在原地。
+
+    这一条整组是用户报出来的：关掉聆听之后打字问她，她不念了 —— 因为当时唯一的
+    "关掉" 会把整套装掉，而朗读就住在那一套里。
+    """
+
+    def test_she_can_still_read_a_sentence_after_the_mic_is_released(self) -> None:
+        player = NullAudioPlayer()
+        pipeline = _bare_pipeline(tts=FakeTts(), player=player)
+        pipeline.start()
+        try:
+            pipeline.stop_listening()
+            assert pipeline.running is False, "拾音线程该停了"
+            assert pipeline.utter("今天多云") is True
+            assert _wait_for(lambda: player.total_bytes > 0), "关着耳朵也该念得出"
+        finally:
+            pipeline.stop()
+
+    def test_a_pause_leaves_the_state_machine_idle_and_is_idempotent(self) -> None:
+        """暂停不是关机：``_stop`` 必须放回去，否则下一句会被自己取消。"""
+        pipeline = _bare_pipeline(tts=FakeTts())
+        pipeline.start()
+        try:
+            pipeline.stop_listening()
+            assert pipeline.state is PipelineState.IDLE
+            pipeline.stop_listening()
+            assert pipeline.running is False
+        finally:
+            pipeline.stop()
+
+    def test_a_real_stop_still_silences_her(self) -> None:
+        """``stop`` 关掉播放器，那之后不许再念 —— 这是退出路径，不是聆听开关。"""
+        tts = FakeTts()
+        pipeline = _bare_pipeline(tts=tts)
+        pipeline.start()
+        pipeline.stop()
+
+        assert pipeline.utter("你好") is False
+        assert tts.calls == []
+
+    def test_barge_in_still_needs_the_capture_thread(self) -> None:
+        """「按一下说」是要听人讲话的，暂停之后它该拒绝。"""
+        pipeline = _bare_pipeline(tts=FakeTts())
+        pipeline.start()
+        try:
+            pipeline.stop_listening()
+            assert pipeline.speak_now() is False
+        finally:
+            pipeline.stop()
+
+    def test_reopening_the_microphone_does_not_rebuild_anything(self) -> None:
+        """从暂停里回来 = 再开一次采集，不是重新装一套模型。"""
+        opened: list[int] = []
+        detector = WakeWordDetector(ScriptedWakeWordEngine([]), threshold=0.0, cooldown_seconds=0.0)
+        segmenter = VoiceActivitySegmenter(
+            ScriptedVadEngine([0.0]),
+            sample_rate=16_000,
+            threshold=0.5,
+            min_speech_ms=10,
+            max_silence_ms=10,
+            speech_pad_ms=0,
+            max_speech_ms=0,
+        )
+
+        def source() -> ScriptedAudioSource:
+            opened.append(1)
+            return ScriptedAudioSource([_FRAME])
+
+        pipeline = VoicePipeline(
+            detector=detector,
+            segmenter=segmenter,
+            asr=FakeAsr("你好"),
+            graph=FakeGraph("好的"),
+            tts=FakeTts(),
+            source_factory=source,
+            player=NullAudioPlayer(),
+            barge_in=True,
+        )
+        try:
+            pipeline.start()
+            pipeline.stop_listening()
+            pipeline.start()
+            assert pipeline.running is True
+            assert len(opened) == 2, "开→暂停→开：该是两次开麦，不是一次重建"
+        finally:
+            pipeline.stop()
 
     def test_it_will_not_talk_over_a_turn_in_flight(self) -> None:
         """Two voices answering the same moment is how an operator ends up unable to
@@ -493,7 +657,12 @@ class TestReadAloud:
 
 
 def _bare_pipeline(
-    *, tts: Any, player: Any | None = None, voice_provider: Any | None = None
+    *,
+    tts: Any,
+    player: Any | None = None,
+    voice_provider: Any | None = None,
+    speed_provider: Any | None = None,
+    volume_provider: Any | None = None,
 ) -> VoicePipeline:
     """A pipeline with no frames queued: idle, running, and nothing else to do."""
     detector = WakeWordDetector(ScriptedWakeWordEngine([]), threshold=0.0, cooldown_seconds=0.0)
@@ -516,6 +685,8 @@ def _bare_pipeline(
         player=player if player is not None else NullAudioPlayer(),
         barge_in=True,
         voice_provider=voice_provider,
+        speed_provider=speed_provider,
+        volume_provider=volume_provider,
     )
 
 

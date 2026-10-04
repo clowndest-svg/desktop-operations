@@ -52,6 +52,15 @@ export interface Pose {
   gaze: number
   /** Jaw drop in world units. */
   jaw: number
+  /**
+   * 0 = 站着, 1 = 坐下了（大腿抬平、小腿垂下去）.
+   *
+   * A channel on the pose rather than a mood, because not every figure here has legs:
+   * the built bust stops at the collar and ignores it outright, while the dropped-in
+   * VRM has a full humanoid rig and can spend it. Whether a mood means "sit" is the
+   * driver's business; whether it is *possible* belongs to the body.
+   */
+  sit: number
 }
 
 /*
@@ -549,5 +558,6 @@ export function neutralPose(): Pose {
     brows: 0,
     gaze: 0,
     jaw: 0,
+    sit: 0,
   }
 }

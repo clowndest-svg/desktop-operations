@@ -29,7 +29,7 @@ from jarvis.core.exceptions import AsrError
 from jarvis.wakeword.types import WakeHit
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
 logger = logging.getLogger("jarvis.wakeword.asr_engine")
 
@@ -118,31 +118,40 @@ class AsrWakeWordEngine:
     def __init__(
         self,
         *,
-        keywords: Sequence[str],
+        keywords: Sequence[str] | Callable[[], Sequence[str]],
         transcriber: WakeTranscriber,
         segmenter: WakeSegmenter,
     ) -> None:
-        pairs: list[tuple[str, str]] = []
-        for item in keywords:
-            normalized = normalize_for_match(item)
-            if normalized:
-                pairs.append((normalized, item))
-        if not pairs:
-            raise AsrError(
-                "the 'asr' wake-word engine needs at least one non-empty keyword",
-                details={"keywords": list(keywords)},
-            )
-        # Match on the folded form, report the configured one — a wake event
-        # naming ``heyjarvis`` instead of ``hey_jarvis`` is just confusing.
-        self._keywords = pairs
+        """Create the matcher.
+
+        Args:
+            keywords: Either a fixed list, or a callable read once per mic frame. The
+                callable is how the settings panel's 「唤醒词」 box takes effect on the next
+                thing the operator says: rebuilding this engine would reload the ASR model
+                and drop whatever was being spoken at that moment.
+            transcriber: The already-loaded recognition service.
+            segmenter: A endpointer this engine owns; it is reset on a wake.
+        """
+        self._keywords_source = keywords
         self._transcriber = transcriber
         self._segmenter = segmenter
         self._window_bytes = int(_WINDOW_SECONDS * _SAMPLE_RATE * _BYTES_PER_SAMPLE)
         self._audio = bytearray()
         self._audio_start_sample = 0
+        self._seen: tuple[str, ...] | None = None
+        self._keywords: tuple[tuple[str, str], ...] = ()
+        self._refresh()
+        if not self._keywords:
+            raise AsrError(
+                "the 'asr' wake-word engine needs at least one non-empty keyword",
+                details={"keywords": list(self._seen or ())},
+            )
+        # Match on the folded form, report the configured one — a wake event
+        # naming ``heyjarvis`` instead of ``hey_jarvis`` is just confusing.
 
     def process(self, frame: bytes) -> tuple[WakeHit, ...]:
         """Score one mic frame; returns a hit when an utterance names a keyword."""
+        self._refresh()
         self._audio.extend(frame)
         self._trim()
 
@@ -166,6 +175,39 @@ class AsrWakeWordEngine:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _refresh(self) -> None:
+        """Fold the current keyword list unless it changed since the last look.
+
+        Runs on the microphone thread, so nothing here is allowed to raise into it: a
+        settings read that fails leaves the previous list in force and says so in the log.
+        An empty read is the same case -- answering to nothing would look like a dead
+        microphone, which is a far worse failure than a stale word.
+        """
+        previous = [configured for _, configured in self._keywords]
+        source = self._keywords_source
+        try:
+            raw = source() if callable(source) else source
+            seen = tuple(str(item) for item in raw)
+        except Exception:
+            logger.exception("唤醒词读不出来；继续沿用原来那几个")
+            return
+        if seen == self._seen:
+            return
+        pairs: list[tuple[str, str]] = []
+        for item in seen:
+            normalized = normalize_for_match(item)
+            if normalized:
+                pairs.append((normalized, item))
+        if not pairs:
+            logger.warning("唤醒词读出来一个都不成；继续沿用原来那几个：%s", "、".join(previous))
+            return
+        self._seen = seen
+        self._keywords = tuple(pairs)
+
+    def current(self) -> tuple[str, ...]:
+        """The phrases actually being watched right now, in the operator's spelling."""
+        return tuple(configured for _, configured in self._keywords)
 
     def _trim(self) -> None:
         """Keep only the last window of audio, tracking where it starts."""

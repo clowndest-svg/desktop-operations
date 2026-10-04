@@ -48,6 +48,17 @@ MAX_WINDOW_DAYS: int = 31
 
 DEFAULT_WINDOW_DAYS: int = 7
 
+ALL_TIME: int = 0
+"""``days=0``: the whole ledger, from the first recorded call to now.
+
+Not a fourth window size but the absence of one, which is why :data:`MAX_WINDOW_DAYS`
+does not apply to it. The ceiling exists because an unbounded **per-day series** turns a
+month of history into a full-table group-by nobody asked for; a single total over the
+same table is a different shape of query -- one pass, one row back, and the row count is
+one per answered call, so a year of heavy use is still thousands of rows. What is *not*
+answered here is a 365-bar chart: see :meth:`UsageService.daily`.
+"""
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         namespace=NAMESPACE,
@@ -68,6 +79,23 @@ MIGRATIONS: tuple[Migration, ...] = (
             """
             CREATE INDEX IF NOT EXISTS idx_llm_usage_at
                 ON llm_usage (at DESC)
+            """,
+        ),
+    ),
+    Migration(
+        namespace=NAMESPACE,
+        version=2,
+        statements=(
+            # Which turn or round-table task spent these tokens. A window grouping can
+            # answer "how much this month"; it cannot answer "what did *that* job cost",
+            # which is the question a task answered by three models over four rounds
+            # starts asking the first time somebody looks at the bill.
+            """
+            ALTER TABLE llm_usage ADD COLUMN task_id TEXT NOT NULL DEFAULT ''
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_llm_usage_task
+                ON llm_usage (task_id)
             """,
         ),
     ),
@@ -106,6 +134,15 @@ class UsageSummary:
         return 100.0 * min(self.cached_tokens, self.prompt_tokens) / self.prompt_tokens
 
     @property
+    def all_time(self) -> bool:
+        """Whether this is the whole ledger rather than a window into it.
+
+        Carried into the payload because ``days = 0`` cannot be read as "zero days" by
+        anything that renders a label, and the page should not have to know the sentinel.
+        """
+        return self.days == ALL_TIME
+
+    @property
     def cache_data_reported(self) -> bool:
         return self.calls_with_cache_data > 0
 
@@ -121,6 +158,7 @@ class UsageSummary:
     def to_dict(self) -> dict[str, object]:
         return {
             "days": self.days,
+            "all_time": self.all_time,
             "since": self.since,
             "until": self.until,
             "calls": self.calls,
@@ -141,8 +179,8 @@ class _UsageRepository(Repository):
     def insert_event(self, at: str, event: UsageEvent) -> int:
         return self.insert(
             "INSERT INTO llm_usage (at, provider, model, prompt_tokens,"
-            " completion_tokens, cached_tokens, latency_ms)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            " completion_tokens, cached_tokens, latency_ms, task_id)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 at,
                 event.provider,
@@ -151,10 +189,47 @@ class _UsageRepository(Repository):
                 event.completion_tokens,
                 event.cached_tokens,
                 event.latency_ms,
+                event.task_id,
             ),
         )
 
-    def aggregate(self, since: str, until: str) -> Row:
+    def by_task(self, task_id: str) -> list[Row]:
+        return self.query(
+            "SELECT provider, model, COUNT(*) AS calls,"
+            " COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,"
+            " COALESCE(SUM(completion_tokens), 0) AS completion_tokens,"
+            " COALESCE(SUM(cached_tokens), 0) AS cached_tokens,"
+            " COUNT(cached_tokens) AS calls_with_cache_data,"
+            " COALESCE(SUM(latency_ms), 0.0) AS latency_ms"
+            " FROM llm_usage WHERE task_id = ?"
+            " GROUP BY provider, model ORDER BY prompt_tokens + completion_tokens DESC",
+            (task_id,),
+        )
+
+    def _window(self, since: str | None, until: str) -> tuple[str, tuple[str, ...]]:
+        """The ``WHERE`` clause and its parameters, or neither when ``since`` is None.
+
+        One SELECT list for both the windowed and the all-time reading, on purpose: two
+        copies is how a total and its own breakdown stop adding up to each other.
+        """
+        if since is None:
+            return "", ()
+        return " WHERE at >= ? AND at <= ?", (since, until)
+
+    def span(self) -> Row:
+        """The first and last recorded moment, for labelling an all-time window.
+
+        Read from the ledger rather than assumed, because "从始至终" that starts at the
+        install date would be a range nobody can check: a ledger carried over from an older
+        database starts earlier than the app did.
+        """
+        row = self.query_one(
+            "SELECT MIN(at) AS first_at, MAX(at) AS last_at, COUNT(*) AS rows FROM llm_usage"
+        )
+        return row if row is not None else {}
+
+    def aggregate(self, since: str | None, until: str) -> Row:
+        where, params = self._window(since, until)
         row = self.query_one(
             "SELECT COUNT(*) AS calls,"
             " COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,"
@@ -162,10 +237,24 @@ class _UsageRepository(Repository):
             " COALESCE(SUM(cached_tokens), 0) AS cached_tokens,"
             " COUNT(cached_tokens) AS calls_with_cache_data,"
             " COALESCE(AVG(latency_ms), 0.0) AS avg_latency_ms"
-            " FROM llm_usage WHERE at >= ? AND at <= ?",
-            (since, until),
+            f" FROM llm_usage{where}",
+            params,
         )
         return row if row is not None else {}
+
+    def per_provider(self, since: str | None, until: str) -> list[Row]:
+        where, params = self._window(since, until)
+        return self.query(
+            "SELECT provider, model, COUNT(*) AS calls,"
+            " COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,"
+            " COALESCE(SUM(completion_tokens), 0) AS completion_tokens,"
+            " COALESCE(SUM(cached_tokens), 0) AS cached_tokens,"
+            " COUNT(cached_tokens) AS calls_with_cache_data,"
+            " COALESCE(AVG(latency_ms), 0.0) AS avg_latency_ms"
+            f" FROM llm_usage{where}"
+            " GROUP BY provider, model ORDER BY prompt_tokens + completion_tokens DESC",
+            params,
+        )
 
     def per_day(self, since: str, until: str) -> list[Row]:
         return self.query(
@@ -225,13 +314,13 @@ class UsageService:
     # -- read path ---------------------------------------------------------
 
     def summary(self, days: int = DEFAULT_WINDOW_DAYS) -> UsageSummary:
-        """Totals for the last ``days`` days, clamped to :data:`MAX_WINDOW_DAYS`."""
+        """Totals for the last ``days`` days, or the whole ledger when ``days`` is 0."""
         window = _clamped_window(days)
-        since, until = _window_bounds(window)
+        since, until = self._bounds(window)
         row: Row = self._repo.aggregate(since, until)
         return UsageSummary(
             days=window,
-            since=since,
+            since=since or until,
             until=until,
             calls=as_int(row.get("calls")),
             prompt_tokens=as_int(row.get("prompt_tokens")),
@@ -241,14 +330,115 @@ class UsageService:
             avg_latency_ms=as_float(row.get("avg_latency_ms")),
         )
 
+    def cost_of(self, task_id: str) -> list[dict[str, object]]:
+        """What one turn or round-table task cost, per model that took part.
+
+        Grouped rather than totalled because the point of asking three models is that
+        they are not the same price: a single number would hide which of them the task
+        actually spent itself on, which is the first thing anybody asks afterwards.
+
+        A task that never asked anything returns an empty list rather than a row of
+        zeros -- the same rule the window totals follow, so "no reading" and "no cost"
+        stay two different statements.
+        """
+        rows: list[dict[str, object]] = []
+        for raw in self._repo.by_task(str(task_id)):
+            prompt = as_int(raw.get("prompt_tokens"))
+            completion = as_int(raw.get("completion_tokens"))
+            rows.append(
+                {
+                    "provider": as_str(raw.get("provider")),
+                    "model": as_str(raw.get("model")),
+                    "calls": as_int(raw.get("calls")),
+                    "prompt_tokens": prompt,
+                    "completion_tokens": completion,
+                    "total_tokens": prompt + completion,
+                    "cached_tokens": as_int(raw.get("cached_tokens")),
+                    "latency_ms": round(as_float(raw.get("latency_ms")), 1),
+                }
+            )
+        return rows
+
+    def by_provider(self, days: int = DEFAULT_WINDOW_DAYS) -> list[dict[str, object]]:
+        """Per provider/model row for the window, biggest spender first.
+
+        Shares :meth:`_bounds` with :meth:`summary`, so the rows add up to the total the
+        same call reports. Two windows that drift by a second is how a breakdown stops
+        being a breakdown -- and it matters most for the all-time reading, where the chart
+        is a pie and a slice that does not belong to the same total is visibly wrong.
+        """
+        window = _clamped_window(days)
+        since, until = self._bounds(window)
+        rows: list[dict[str, object]] = []
+        for raw in self._repo.per_provider(since, until):
+            prompt = as_int(raw.get("prompt_tokens"))
+            completion = as_int(raw.get("completion_tokens"))
+            cached = as_int(raw.get("cached_tokens"))
+            cache_reported = as_int(raw.get("calls_with_cache_data")) > 0
+            rows.append(
+                {
+                    "provider": as_str(raw.get("provider")),
+                    "model": as_str(raw.get("model")),
+                    "calls": as_int(raw.get("calls")),
+                    "prompt_tokens": prompt,
+                    "completion_tokens": completion,
+                    "total_tokens": prompt + completion,
+                    "cached_tokens": cached,
+                    "cache_hit_percent": (
+                        100.0 * min(cached, prompt) / prompt
+                        if cache_reported and prompt > 0
+                        else None
+                    ),
+                    "avg_latency_ms": round(as_float(raw.get("avg_latency_ms")), 1),
+                }
+            )
+        return rows
+
+    def _bounds(self, window: int) -> tuple[str | None, str]:
+        """``(since, until)`` for a clamped window; ``since`` is None for the whole ledger.
+
+        An empty ledger gets ``since = None`` too, which reads as "no rows" from the same
+        code path a full one does -- and it is why the all-time label has to come from the
+        data rather than from a date the app guessed.
+        """
+        now = format_timestamp(utc_now())
+        if window != ALL_TIME:
+            since, until = _window_bounds(window)
+            return since, until
+        first_at = as_str(self._repo.span().get("first_at"))
+        return (first_at or None), now
+
+    def ledger_span(self) -> dict[str, object]:
+        """When this ledger starts, how long it covers, and how many rows are in it.
+
+        The all-time panel needs the first recorded call to label its range, and a total
+        with no stated beginning is exactly the kind of number that gets argued with.
+        """
+        row = self._repo.span()
+        first_at = as_str(row.get("first_at"))
+        last_at = as_str(row.get("last_at"))
+        return {
+            "first_at": first_at,
+            "last_at": last_at,
+            "rows": as_int(row.get("rows")),
+            "days": _days_between(first_at, last_at),
+        }
+
     def daily(self, days: int = DEFAULT_WINDOW_DAYS) -> list[dict[str, object]]:
         """Per-day rows for the chart, in chronological order.
 
         Days with no calls are simply absent. The chart must not draw them as
         zero, because "nothing used that day" and "nothing recorded" look the
         same in a line and mean different things to the person reading it.
+
+        The all-time window answers with an empty list rather than a 400-bar chart: one bar
+        per day past a few months stops being a picture, and the scan it costs is the exact
+        shape :data:`MAX_WINDOW_DAYS` was put there to prevent. Totals and the per-model
+        breakdown still cover everything -- it is only the daily series that stays bounded.
         """
         window = _clamped_window(days)
+        if window == ALL_TIME:
+            return []
         since, until = _window_bounds(window)
         rows = []
         for raw in self._repo.per_day(since, until):
@@ -273,12 +463,30 @@ class UsageService:
 
 
 def _clamped_window(days: int) -> int:
-    """Sanitise a requested window: at least one day, never more than a month."""
+    """Sanitise a requested window: ``0`` means the whole ledger, otherwise 1..a month.
+
+    ``0`` is honoured rather than clamped up to 1 because it is a different question, not a
+    too-small answer to the old one. Anything unparseable falls back to the default window,
+    and a negative number is treated as a mistake in that direction rather than as 0 --
+    reading the whole table should take someone asking for it out loud.
+    """
     try:
         value = int(days)
     except (TypeError, ValueError):
         return DEFAULT_WINDOW_DAYS
+    if value == ALL_TIME:
+        return ALL_TIME
     return max(1, min(value, MAX_WINDOW_DAYS))
+
+
+def _days_between(since: str, until: str) -> int:
+    """How many days the ledger spans, from its own two ends. 0 when either is missing."""
+    try:
+        start = datetime.fromisoformat(since.replace("Z", "+00:00"))
+        end = datetime.fromisoformat(until.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return 0
+    return max(0, (end - start).days + 1) if end >= start else 0
 
 
 def _window_bounds(days: int) -> tuple[str, str]:

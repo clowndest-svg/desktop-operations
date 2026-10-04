@@ -140,7 +140,11 @@ class VoicePipeline:
         on_event: Callable[[PipelineEvent], None] | None = None,
         max_history_turns: int = 20,
         voice_provider: Callable[[], str | None] | None = None,
+        speed_provider: Callable[[], float | None] | None = None,
+        volume_provider: Callable[[], float | None] | None = None,
         transcript_sink: Callable[[str, str], None] | None = None,
+        greeting_provider: Callable[[], str] | None = None,
+        greeting_gate: Callable[[Callable[[], bool]], bool] | None = None,
     ) -> None:
         self._detector = detector
         self._segmenter = segmenter
@@ -154,11 +158,24 @@ class VoicePipeline:
         self._on_event = on_event
         self._max_history = max_history_turns
         self._voice_provider = voice_provider
+        self._speed_provider = speed_provider
+        self._volume_provider = volume_provider
         self._transcript_sink = transcript_sink
+        self._greeting_provider = greeting_provider
+        self._greeting_gate = greeting_gate
 
         self._source: AudioSource | None = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
+        self._opened = False
+        """Whether the engines have ever been brought up. ``utter`` refuses before that."""
+        self._closed = False
+        """Set once by :meth:`stop`: after that the player is gone, so nothing may speak.
+
+        Kept apart from ``_stop`` because ``_stop`` means "wind the loop down" and is
+        raised and cleared by pausing the microphone, while this one means "this pipeline
+        is finished" -- the difference between 聆听 off and the app shutting down.
+        """
         self._interrupt = threading.Event()
         self._state = PipelineState.IDLE
         self._state_lock = threading.Lock()
@@ -169,6 +186,15 @@ class VoicePipeline:
 
         self._cancel_reading = threading.Event()
         """Raised by :meth:`cancel_utterance`; re-armed at the start of each one."""
+
+        self._greeting = threading.Event()
+        """Set while the wake greeting owns the speaker.
+
+        The capture thread keeps reading the whole time it is set and throws the frames
+        away. Blocking it instead -- the obvious way to "not listen while she speaks" --
+        lets the sounddevice buffer fill with her own sentence, which then arrives as the
+        operator's next command the moment the microphone opens.
+        """
 
     def _chosen_voice(self) -> str | None:
         """The voice to speak with, read at utterance time rather than at boot.
@@ -184,6 +210,30 @@ class VoicePipeline:
             return self._voice_provider()
         except Exception:  # a prefs read must not kill a sentence
             logger.exception("voice provider failed; using the configured voice")
+            return None
+
+    def _chosen_speed(self) -> float | None:
+        """Rate for the next utterance; ``None`` means "the engine's own setting".
+
+        Same contract as the voice: read at utterance time, so dragging the slider
+        changes the *next* sentence. It is a separate provider rather than part of a
+        single "style" record because the two are already read independently by the
+        engine, and because ``None`` has to keep meaning "nothing to override".
+        """
+        return self._from_provider(self._speed_provider, "speed")
+
+    def _chosen_volume(self) -> float | None:
+        """Volume for the next utterance; same rules as :meth:`_chosen_speed`."""
+        return self._from_provider(self._volume_provider, "volume")
+
+    @staticmethod
+    def _from_provider(provider: Callable[[], float | None] | None, what: str) -> float | None:
+        if provider is None:
+            return None
+        try:
+            return provider()
+        except Exception:  # a prefs read must not kill a sentence
+            logger.exception("%s provider failed; using the engine's own setting", what)
             return None
 
     @property
@@ -217,6 +267,7 @@ class VoicePipeline:
         source = self._source_factory()
         source.open()
         self._source = source
+        self._opened = True
         self._stop.clear()
         self._interrupt.clear()
         self._set_state(PipelineState.IDLE)
@@ -230,6 +281,7 @@ class VoicePipeline:
 
     def stop(self) -> None:
         """Stop the loop and release the microphone / engines (idempotent)."""
+        self._closed = True
         self._stop.set()
         thread, self._thread = self._thread, None
         if thread is not None:
@@ -240,6 +292,34 @@ class VoicePipeline:
         self._close(self._detector.engine)
         self._close(self._segmenter.engine)
         self._close(self._player)
+
+    def stop_listening(self) -> None:
+        """Let go of the microphone. The engines, the speaker and the models stay up.
+
+        Why this exists as its own verb: the operator's 「聆听」 switch is about hearing,
+        and the only thing that answered it was :meth:`stop` -- which also closes the
+        player. That is how "mute her ears" took her voice away with it, since the
+        read-aloud lives in this same object. Releasing the capture thread and the source
+        is the whole of what the switch means.
+
+        ``_stop`` is cleared on the way out rather than left raised, because every listen
+        and speak predicate reads it as "shutting down". A pause is not that.
+        """
+        if self._closed:
+            return
+        self._stop.set()
+        thread, self._thread = self._thread, None
+        if thread is not None:
+            thread.join(timeout=5.0)
+        source, self._source = self._source, None
+        if source is not None:
+            source.close()
+        self._stop.clear()
+        self._interrupt.clear()
+        self._greeting.clear()
+        self._buffer.clear()
+        self._set_state(PipelineState.IDLE)
+        logger.info("microphone released; the speaker stays open")
 
     # ------------------------------------------------------------------
     # Manual turn
@@ -287,8 +367,14 @@ class VoicePipeline:
         cover it, so cancelling belongs to the caller: :meth:`cancel_utterance`
         stops the samples still to come, and whoever fed the page the ones already
         delivered has to retract those.
+
+        Note what is *not* checked here: whether the microphone is currently open. A
+        sentence she is asked to read needs the synthesiser and the player, and
+        :meth:`stop_listening` leaves both alive -- which is the whole reason 聆听 can be
+        off while a typed answer still gets a voice. What *is* checked is that the
+        engines were brought up at some point and have not been torn down since.
         """
-        if not self.running or self._stop.is_set():
+        if not self._opened or self._closed or self._stop.is_set():
             return False
         if self._get_state() is not PipelineState.IDLE or self._reading.is_set():
             return False
@@ -314,6 +400,8 @@ class VoicePipeline:
             for chunk in self._tts.synthesize(
                 text,
                 voice=self._chosen_voice(),
+                speed=self._chosen_speed(),
+                volume=self._chosen_volume(),
                 should_stop=lambda: cancelled.is_set() or self._stop.is_set(),
             ):
                 if cancelled.is_set() or self._stop.is_set():
@@ -360,6 +448,12 @@ class VoicePipeline:
             for event in self._detector.feed(chunk):
                 self._on_wake(event)
         elif state == PipelineState.LISTENING:
+            if self._greeting.is_set():
+                # Read and discard. The capture thread must never stop for the greeting:
+                # whatever it does not read sits in the source's own buffer, and the first
+                # thing the microphone would hear on resuming is the tail of her own
+                # sentence -- transcribed as the operator's command.
+                return
             self._buffer.extend(chunk)
             for vevent in self._segmenter.feed(chunk):
                 if vevent.type == VadEventType.SPEECH_END:
@@ -386,12 +480,80 @@ class VoicePipeline:
         if event.command:
             # The wake engine already transcribed this utterance, so the command
             # is in hand. Requiring a second sentence to say the same words the
-            # user just spoke would be a bug, not a design.
+            # user just spoke would be a bug, not a design -- and neither gets a
+            # greeting in front of it, because "你好小夜 现在几点" asked a question
+            # and a sentence about being greeted delays the answer they came for.
             logger.info("WAKE: %s — command %r", event.keyword, event.command)
             self._start_text_turn(event.command)
             return
         self._set_state(PipelineState.LISTENING)
-        logger.info("WAKE: %s — listening for command", event.keyword)
+        if self._start_greeting():
+            logger.info("WAKE: %s — greeting, microphone held", event.keyword)
+        else:
+            logger.info("WAKE: %s — listening for command", event.keyword)
+
+    def _start_greeting(self) -> bool:
+        """Begin the wake greeting if the operator has one. Returns whether she speaks.
+
+        The words are read here, on the capture thread, because that is the last moment
+        they are guaranteed to be the ones the panel shows right now. Everything after
+        that -- waiting for the figure, synthesising, playing -- happens on its own
+        thread, since the microphone must keep draining while she talks.
+        """
+        if self._greeting_provider is None or self._stop.is_set():
+            return False
+        try:
+            text = (self._greeting_provider() or "").strip()
+        except Exception:
+            logger.exception("could not read the wake greeting; skipping it this time")
+            return False
+        if not text:
+            return False
+        self._greeting.set()
+        threading.Thread(
+            target=self._speak_greeting,
+            args=(text,),
+            name="jarvis-greet",
+            daemon=True,
+        ).start()
+        return True
+
+    def _speak_greeting(self, text: str) -> None:
+        """Wait for the figure, say the sentence, then hand the microphone back.
+
+        Two things this guarantees in order. First the gate: the operator asked to be
+        spoken to only once the character is fully on screen, and the page is the one
+        that knows when that is -- so the wait is bounded by the gate's own deadline
+        rather than by a duration copied into Python. Then the release: the segmenter and
+        the buffer are reset on the way out, so what she hears next is the live edge, not
+        the tail of her own greeting.
+
+        Bounded by the gate itself. A page that never reports (stale bundle, an exception
+        in the animation) costs one delayed greeting plus a log line, not a feature that
+        quietly stopped existing.
+        """
+        try:
+            if self._greeting_gate is not None:
+                self._greeting_gate(self._stop.is_set)
+            if not self._stop.is_set():
+                self._reading.set()
+                self._cancel_reading.clear()
+                self._read_aloud(text)
+        finally:
+            self._greeting.clear()
+            self._reopen_after_greeting()
+
+    def _reopen_after_greeting(self) -> None:
+        """Start the listening window at the live edge.
+
+        Same pairing as every other entry into a listening window: the segmenter's sample
+        indices and the buffer have to restart together, and whatever was captured while
+        she was speaking is dropped on the floor rather than transcribed.
+        """
+        if self._stop.is_set():
+            return
+        self._segmenter.reset()
+        self._buffer.clear()
 
     def _start_text_turn(self, text: str) -> None:
         """Answer an already-known command without another capture round."""
@@ -459,13 +621,19 @@ class VoicePipeline:
 
     def _respond(self, text: str) -> None:
         """Answer one user utterance: agent turn, history, then spoken output."""
-        self._emit(PipelineEvent(kind="reply", text=text))
+        # ``user_text``, not a second ``reply``: who said a line is a fact this event
+        # carries, not something the listener may infer from what it saw last.
+        self._emit(PipelineEvent(kind="user_text", text=text))
         reply = self._graph.run(text, self._history)
         self._append_history(ChatMessage.user(text))
         self._append_history(ChatMessage.assistant(reply))
         self._emit(PipelineEvent(kind="reply", text=reply))
         for chunk in self._tts.synthesize(
-            reply, voice=self._chosen_voice(), should_stop=self._should_stop
+            reply,
+            voice=self._chosen_voice(),
+            speed=self._chosen_speed(),
+            volume=self._chosen_volume(),
+            should_stop=self._should_stop,
         ):
             if self._stop.is_set():
                 break

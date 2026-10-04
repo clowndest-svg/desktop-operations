@@ -27,6 +27,7 @@ class FakeLoop:
     def __init__(self, *, alive: bool = True, accepts_talk: bool = True) -> None:
         self.starts = 0
         self.stops = 0
+        self.pauses = 0
         self.talks = 0
         self.read_aloud: list[str] = []
         self.reading_stops = 0
@@ -36,13 +37,17 @@ class FakeLoop:
 
     @property
     def listening(self) -> bool:
-        return self._alive and self.starts > self.stops
+        return self._alive and self.starts > self.stops + self.pauses
 
     def start(self) -> None:
         self.starts += 1
 
     def stop(self) -> None:
         self.stops += 1
+
+    def stop_listening(self) -> None:
+        """Recorded apart from ``stop``: the two are different requests, and that is the bug."""
+        self.pauses += 1
 
     def speak_now(self) -> bool:
         self.talks += 1
@@ -206,7 +211,10 @@ class TestEnable:
 
 
 class TestMute:
-    def test_mute_releases_the_microphone(self, events: list[PipelineEvent]) -> None:
+    def test_mute_releases_the_microphone_and_nothing_else(
+        self, events: list[PipelineEvent]
+    ) -> None:
+        """「聆听」 管的是耳朵。把整个栈拆了，等于顺手把她的嗓子也关了。"""
         loop = FakeLoop()
         service = _service(lambda _on_event: loop, events)
         service.enable()
@@ -215,10 +223,27 @@ class TestMute:
         status = service.mute()
 
         assert status.phase is VoicePhase.MUTED
-        assert loop.stops == 1
+        assert loop.pauses == 1, "该只放掉麦克风"
+        assert loop.stops == 0, "stop() 会连播放器一起关掉，朗读就没了"
         assert service.status.phase is VoicePhase.MUTED
 
-    def test_enabling_after_a_mute_builds_again(self, events: list[PipelineEvent]) -> None:
+    def test_she_can_still_read_aloud_with_the_microphone_shut(
+        self, events: list[PipelineEvent]
+    ) -> None:
+        """用户报的那一条：关了聆听，打字的回答也该念出来。"""
+        loop = FakeLoop()
+        service = _service(lambda _on_event: loop, events)
+        service.enable()
+        assert _wait_until(lambda: service.status.phase is VoicePhase.RUNNING)
+        service.mute()
+
+        assert service.speak_text("今天多云") is True
+        assert loop.read_aloud == ["今天多云"]
+
+    def test_enabling_after_a_mute_reopens_without_a_second_model_load(
+        self, events: list[PipelineEvent]
+    ) -> None:
+        """栈还在手上就别再装一遍：一次聆听开关不该值 30 秒。"""
         loops: list[FakeLoop] = []
 
         def builder(_on_event: object) -> FakeLoop:
@@ -234,8 +259,44 @@ class TestMute:
         service.enable()
 
         assert _wait_until(lambda: service.status.phase is VoicePhase.RUNNING)
-        assert len(loops) == 2
-        assert loops[0].stops == 1
+        assert len(loops) == 1, "重新开聆听不该再装一套模型"
+        assert loops[0].starts == 2 and loops[0].stops == 0
+        assert loops[0].listening is True
+
+    def test_muting_while_a_load_is_in_flight_retires_that_load(
+        self, events: list[PipelineEvent]
+    ) -> None:
+        """刚按下"启用"就按"关掉"：那套装完的模型不许自己把麦克风打开。"""
+        gate = threading.Event()
+        built: list[SlowLoop] = []
+
+        def builder(_on_event: object) -> SlowLoop:
+            loop = SlowLoop(gate)
+            built.append(loop)
+            return loop
+
+        service = _service(builder, events)
+        assert service.enable().phase is VoicePhase.LOADING
+        service.mute()
+        gate.set()
+
+        assert _wait_until(lambda: service.status.phase is VoicePhase.MUTED)
+        time.sleep(0.2)
+        assert service.status.phase is VoicePhase.MUTED, "一套没人要的加载接管了状态"
+        assert built and built[0].stops == 1
+
+    def test_barge_in_still_needs_the_microphone(self, events: list[PipelineEvent]) -> None:
+        """「按一下说」是真的要听人说话，那一个开关关不掉它是错的。"""
+        loop = FakeLoop()
+        service = _service(lambda _on_event: loop, events)
+        service.enable()
+        assert _wait_until(lambda: service.status.phase is VoicePhase.RUNNING)
+        service.mute()
+
+        status = service.talk()
+
+        assert status.phase is VoicePhase.MUTED
+        assert loop.talks == 0
 
     def test_muting_without_a_stack_is_harmless(self, events: list[PipelineEvent]) -> None:
         service = _service(lambda _on_event: FakeLoop(), events)

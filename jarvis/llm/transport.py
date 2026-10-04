@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
-from collections.abc import Iterator, Mapping
+from collections.abc import Generator, Iterator, Mapping
 from typing import Protocol, runtime_checkable
 
 from jarvis.core.constants import DEFAULT_ENCODING
@@ -121,7 +121,13 @@ class UrllibTransport:
         headers: Mapping[str, str],
         payload: Mapping[str, object],
         timeout: float,
-    ) -> Iterator[str]:
+    ) -> Generator[str, None, None]:
+        """A generator rather than a bare ``Iterator``, because closing it is the point.
+
+        The protocol above only promises a stream of lines; this implementation is what
+        turns "the caller stopped reading" into "the connection dropped", and a caller
+        that was handed an ``Iterator`` cannot see the ``close`` that does it.
+        """
         request = self._request(url, {"Accept": "text/event-stream", **headers}, payload)
         try:
             response = urllib.request.urlopen(request, timeout=timeout)

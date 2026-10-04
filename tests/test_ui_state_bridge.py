@@ -42,7 +42,7 @@ def test_full_turn_user_then_assistant() -> None:
     bridge.push_event(_ev("wake", "jarvis"))
     bridge.push_event(_ev("speech_start"))
     bridge.push_event(_ev("speech_end"))
-    bridge.push_event(_ev("reply", "打开灯"))  # user transcript
+    bridge.push_event(_ev("user_text", "打开灯"))  # what the microphone heard
     bridge.push_event(_ev("reply", "好的,已打开灯"))  # assistant answer
     state = bridge.snapshot()
     assert state.voice_state == UiVoiceState.PROCESSING
@@ -56,7 +56,7 @@ def test_barge_in_sets_interrupted() -> None:
     bridge = StateBridge()
     bridge.push_event(_ev("wake"))
     bridge.push_event(_ev("speech_end"))
-    bridge.push_event(_ev("reply", "播放音乐"))  # user
+    bridge.push_event(_ev("user_text", "播放音乐"))  # user
     bridge.push_event(_ev("reply", "正在播放"))  # assistant
     bridge.push_event(_ev("barge_in"))
     assert bridge.snapshot().interrupted is True
@@ -83,7 +83,7 @@ def test_unsubscribe_stops_notifications() -> None:
 def test_reset_clears_state() -> None:
     bridge = StateBridge()
     bridge.push_event(_ev("wake"))
-    bridge.push_event(_ev("reply", "你好"))  # user
+    bridge.push_event(_ev("user_text", "你好"))  # user
     bridge.reset()
     state = bridge.snapshot()
     assert state.voice_state == UiVoiceState.IDLE
@@ -93,7 +93,7 @@ def test_reset_clears_state() -> None:
 def test_history_cap() -> None:
     bridge = StateBridge(max_history_turns=2)
     for i in range(5):
-        bridge.push_event(_ev("reply", f"u{i}"))  # user
+        bridge.push_event(_ev("user_text", f"u{i}"))  # user
         bridge.push_event(_ev("reply", f"a{i}"))  # assistant
     state = bridge.snapshot()
     # 10 turns total; cap = 2*2 = 4 -> keep the last four.
@@ -243,12 +243,100 @@ def test_clear_history_keeps_the_voice_indicator_alone() -> None:
     ), "the turn state belongs to the microphone, and clearing a log does not stop it"
 
 
-def test_clear_history_resets_the_reply_pairing() -> None:
-    """Otherwise the next spoken transcript is filed as an assistant answer."""
+def test_a_barge_in_cannot_make_the_next_sentence_hers() -> None:
+    """用户说的话被记到小夜名下，根因就在这条上。
+
+    两条 reply 靠到达顺序分角色的时候，任何一轮只发出一条（被打断、出错、图没答上）
+    就会把后面每一轮永久错位：之后听到的每句话都成了她的回答。现在角色写在事件上，
+    错不了位。
+    """
     bridge = StateBridge()
-    bridge.add_turn("user", "半句")  # awaiting its assistant half
+    bridge.push_event(_ev("user_text", "把音乐停了"))
+    bridge.push_event(_ev("barge_in"))  # 她没来得及答
+    bridge.push_event(_ev("user_text", "现在几点"))
+    bridge.push_event(_ev("reply", "三点二十"))
+
+    assert bridge.snapshot().history == (
+        ChatTurn("user", "把音乐停了"),
+        ChatTurn("user", "现在几点"),
+        ChatTurn("assistant", "三点二十"),
+    )
+
+
+def test_clear_history_leaves_who_spoke_alone() -> None:
+    """「清空」管的是日志；清完之后听到的一句仍然是用户的。"""
+    bridge = StateBridge()
+    bridge.add_turn("user", "半句")
 
     bridge.clear_history()
-    bridge.push_event(_ev("reply", "打开灯"))
+    bridge.push_event(_ev("user_text", "打开灯"))
 
     assert bridge.snapshot().history == (ChatTurn("user", "打开灯"),)
+
+
+class TestSetTurn:
+    """A typed question produces no pipeline events, so something else must say 思考中.
+
+    ``set_turn`` is that something, and the discipline it has to keep is the one this
+    module exists for: the *turn* is what she is doing, the *phase* is whether the
+    microphone is open, and merging them is how a keyboard conversation put the desktop
+    figure to sleep.
+    """
+
+    def test_naming_the_turn_moves_only_the_turn_axis(self) -> None:
+        bridge = StateBridge()
+        bridge.set_turn(UiVoiceState.PROCESSING)
+
+        snapshot = bridge.snapshot()
+        assert snapshot.voice_state is UiVoiceState.PROCESSING
+        assert snapshot.voice is VoicePhase.OFF, "the microphone owns availability"
+
+    def test_saying_the_same_thing_twice_is_not_a_new_event(self) -> None:
+        """The page re-renders on every snapshot; a restatement is not a change."""
+        bridge = StateBridge()
+        seen: list[UiVoiceState] = []
+        bridge.subscribe(lambda snapshot: seen.append(snapshot.voice_state))
+
+        bridge.set_turn(UiVoiceState.PROCESSING)
+        bridge.set_turn(UiVoiceState.PROCESSING)
+
+        assert seen == [UiVoiceState.PROCESSING]
+
+    def test_a_released_microphone_still_outranks_a_typed_turn(self) -> None:
+        """释放麦克风 mid-answer: the icon may not keep claiming she is on it."""
+        bridge = StateBridge()
+        bridge.set_turn(UiVoiceState.PROCESSING)
+
+        bridge.push_event(_ev(VOICE_STATUS_KIND, "off"))
+
+        assert bridge.snapshot().voice_state is UiVoiceState.IDLE
+
+
+def test_the_loader_kind_travels_on_the_snapshot() -> None:
+    """对话气泡和桌面人物画的是同一个等待，所以这个数字必须一起到。
+
+    各读各的来源（一个走桥面调用、一个读偏好文件）会让她俩在保存后的那一秒里长成
+    两个样子 —— 而那正是用户会拿来报 bug 的东西。
+    """
+    bridge = StateBridge()
+
+    assert bridge.snapshot().thinking_loader == "dots"
+
+    bridge.set_thinking_loader("matrix")
+    state = bridge.snapshot()
+
+    assert state.thinking_loader == "matrix"
+    assert state.to_dict()["thinking_loader"] == "matrix"
+
+
+def test_the_read_aloud_switch_travels_on_the_snapshot() -> None:
+    """它同时是设置对话框里那一格和语音核心上这个开关，所以只能有一份真相。"""
+    bridge = StateBridge()
+
+    assert bridge.snapshot().speaks_typed is True
+
+    bridge.set_speaks_typed(False)
+    state = bridge.snapshot()
+
+    assert state.speaks_typed is False
+    assert state.to_dict()["speaks_typed"] is False

@@ -49,6 +49,33 @@ class TestClaim:
         assert read_lock(lock) == (os.getpid(), gate.port)
         gate.release()
 
+    def test_claiming_twice_keeps_the_same_port_and_lock(self, tmp_path: Path) -> None:
+        """The composition root claims, then the shell claims again on its way in.
+
+        The second claim used to bind a *second* ephemeral port and rewrite the lock
+        file. The lock then pointed at a socket nothing was listening on -- ``start``
+        is only ever called by the winner, and it listens on the first port -- so every
+        later double-click failed to wake anybody and started a second copy instead.
+        """
+        lock = tmp_path / "desktop.lock"
+        gate = InstanceGate(lock)
+        assert gate.claim() is True
+        first = gate.port
+        assert gate.claim() is True
+        assert gate.port == first
+        assert read_lock(lock) == (os.getpid(), first)
+        gate.release()
+
+    def test_a_released_gate_can_be_claimed_again(self, tmp_path: Path) -> None:
+        """``release`` has to clear the flag, or a later start would be refused."""
+        lock = tmp_path / "desktop.lock"
+        gate = InstanceGate(lock)
+        assert gate.claim() is True
+        gate.release()
+        assert gate.claimed is False
+        assert gate.claim() is True
+        gate.release()
+
     def test_the_lock_file_is_machine_readable_json(self, tmp_path: Path) -> None:
         lock = tmp_path / "desktop.lock"
         gate = InstanceGate(lock)

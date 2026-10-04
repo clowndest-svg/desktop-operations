@@ -14,10 +14,12 @@ from __future__ import annotations
 import logging
 import os
 import time
+from collections import deque
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
 from jarvis.core.exceptions import ToolError
+from jarvis.tools.proctable import ProcessSample, WindowsProcessTable
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from collections.abc import Sequence
@@ -34,7 +36,17 @@ refusing an update. Bytes are what run out, so bytes are what gets watched.
 
 _DEFAULT_TOP_PROCESSES = 8
 
-# How often the process table is actually re-read.
+TREND_CAPACITY: Final[int] = 1200
+"""How many trend samples a monitor keeps — a memory bound, not a time bound.
+
+At the HUD's 1.5 s cadence that is about half an hour, and at the hidden-window 10 s
+cadence about three hours. The window a caller asks for is clamped to what is actually
+held, so "最近十分钟卡不卡" is answered from samples that exist rather than from a
+zero-filled gap. Nothing older is kept: this is a load history, not a monitoring
+database, and the assistant says so when asked for a range it cannot cover.
+"""
+
+# How often the process table is actually re-read **on the psutil fallback path**.
 #
 # The HUD polls a snapshot every 1.5 s, and that cadence is right for CPU and
 # memory -- but ``process_iter`` with ``memory_info`` opens a query handle for
@@ -47,7 +59,44 @@ _DEFAULT_TOP_PROCESSES = 8
 # what is installed on the machine. The walk is also skipped entirely while the
 # window is hidden (see ``stores/system.ts``), because a background assistant has no
 # audience for a process table.
+#
+# Windows does not use this path any more -- ``jarvis.tools.proctable`` reads the
+# whole table in one 8 ms call, so there is nothing worth caching. This TTL is what
+# a machine without that call falls back to.
 _DEFAULT_PROCESS_REFRESH_SECONDS = 10.0
+
+PROCESS_CPU_WINDOW_SECONDS: Final[float] = 10.0
+"""How far back a process's CPU share is averaged.
+
+A rate needs two readings, and the honest window is "as far back as we have" up to
+this many seconds. Two reasons it is not one poll (1.5 s): a process that bursts
+every few seconds would flip between 0% and 100% on screen, which reads as a broken
+dashboard even though every number is real; and psutil's own per-object deltas --
+the thing this replaced -- made the window *invisible*, so the column silently
+changed meaning whenever a walk was skipped. Ten seconds matches the fallback TTL,
+so both paths label the same number.
+"""
+
+_PROC_CPU_SAMPLES: Final[int] = 32
+"""Upper bound on samples kept per pid: the window evicts long before this does."""
+
+CPU_SAMPLE_SECONDS: Final[float] = 0.05
+"""How long one CPU reading watches, sampled inside a single call.
+
+``cpu_percent(interval=None)`` keeps its baseline **per calling thread**, and the
+HUD is served by pywebview's thread pool -- so a call from a thread that had never
+asked before had no earlier sample and answered 0.0, while the next poll from a
+warm thread answered the truth. Measured on this machine: four fresh threads read
+``[100.0, 100.0, 0.0, 0.0]``, ``percpu=True`` returned a row of zeros every time,
+and three reads microseconds apart on one thread read ``[0.0, 0.0, 0.0]``. That is
+the reported "一下 100% 一下 0%", and it was never about the machine.
+
+Asking with an explicit interval samples t1 and t2 *inside the same call*, so the
+answer does not depend on who asked or when they last asked -- and the first read
+of a fresh monitor is a real reading rather than a priming zero. The price is a
+50 ms sleep on the polling thread against a 1.5 s cadence (and nothing at all while
+the window is hidden, because the page stops polling).
+"""
 
 
 class Pslike(Protocol):
@@ -72,6 +121,12 @@ class Pslike(Protocol):
     def process_iter(self, attrs: Sequence[str]) -> list[Any]: ...
 
     def pid_exists(self, pid: int) -> bool: ...
+
+
+class ProcessTablePort(Protocol):
+    """What the fast reader has to do: the whole table, or ``None`` to fall back."""
+
+    def sample(self) -> dict[int, ProcessSample] | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,12 +161,18 @@ class ProcessReading:
     pid: int
     name: str
     cpu_percent: float | None
-    """Share of one core since the previous walk, or ``None`` for "not measured yet".
+    """Share of one core, averaged over the last :data:`PROCESS_CPU_WINDOW_SECONDS`.
 
     ``None`` and ``0.0`` are different claims: zero says the process is idle, and a
     process that was only just discovered has not been watched for any interval at
     all. A table of confident zeros on a busy machine is the thing that reads as
     "the dashboard is broken".
+
+    The window is stated rather than implied because it used to be neither: the
+    column showed psutil's delta since *a walk that might or might not have happened
+    last frame*, so the same process could read 74.7% on one paint and 16.9% two
+    paints later with no change in what it was doing (measured; see
+    ``build/probe_process_cpu.py``).
     """
 
     memory_bytes: int
@@ -131,6 +192,39 @@ class NetReading:
     recv_bytes: int
     send_bps: float | None = None
     receive_bps: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TrendPoint:
+    """One sample of the two lines the trend chart draws, plus the net rates.
+
+    Kept in Python rather than only in the page because the assistant has to be able
+    to answer "刚才那十分钟卡不卡" — and a history the model cannot read while the
+    chart can is two sets of eyes over the same machine, which is the thing this whole
+    round exists to remove.
+    """
+
+    taken_at: float
+    cpu_percent: float | None
+    """``None`` on the very first sample: there is nothing to difference against.
+
+    The page skips that point for the same reason (``cpuReady``); recording a 0.0 here
+    would draw a load cliff that never happened, and would let the model report an
+    idle machine for the window that was busy.
+    """
+
+    memory_percent: float
+    send_bps: float | None = None
+    receive_bps: float | None = None
+
+    def to_dict(self) -> dict[str, float | None]:
+        return {
+            "taken_at": self.taken_at,
+            "cpu_percent": self.cpu_percent,
+            "memory_percent": self.memory_percent,
+            "send_bps": self.send_bps,
+            "receive_bps": self.receive_bps,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +271,7 @@ class SystemMonitor:
         top_processes: int = _DEFAULT_TOP_PROCESSES,
         process_refresh_seconds: float = _DEFAULT_PROCESS_REFRESH_SECONDS,
         psutil_module: Pslike | None = None,
+        process_table: ProcessTablePort | None = None,
     ) -> None:
         self._ps = psutil_module or _import_psutil()
         self._top = max(0, top_processes)
@@ -186,31 +281,86 @@ class SystemMonitor:
         # One retained psutil handle per pid, because a process's CPU percentage is
         # the delta since the last call on *that object* (see _cpu_since_last_walk).
         self._proc_handles: dict[int, Any] = {}
+        # The fast path: one call gives the whole table (see jarvis.tools.proctable).
+        # ``None`` disables it, and keeping it off whenever a test injects its own
+        # psutil double keeps those tests on the path they were written for -- a test
+        # that wants the fast path injects a table double instead.
+        if process_table is not None:
+            self._table: ProcessTablePort | None = process_table
+        else:
+            self._table = None if psutil_module is not None else WindowsProcessTable()
+        # pid -> [(monotonic, cumulative cpu seconds)], the rolling window the CPU
+        # column is averaged over. Only the fast path fills this.
+        self._proc_cpu: dict[int, deque[tuple[float, float]]] = {}
         # (monotonic, sent, received) from the previous snapshot: a rate needs two.
         self._net_sample: tuple[float, int, int] | None = None
-        # psutil computes cpu_percent from the delta since its previous call and
-        # returns 0.0 when it has no earlier sample. Priming here means the
-        # *second* snapshot onwards is meaningful; the first one still reads ~0
-        # because no time has elapsed to measure. A polling UI recovers
-        # immediately, but do not show that first number as a real load.
-        self._ps.cpu_percent(interval=None)
+        self._samples_taken = 0
+        self._trend: deque[TrendPoint] = deque(maxlen=TREND_CAPACITY)
+        self._last: SystemSnapshot | None = None
 
     def snapshot(self) -> SystemSnapshot:
-        """Read every metric, collecting per-metric failures as warnings."""
+        """Read every metric, collecting per-metric failures as warnings.
+
+        Also the only way the trend history grows, and the only way ``latest()`` has
+        anything to return: one sampler, one set of numbers, so the chart, the panel
+        and the assistant's answer to "刚才卡不卡" cannot disagree.
+        """
         warnings: list[str] = []
         cpu = self._read_cpu(warnings)
         memory = self._read_memory(warnings)
         disks = self._read_disks(warnings)
         processes = self._read_top_processes_cached(warnings)
-        return SystemSnapshot(
+        net = self._read_net(warnings)
+        self._samples_taken += 1
+        snapshot = SystemSnapshot(
             taken_at=time.time(),
             uptime_seconds=self._read_uptime(warnings),
             cpu=cpu,
             memory=memory,
             disks=disks,
             top_processes=processes,
-            net=self._read_net(warnings),
+            net=net,
             warnings=tuple(warnings),
+        )
+        self._last = snapshot
+        self._trend.append(self._trend_point(snapshot))
+        return snapshot
+
+    def latest(self) -> SystemSnapshot | None:
+        """The most recent reading, or ``None`` before the first one.
+
+        Readers that must not perturb the machine take this instead of ``snapshot()``:
+        a caller that constructs a fresh monitor per question used to report CPU as
+        0.0% every single time, because the object that primes ``cpu_percent`` has no
+        earlier sample to difference against.
+        """
+        return self._last
+
+    def trend(self, minutes: float = 10.0) -> tuple[TrendPoint, ...]:
+        """The recorded samples over the last ``minutes``, oldest first.
+
+        Returns what is actually held rather than padding to the asked-for window --
+        whoever calls this has to say how far back the history really reaches.
+        """
+        if minutes <= 0:
+            return ()
+        cutoff = time.time() - minutes * 60.0
+        return tuple(point for point in list(self._trend) if point.taken_at >= cutoff)
+
+    def _trend_point(self, snapshot: SystemSnapshot) -> TrendPoint:
+        """Fold one snapshot into the two numbers the trend is made of.
+
+        The first sample's CPU is recorded as ``None``, matching the rule the page
+        already applies: a delta over no interval is not a load reading.
+        """
+        measured = snapshot.cpu.percent if self._samples_taken > 1 else None
+        net = snapshot.net
+        return TrendPoint(
+            taken_at=snapshot.taken_at,
+            cpu_percent=measured,
+            memory_percent=snapshot.memory.percent,
+            send_bps=net.send_bps if net is not None else None,
+            receive_bps=net.receive_bps if net is not None else None,
         )
 
     # ------------------------------------------------------------------
@@ -218,15 +368,22 @@ class SystemMonitor:
     # ------------------------------------------------------------------
 
     def _read_cpu(self, warnings: list[str]) -> CpuReading:
+        """One reading per CPU plus the machine-wide share.
+
+        The machine-wide number is the mean of the per-core ones, which is psutil's
+        own definition of ``cpu_percent(percpu=False)`` -- so one sampled call answers
+        both questions, and the two can never disagree on screen.
+        """
         try:
-            percent = float(self._ps.cpu_percent(interval=None))
             per_core = tuple(
-                float(value) for value in self._ps.cpu_percent(interval=None, percpu=True)
+                float(value)
+                for value in self._ps.cpu_percent(interval=CPU_SAMPLE_SECONDS, percpu=True)
             )
             cores = int(self._ps.cpu_count() or 0)
         except Exception as exc:  # pragma: no cover - platform specific
             warnings.append(f"cpu: {type(exc).__name__}: {exc}")
             return CpuReading(percent=0.0, cores=0)
+        percent = sum(per_core) / len(per_core) if per_core else 0.0
         return CpuReading(percent=percent, cores=cores, per_core=per_core)
 
     def _read_memory(self, warnings: list[str]) -> MemoryReading:
@@ -304,12 +461,80 @@ class SystemMonitor:
         return tuple(readings)
 
     def _read_top_processes_cached(self, warnings: list[str]) -> tuple[ProcessReading, ...]:
-        """The process ranking, re-walked at most once per TTL.
+        """The process ranking: the full table in one call, else the psutil fallback.
 
-        Serving a stale list is the right trade: the alternative is spending most of
-        a core, forever, to show a number that is 1.5 seconds fresher. The cache
-        starts empty so the first snapshot still carries a real ranking -- the HUD
-        would otherwise render an empty table until the TTL elapsed.
+        The fast path is cheap enough to run on *every* snapshot (measured 8 ms for
+        336 processes against 2.2 s), so on Windows there is no cache and no TTL --
+        every frame carries a fresh table and every CPU cell is averaged over the
+        same rolling window. The TTL below belongs to the fallback, where a walk
+        still costs whole seconds and must be spaced out.
+        """
+        table = self._table.sample() if self._table is not None else None
+        if table is not None:
+            return self._rank_from_table(table)
+        return self._read_top_processes_psutil(warnings)
+
+    def _rank_from_table(self, table: dict[int, ProcessSample]) -> tuple[ProcessReading, ...]:
+        """Rank by memory, with each CPU cell averaged over the rolling window.
+
+        The window is computed here, from plain numbers, rather than handed to psutil:
+        psutil's per-process percentage is a delta against *its own* last call on that
+        object, so the interval it covers depends on when the previous walk happened
+        to run. That is what produced the reported 100% → 0% flapping, and no amount
+        of relabelling fixes a window you do not control.
+        """
+        if self._top == 0:
+            return ()
+        now = time.monotonic()
+        rows: list[ProcessReading] = []
+        for pid, entry in table.items():
+            history = self._proc_cpu.get(pid)
+            stale = history is not None and now - history[-1][0] > PROCESS_CPU_WINDOW_SECONDS
+            if history is None or stale or entry.cpu_seconds < history[-1][1]:
+                # No history, a gap longer than the window (the page stops polling
+                # while the window is hidden, and the machine may have slept), or the
+                # pid was recycled: nothing before this is comparable, and averaging
+                # across the gap would report a five-minute mean as "the last 10 s".
+                history = deque(maxlen=_PROC_CPU_SAMPLES)
+                self._proc_cpu[pid] = history
+            history.append((now, entry.cpu_seconds))
+            while len(history) > 2 and now - history[0][0] > PROCESS_CPU_WINDOW_SECONDS:
+                history.popleft()
+            rows.append(
+                ProcessReading(
+                    pid=pid,
+                    name=entry.name,
+                    cpu_percent=self._windowed_percent(history),
+                    memory_bytes=entry.working_set_bytes,
+                )
+            )
+        # Drop what has exited: a map that only grows is a slow leak of the very
+        # thing this method measures.
+        alive = set(table)
+        self._proc_cpu = {pid: hist for pid, hist in self._proc_cpu.items() if pid in alive}
+        rows.sort(key=lambda row: row.memory_bytes, reverse=True)
+        return tuple(rows[: self._top])
+
+    @staticmethod
+    def _windowed_percent(history: deque[tuple[float, float]]) -> float | None:
+        """CPU seconds over wall seconds, as a share of one core. ``None`` for one sample."""
+        if len(history) < 2:
+            return None
+        span = history[-1][0] - history[0][0]
+        if span <= 0:
+            return None
+        used = history[-1][1] - history[0][1]
+        return max(0.0, used / span * 100.0)
+
+    def _read_top_processes_psutil(self, warnings: list[str]) -> tuple[ProcessReading, ...]:
+        """The fallback ranking: psutil, re-walked at most once per TTL.
+
+        This is what runs where the one-call table is unavailable (non-Windows, or a
+        failed self-check). Serving a stale list is the right trade here: the
+        alternative is spending whole seconds of a core, forever, to show a number
+        that is 1.5 seconds fresher. The cache starts empty so the first snapshot
+        still carries a ranking -- the HUD would otherwise render an empty table
+        until the TTL elapsed.
         """
         if self._top == 0:
             return ()

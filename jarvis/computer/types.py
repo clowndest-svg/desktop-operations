@@ -25,6 +25,8 @@ class ActionKind(enum.StrEnum):
     KEY = "key"
     SCROLL = "scroll"
     DRAG = "drag"
+    LAUNCH = "launch"
+    """把程序叫到前面来：已经在跑就显示并置前，没跑就启动它。"""
 
 
 @dataclass(frozen=True, slots=True)

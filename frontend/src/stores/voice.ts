@@ -9,6 +9,8 @@ import {
   onUiState,
   talkNow,
   type ChatTurn,
+  type ConversationCard,
+  type StreamingTurn,
   type TurnPhase,
   type UiSnapshot,
   type VoicePhase,
@@ -39,6 +41,30 @@ export const useVoiceStore = defineStore('voice', () => {
   /** The shared transcript: typed questions and spoken turns land in one list. */
   const history = ref<ChatTurn[]>([])
   /**
+   * Every conversation tab, with what each one is doing. The panel shows one tab's
+   * ``history`` at a time; this is how the others say they are still working.
+   */
+  const conversations = ref<ConversationCard[]>([])
+  /** The answer currently being streamed, or null. Never part of ``history``. */
+  const streaming = ref<StreamingTurn | null>(null)
+
+  /**
+   * Which animation the shell wants next to 「思考中」.
+   *
+   * It arrives on the snapshot rather than being fetched: the desktop figure draws
+   * the same wait out of a different process, and the two disagreeing for a second
+   * after a save is exactly what the operator would read as a bug.
+   */
+  const thinkingLoader = ref('dots')
+
+  /**
+   * Whether typed answers get read aloud -- the shell's answer, not a local guess.
+   *
+   * The switch also lives in the settings dialog, so a copy read from there on mount
+   * would go stale the moment the other one moved.
+   */
+  const speaksTyped = ref(true)
+  /**
    * One-shot answer to a press that was refused or accepted, shown next to the
    * button and cleared by the next pushed state. Distinct from ``error``, which is
    * a bridge failure and stays until it is fixed.
@@ -62,12 +88,16 @@ export const useVoiceStore = defineStore('voice', () => {
 
   /** What the indicator should say, in one short line. */
   const label = computed(() => {
+    // A typed question is a turn with the microphone shut. Answering 「思考中」 only when
+    // the voice stack happens to be loaded is what left the bar saying 「语音未启用」 for
+    // six seconds while she was being asked something.
+    if (turn.value === 'processing') return '思考中'
     switch (phase.value) {
       case 'loading':
         return '语音加载中'
       case 'running':
         if (interrupted.value) return '已打断'
-        return turn.value === 'processing' ? '思考中' : turn.value === 'listening' ? '聆听中' : '待唤醒'
+        return turn.value === 'listening' ? '聆听中' : '待唤醒'
       case 'muted':
         return '麦克风已释放'
       case 'failed':
@@ -80,6 +110,7 @@ export const useVoiceStore = defineStore('voice', () => {
   const dotClass = computed(() => {
     if (phase.value === 'failed') return 'error'
     if (phase.value === 'loading') return 'warn'
+    if (turn.value === 'processing') return 'live'
     if (phase.value !== 'running') return 'idle'
     // Barge-in is a headline feature; it should be visible for the moment it lasts.
     if (interrupted.value) return 'warn'
@@ -103,8 +134,10 @@ export const useVoiceStore = defineStore('voice', () => {
     detail.value = status.detail ?? ''
     if (status.keyword) keyword.value = status.keyword
     if (status.phase !== 'running') {
-      // A released or failed loop cannot also be mid-turn.
-      turn.value = 'idle'
+      // The microphone being closed means it cannot have just been interrupted. It
+      // does *not* mean nothing is in progress: a typed question is answered with the
+      // microphone shut, and clearing the turn here would erase 「思考中」 mid-answer.
+      // Snapshots own the turn axis; this call only knows about the phase.
       interrupted.value = false
     }
     lastUpdated.value = Date.now()
@@ -152,9 +185,21 @@ export const useVoiceStore = defineStore('voice', () => {
   function applySnapshot(snapshot: UiSnapshot): void {
     phase.value = snapshot.voice
     detail.value = snapshot.voice_detail ?? ''
-    turn.value = snapshot.voice === 'running' ? snapshot.voice_state : 'idle'
+    // Two axes, on purpose, and this is the line that used to merge them. ``voice``
+    // answers "can I talk to it"; ``voice_state`` answers "what is it doing right now".
+    // A typed question has a turn and no microphone, and pinning the turn to idle
+    // whenever the mic was closed is what made the desktop figure sleep through a
+    // conversation she was having.
+    turn.value = snapshot.voice_state
     interrupted.value = snapshot.interrupted
     history.value = snapshot.history ?? []
+    // The tab strip and the answer still arriving. Both optional in the type because a
+    // bundle built against the older shell sends neither, and a panel that read them as
+    // required would render an empty strip rather than a stale one.
+    conversations.value = snapshot.conversations ?? []
+    streaming.value = snapshot.streaming ?? null
+    if (snapshot.thinking_loader) thinkingLoader.value = snapshot.thinking_loader
+    if (typeof snapshot.speaks_typed === 'boolean') speaksTyped.value = snapshot.speaks_typed
     // A push supersedes whatever the last press said.
     notice.value = ''
     lastUpdated.value = Date.now()
@@ -236,6 +281,10 @@ export const useVoiceStore = defineStore('voice', () => {
     interrupted,
     busy,
     history,
+    conversations,
+    streaming,
+    thinkingLoader,
+    speaksTyped,
     lastUpdated,
     enabled,
     loading,

@@ -61,6 +61,38 @@
   --hud-dim: #8579a8;
 }
 
+/*
+ * 后面这三套是同一组 token 的另外三个色相，一一对应 theme.ts 里那三个 Skin。
+ * 两处必须一起改：CSS 管仪表盘，theme.ts 管那三个模型里的她 —— 只改一边就会
+ * 出现"蓝色面板 + 青色全息人"这种看起来像 bug 的东西。
+ */
+:root[data-skin='green'] {
+  --hud-line: rgba(53, 224, 138, 0.24);
+  --hud-glow: rgba(53, 224, 138, 0.5);
+  --hud-cyan: #3ce39a;
+  --hud-rim: rgba(53, 224, 138, 0.5);
+  --hud-text: #d9ffe9;
+  --hud-dim: #6f9a84;
+}
+
+:root[data-skin='amber'] {
+  --hud-line: rgba(255, 176, 74, 0.24);
+  --hud-glow: rgba(255, 176, 74, 0.5);
+  --hud-cyan: #ffb45a;
+  --hud-rim: rgba(255, 176, 74, 0.5);
+  --hud-text: #fff0d8;
+  --hud-dim: #a8896a;
+}
+
+:root[data-skin='rose'] {
+  --hud-line: rgba(255, 95, 138, 0.24);
+  --hud-glow: rgba(255, 95, 138, 0.5);
+  --hud-cyan: #ff6f9a;
+  --hud-rim: rgba(255, 95, 138, 0.5);
+  --hud-text: #ffe0ea;
+  --hud-dim: #a87b8c;
+}
+
 :root[data-skin='blue'] .hud-backdrop {
   background:
     radial-gradient(120% 90% at 22% -10%, rgba(16, 74, 148, 0.55), transparent 62%),
@@ -72,6 +104,27 @@
   background:
     radial-gradient(120% 90% at 22% -10%, rgba(64, 34, 128, 0.5), transparent 62%),
     radial-gradient(90% 80% at 100% 110%, rgba(30, 16, 72, 0.45), transparent 60%),
+    var(--hud-bg-deep);
+}
+
+:root[data-skin='green'] .hud-backdrop {
+  background:
+    radial-gradient(120% 90% at 22% -10%, rgba(14, 90, 58, 0.5), transparent 62%),
+    radial-gradient(90% 80% at 100% 110%, rgba(6, 50, 32, 0.42), transparent 60%),
+    var(--hud-bg-deep);
+}
+
+:root[data-skin='amber'] .hud-backdrop {
+  background:
+    radial-gradient(120% 90% at 22% -10%, rgba(120, 72, 14, 0.5), transparent 62%),
+    radial-gradient(90% 80% at 100% 110%, rgba(70, 40, 8, 0.42), transparent 60%),
+    var(--hud-bg-deep);
+}
+
+:root[data-skin='rose'] .hud-backdrop {
+  background:
+    radial-gradient(120% 90% at 22% -10%, rgba(120, 26, 58, 0.5), transparent 62%),
+    radial-gradient(90% 80% at 100% 110%, rgba(70, 14, 32, 0.42), transparent 60%),
     var(--hud-bg-deep);
 }
 
@@ -360,6 +413,20 @@ body {
 
 .hud-chip--warn .hud-label {
   color: var(--hud-amber);
+}
+
+/*
+ * The red sibling of --warn, and the reason the two exist: "a reading is incomplete"
+ * and "this machine is past a line you drew" must not look identical, or the operator
+ * learns to treat both as the app complaining about itself.
+ */
+.hud-chip--bad {
+  border-color: rgba(255, 93, 93, 0.5);
+  background: rgba(255, 93, 93, 0.09);
+}
+
+.hud-chip--bad .hud-label {
+  color: var(--hud-red);
 }
 
 /*

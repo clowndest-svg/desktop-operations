@@ -60,6 +60,10 @@ DIST_TO_IMPORTS: dict[str, tuple[str, ...]] = {
     "pyautogui": ("pyautogui",),
     "pypdf": ("pypdf",),
     "python-docx": ("docx",),
+    # The LAN endpoint's self-signed certificate. Lazily imported inside
+    # ensure_certificate, so a machine without the extra still starts and only the
+    # 「手机接入」 switch refuses.
+    "cryptography": ("cryptography",),
 }
 
 # Imported but never declared, each with the reason it may stay that way. Adding an
@@ -184,7 +188,7 @@ def test_desktop_extra_is_what_the_readme_installs() -> None:
     assert {"pywebview", "psutil"} <= desktop
     # It used to hold Qt, which the README still advertised as the desktop UI.
     assert "pyside6" not in desktop
-    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    readme = (REPO_ROOT / "docs/总览.md").read_text(encoding="utf-8")
     assert "[desktop]" in readme
 
 

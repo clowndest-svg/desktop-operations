@@ -117,7 +117,7 @@ def test_full_turn_with_injected_engines() -> None:
 
     def on_event(event: PipelineEvent) -> None:
         events.append(event)
-        if event.kind == "reply":
+        if event.kind in ("user_text", "reply"):
             nonlocal reply_count
             reply_count += 1
             if reply_count >= 2:  # transcript + agent answer both seen

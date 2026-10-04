@@ -52,6 +52,7 @@ pelican_bicycle_animation.html
 
 # pytest basetemp left by a debugging run
 .ptmp/
+.pytest-full/
 
 # 人物模型是投放件，不是仓库内容：10 MB 二进制不进 git，换形象 = 换文件。
 # 打包时由 Vite 的 publicDir 原样拷进 jarvis/ui/web/avatar/。
@@ -62,6 +63,9 @@ assets-src/*.vrm
 # 它们是"当时那一屏"的证据，不是界面素材，所以留在磁盘不进仓库。
 /r[0-9]*-*.png
 
-# 公开分支整目录排除：报价、需求确认单、文案、演示脚本都不对外。
-# 本地 main 分支仍然跟踪它们，这个改动只存在于 public-main。
+# 签名材料永远不进仓库（实际放在 E:/BianChengGongJu/JarvisKeys）。
+# 这两行是防手滑：谁把它们拷进项目目录，也不能被 git 捡走。
+*.keystore
+*.jks
+keystore.properties
 commercial/

@@ -82,6 +82,16 @@ class VoiceLoop(Protocol):
 
     def stop(self) -> None: ...
 
+    def stop_listening(self) -> None:
+        """Release the microphone and nothing else.
+
+        Separate from :meth:`stop` because the two are not the same request, and the
+        one the operator makes most often is this one: "stop hearing me". ``stop``
+        also closes the speaker, which is why muting used to silence her read-aloud as
+        well.
+        """
+        ...
+
 
 # A plain function alias rather than a callable Protocol: mypy will not accept an
 # ordinary function where a Protocol class with ``__call__`` is expected, and the
@@ -230,12 +240,20 @@ class VoiceService:
         loading until the process is restarted.
         """
         to_start: threading.Thread | None = None
+        resuming: VoiceLoop | None = None
         with self._lock:
             if not self._allowed():
                 self._phase = VoicePhase.FAILED
                 self._detail = "配置未开启 orchestration.enabled"
             elif self._phase in (VoicePhase.LOADING, VoicePhase.RUNNING):
                 pass
+            elif self._loop is not None:
+                # She is still loaded -- 聆听 was off, or a reopen failed -- so opening
+                # the microphone is one call rather than another model load. The phase is
+                # set optimistically and walked back below if the source will not open.
+                self._phase = VoicePhase.RUNNING
+                self._detail = ""
+                resuming = self._loop
             else:
                 self._phase = VoicePhase.LOADING
                 self._detail = (
@@ -250,12 +268,27 @@ class VoiceService:
                 )
                 self._boot = to_start
             status = VoiceStatus(self._phase, self._detail, self._keyword_text())
+        if resuming is not None:
+            status = self._reopen_microphone(resuming, status)
         self._notify(status)
-        if to_start is not None:
-            to_start.start()
         if status.phase in (VoicePhase.LOADING, VoicePhase.RUNNING):
             # The press is the consent; recording it is what saves the next one.
             self._remember_auto_arm(True)
+        if to_start is not None:
+            to_start.start()
+        return status
+
+    def _reopen_microphone(self, loop: VoiceLoop, status: VoiceStatus) -> VoiceStatus:
+        """Put the microphone back on a stack that is already loaded."""
+        try:
+            loop.start()
+        except Exception as exc:
+            logger.exception("the microphone could not be reopened")
+            with self._lock:
+                self._phase = VoicePhase.FAILED
+                self._detail = f"麦克风没能重新打开：{type(exc).__name__}: {exc}"
+                return VoiceStatus(self._phase, self._detail, self._keyword_text())
+        logger.info("microphone reopened without reloading the models")
         return status
 
     def arm_if_remembered(self) -> VoiceStatus | None:
@@ -288,11 +321,33 @@ class VoiceService:
             store.set_flag(VOICE_AUTO_ARM, value)
 
     def mute(self) -> VoiceStatus:
-        """Let go of the microphone, keeping the process and the panel intact."""
+        """Let go of the microphone. Everything else she has stays loaded and working.
+
+        This used to tear the whole stack down, which quietly made the switch mean "turn
+        her voice off as well": the read-aloud lives in the same object as the capture
+        thread, so closing the microphone closed the speaker with it -- and turning her
+        ears back on cost another 30-second model load. Now the microphone is the only
+        thing released, so a typed answer still gets spoken while she cannot hear.
+
+        The models stay in memory while she is muted. That is the trade being made, and
+        it is the one the operator asked for: the alternative was a switch that is
+        expensive to touch.
+        """
         # Releasing the microphone is also a choice, and it outranks the old one:
         # nobody should have to hunt for the switch that puts it back to sleep.
         self._remember_auto_arm(False)
-        self._teardown(reason="麦克风已释放，可重新开启")
+        with self._lock:
+            loop = self._loop
+            # A load still in flight has no business handing the microphone to a window
+            # whose operator just asked for silence, so its press is retired either way.
+            self._generation += 1
+        if loop is None:
+            self._teardown(reason="麦克风已释放，可重新开启")
+        else:
+            try:
+                loop.stop_listening()
+            except Exception:  # pragma: no cover - a source that will not close
+                logger.exception("the microphone could not be released cleanly")
         with self._lock:
             self._phase = VoicePhase.MUTED
             self._detail = ""
@@ -331,6 +386,11 @@ class VoiceService:
         across a second meaning. What the page needs to know -- whether samples are
         arriving -- it learns from the audio channel itself.
 
+        The gate is "a stack exists", not "the microphone is open". Those were the same
+        condition until 聆听 turned out to be a switch the operator reads as *hearing*:
+        with the microphone shut she has nothing to say out loud of her own, but a typed
+        answer is still hers to read.
+
         Refusing is always safe. The caller has already put the text on screen, so
         the worst case for a typed answer is that it stays written.
         """
@@ -339,7 +399,7 @@ class VoiceService:
             return False
         with self._lock:
             phase, loop = self._phase, self._loop
-        if phase is not VoicePhase.RUNNING or loop is None:
+        if loop is None:
             logger.debug("read-aloud refused (voice phase=%s)", phase.value)
             return False
         try:

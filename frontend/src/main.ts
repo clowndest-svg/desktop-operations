@@ -4,11 +4,12 @@ import './styles/hud.css'
 import App from './App.vue'
 import PetStage from './avatar/PetStage.vue'
 import { isPet } from './page'
-import { applyStoredSkin } from './theme'
+import { applyStoredSkin, installSkinChannel } from './theme'
 
 // Before the first frame: a flash of the wrong palette reads as a restart bug, and
 // it is true of both windows -- the pet reads the same stored skin the HUD writes.
 applyStoredSkin()
+installSkinChannel()
 
 /**
  * One bundle, two application roots.

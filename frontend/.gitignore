@@ -22,3 +22,12 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# 手机版：产物和构建中间件都是可重建的，不进仓库。
+dist-mobile
+android/build
+android/app/build
+android/.gradle
+# `npx cap sync` 把 dist-mobile 拷进这里，属于产物而不是源码。
+android/app/src/main/assets/public/
+android/app/src/main/assets/capacitor.config.json

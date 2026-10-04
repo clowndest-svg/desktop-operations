@@ -1,6 +1,6 @@
 """SQLite-backed vector index.
 
-Why not FAISS (which ``docs/architecture.md`` originally named): FAISS is a
+Why not FAISS (which ``docs/架构分层.md`` originally named): FAISS is a
 native wheel that has to be built per Python version, it cannot be installed by
 ``pip install -e .[voice]`` on a fresh machine without a compiler, and the
 indexes it produces are opaque files that cannot be inspected when a retrieval

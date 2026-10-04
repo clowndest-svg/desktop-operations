@@ -8,6 +8,48 @@
         <button class="hud-btn" type="button" @click="emit('close')">关闭</button>
       </header>
 
+      <!--
+        Rate and volume live here rather than in 设置 because they are the other two
+        halves of "how does she sound": choosing a voice and then hearing it at the
+        wrong speed is half a decision. Both apply to the next sentence -- including
+        the 试听 below, which is the only way to judge them.
+      -->
+      <section class="vp__style" aria-label="语速与音量">
+        <label class="vp__slider">
+          <span class="vp__slider-name">语速 <b class="hud-num">{{ speed.toFixed(2) }}×</b></span>
+          <input
+            v-model.number="speed"
+            type="range"
+            :min="speedMin"
+            :max="speedMax"
+            step="0.05"
+            :disabled="busy"
+            @change="applyStyle()"
+          />
+        </label>
+        <label class="vp__slider">
+          <span class="vp__slider-name">音量 <b class="hud-num">{{ Math.round(volume * 100) }}%</b></span>
+          <input
+            v-model.number="volume"
+            type="range"
+            :min="volumeMin"
+            :max="volumeMax"
+            step="0.05"
+            :disabled="busy"
+            @change="applyStyle()"
+          />
+        </label>
+        <button
+          class="hud-btn vp__try"
+          type="button"
+          :disabled="busy || current === ''"
+          title="用当前音色、当前语速和音量读一遍"
+          @click="preview(current)"
+        >
+          {{ previewing !== '' ? '合成中…' : '试听这一档' }}
+        </button>
+      </section>
+
       <p v-if="error" class="vp__error">{{ error }}</p>
       <p v-else-if="loading" class="vp__wait">读取音色列表…</p>
       <p v-else-if="choices.length === 0" class="vp__wait">这个引擎没有可选音色。</p>
@@ -27,7 +69,7 @@
           <button
             class="hud-btn vp__try"
             type="button"
-            :disabled="previewing === choice.id"
+            :disabled="previewing === choice.id || busy"
             @click="preview(choice.id)"
           >
             {{ previewing === choice.id ? '合成中…' : '试听' }}
@@ -44,6 +86,7 @@
       -->
       <p class="vp__note">
         选用后从下一句朗读开始生效；试听只播给你听，不会改变当前选择。
+        语速和音量同样从下一句开始生效，「试听这一档」听的就是它们。
       </p>
     </section>
   </div>
@@ -59,7 +102,13 @@
  * not a second, slightly different playback path.
  */
 import { ref, watch } from 'vue'
-import { fetchVoices, pickVoice, previewVoice, type VoiceChoice } from '@/api/bridge'
+import {
+  fetchVoices,
+  pickVoice,
+  previewVoice,
+  setVoiceStyle,
+  type VoiceChoice,
+} from '@/api/bridge'
 
 const props = defineProps<{ open: boolean }>()
 const emit = defineEmits<{ (e: 'close'): void }>()
@@ -73,13 +122,43 @@ const loading = ref(false)
 const picking = ref('')
 const previewing = ref('')
 
+// Rate and volume, with the ranges the backend offers. Kept in one place so a slider
+// cannot promise a value the engine will clamp.
+const speed = ref(1)
+const volume = ref(1)
+const speedMin = ref(0.5)
+const speedMax = ref(1.5)
+const volumeMin = ref(0)
+const volumeMax = ref(1)
+
+const busy = ref(false)
+
+function absorb(list: {
+  choices?: VoiceChoice[]
+  current?: string
+  speed?: number
+  volume?: number
+  speed_min?: number
+  speed_max?: number
+  volume_min?: number
+  volume_max?: number
+}): void {
+  if (list.choices) choices.value = list.choices
+  if (list.current !== undefined) current.value = list.current
+  if (list.speed !== undefined) speed.value = list.speed
+  if (list.volume !== undefined) volume.value = list.volume
+  if (list.speed_min !== undefined) speedMin.value = list.speed_min
+  if (list.speed_max !== undefined) speedMax.value = list.speed_max
+  if (list.volume_min !== undefined) volumeMin.value = list.volume_min
+  if (list.volume_max !== undefined) volumeMax.value = list.volume_max
+}
+
 async function load(): Promise<void> {
   loading.value = true
   error.value = ''
   try {
     const list = await fetchVoices()
-    choices.value = list.choices
-    current.value = list.current
+    absorb(list)
     error.value = list.error
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
@@ -93,8 +172,7 @@ async function pick(voice: string): Promise<void> {
   note.value = ''
   try {
     const list = await pickVoice(voice)
-    choices.value = list.choices
-    current.value = list.current
+    absorb(list)
     note.value = list.error || `已切到 ${voice}，下一句朗读开始用它`
     noteBad.value = Boolean(list.error)
   } catch (err) {
@@ -106,6 +184,7 @@ async function pick(voice: string): Promise<void> {
 }
 
 async function preview(voice: string): Promise<void> {
+  if (voice === '') return
   previewing.value = voice
   note.value = ''
   try {
@@ -119,6 +198,22 @@ async function preview(voice: string): Promise<void> {
     noteBad.value = true
   } finally {
     previewing.value = ''
+  }
+}
+
+async function applyStyle(): Promise<void> {
+  busy.value = true
+  note.value = ''
+  try {
+    const list = await setVoiceStyle(speed.value, volume.value)
+    absorb(list)
+    note.value = list.error || '已保存：下一句朗读开始用这个语速和音量'
+    noteBad.value = Boolean(list.error)
+  } catch (err) {
+    note.value = err instanceof Error ? err.message : String(err)
+    noteBad.value = true
+  } finally {
+    busy.value = false
   }
 }
 
@@ -192,6 +287,42 @@ watch(
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+.vp__style {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--hud-line);
+}
+
+.vp__slider {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--hud-dim);
+}
+
+.vp__slider-name {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.vp__slider input[type='range'] {
+  width: 100%;
+  accent-color: var(--hud-cyan);
+  cursor: pointer;
+}
+
+.vp__slider input[type='range']:disabled {
+  cursor: default;
+  opacity: 0.5;
 }
 
 .vp__row {

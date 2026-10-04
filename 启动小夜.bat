@@ -69,7 +69,7 @@ if not "%RC%"=="0" (
   echo.
   echo [退出码 %RC%] 详细原因看日志：
   echo   %JARVIS_HOME%\logs\jarvis.log
-  echo   排查表：docs\desktop-operations.md 第 9 节
+  echo   排查表：docs\桌面运维手册.md 第 9 节
   pause
 )
 exit /b %RC%

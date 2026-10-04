@@ -7,7 +7,7 @@ Responsibility
     hook that records uncaught exceptions before the process dies.
 
 Allowed dependencies
-    ``core``, ``config`` (see ``docs/architecture.md``).
+    ``core``, ``config`` (see ``docs/架构分层.md``).
 
 Delivery
     Phase 4.

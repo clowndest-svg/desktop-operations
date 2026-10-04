@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from jarvis.config.schema import TtsSection
 from jarvis.core.exceptions import TtsError
 from jarvis.core.text import speakable
-from jarvis.tts.engines import CosyVoiceTtsEngine, EdgeTtsEngine
+from jarvis.tts.engines import EdgeTtsEngine
 from jarvis.tts.types import AudioChunk, ShouldStop, SpeechSynthesizer
 
 logger = logging.getLogger("jarvis.tts.service")
@@ -45,9 +45,20 @@ class TtsSettings:
 
 
 def default_engine_factory(section: TtsSection) -> SpeechSynthesizer:
-    """Build the engine selected by configuration."""
+    """Build the engine selected by configuration.
+
+    ``cosyvoice`` is answered by the separate-process engine rather than by
+    :class:`~jarvis.tts.engines.CosyVoiceTtsEngine`. That in-process class is
+    kept for callers that *can* hold the model (and for the tests that exercise
+    its stream handling), but in this application it is unusable: CosyVoice pins
+    ``transformers<4.52`` and the assistant's environment carries 5.x for its LLM
+    clients, so the import raises. Pointing the factory at the sidecar is what
+    makes the configured engine work at all.
+    """
     if section.engine == "cosyvoice":
-        return CosyVoiceTtsEngine(section)
+        from jarvis.tts.sidecar import CosyVoiceSidecar
+
+        return CosyVoiceSidecar(section.model)
     if section.engine == "edge_tts":
         return EdgeTtsEngine(section)
     raise TtsError(  # pragma: no cover - schema already rejects this

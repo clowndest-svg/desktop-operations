@@ -6,7 +6,9 @@
         @settings="settingsOpen = true"
         @activity="activityOpen = true"
         @access="accessOpen = true"
+        @phone="phoneOpen = true"
       @assistant="assistantOpen = true"
+      @skin="skinOpen = true"
       />
 
     <p v-if="store.error" class="app__error">{{ store.error }}</p>
@@ -84,16 +86,40 @@
       </section>
 
       <TrendPanel class="app__trend" />
-      <ChatPanel class="app__chat" @usage="usageOpen = true" />
+      <ChatPanel class="app__chat" @usage="usageOpen = true" @voice="voiceOpen = true" />
       <CleanPanel class="app__clean" />
       <DiskPanel />
-      <ProcessPanel class="app__procs" />
+      <ProcessPanel
+        class="app__procs"
+        @reminders="assistantOpen = true"
+        @usage="usageOpen = true"
+        @actions="activityOpen = true"
+      />
     </main>
 
-    <SettingsPanel :open="settingsOpen" @close="settingsOpen = false" @saved="onSettingsSaved" />
+    <SettingsPanel
+      :open="settingsOpen"
+      :voice-closed="voiceClosed"
+      @close="settingsOpen = false"
+      @saved="onSettingsSaved"
+      @voice="voiceOpen = true"
+    />
+    <!--
+      One voice picker for both entrances (对话区 and 设置), mounted right after the
+      settings dialog so the same z-index layer resolves above it by document order.
+      Mounted inside ChatPanel it sat *under* 设置: the dialog the operator could see
+      but not reach is the failure this window has already been billed for once.
+    -->
+    <VoicePickerPopup :open="voiceOpen" @close="closeVoicePicker" />
     <ActivityPopup :open="activityOpen" @close="activityOpen = false" />
     <ComputerAccessPopup :open="accessOpen" @close="accessOpen = false" />
+    <MobileAccessPopup
+      :open="phoneOpen"
+      @close="phoneOpen = false"
+      @changed="announcePhoneChange"
+    />
     <AssistantPopup :open="assistantOpen" @close="assistantOpen = false" />
+    <SkinPopup :open="skinOpen" @close="skinOpen = false" />
 
     <UsagePopup :open="usageOpen" @close="usageOpen = false" />
   </div>
@@ -101,7 +127,7 @@
 
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from 'vue'
-import { formatBytes, runningMocked, type SettingsSnapshot } from '@/api/bridge'
+import { formatBytes, reportPetPalette, runningMocked, type SettingsSnapshot } from '@/api/bridge'
 
 /**
  * A network speed, or the honest dash.
@@ -118,19 +144,22 @@ import ChatPanel from '@/components/ChatPanel.vue'
 import DiskPanel from '@/components/DiskPanel.vue'
 import ActivityPopup from '@/components/ActivityPopup.vue'
 import AssistantPopup from '@/components/AssistantPopup.vue'
+import SkinPopup from '@/components/SkinPopup.vue'
 import CleanPanel from '@/components/CleanPanel.vue'
 import ComputerAccessPopup from '@/components/ComputerAccessPopup.vue'
+import MobileAccessPopup from '@/components/MobileAccessPopup.vue'
 import ProcessPanel from '@/components/ProcessPanel.vue'
 import SettingsPanel from '@/components/SettingsPanel.vue'
 import TopBar from '@/components/TopBar.vue'
 import UsagePopup from '@/components/UsagePopup.vue'
+import VoicePickerPopup from '@/components/VoicePickerPopup.vue'
 import TrendPanel from '@/components/TrendPanel.vue'
 import VoiceCore from '@/components/VoiceCore.vue'
 import { useSystemStore } from '@/stores/system'
 import { useVoiceStore } from '@/stores/voice'
 import AvatarStage from '@/avatar/AvatarStage.vue'
 import { startAudioChannel, stopAudioChannel } from '@/audio/channel'
-import { applyStoredSkin } from '@/theme'
+import { applyStoredSkin, currentSkin } from '@/theme'
 
 const store = useSystemStore()
 const voice = useVoiceStore()
@@ -145,14 +174,40 @@ function onSettingsSaved(snapshot: SettingsSnapshot): void {
   store.setIntervalMs(snapshot.telemetry_interval_ms)
   window.dispatchEvent(new CustomEvent('jarvis-settings-saved'))
 }
+
+/**
+ * The popup switched the listening port, so the bar reads it again.
+ *
+ * One event rather than a shared copy of the state: the label is a reading of a
+ * socket, and a socket has exactly one owner -- Python.
+ */
+function announcePhoneChange(label: string): void {
+  window.dispatchEvent(new CustomEvent('jarvis-phone-changed', { detail: label }))
+}
 const activityOpen = ref(false)
 const accessOpen = ref(false)
+const phoneOpen = ref(false)
 const usageOpen = ref(false)
+const voiceOpen = ref(false)
+/** Bumped when the picker closes, so 设置 re-reads which voice is now in force. */
+const voiceClosed = ref(0)
+
+/** Closing the picker is also the signal that the in-force voice may have changed. */
+function closeVoicePicker(): void {
+  voiceOpen.value = false
+  voiceClosed.value += 1
+}
 const assistantOpen = ref(false)
+const skinOpen = ref(false)
 
 onMounted(() => {
   // Before the first frame: a flash of the wrong palette reads as a restart bug.
   applyStoredSkin()
+  // And the other half of the same skin: her two desktop cards are painted by Python,
+  // which has no copy of these numbers, so they would stay the default blue-black while
+  // everything else recoloured. Fire-and-forget -- a build with no pet on the desktop
+  // has nothing to recolour, and that is not an error worth a banner.
+  void reportPetPalette(currentSkin()).catch(() => undefined)
   void store.start(1500)
   void voice.start()
   // Before any answer can arrive: this is what tells Python whether the page or the

@@ -10,7 +10,7 @@ Responsibility (delivered in phase 5):
 Allowed dependencies: ``core``, ``config``, ``prompt``.
 """
 
-from jarvis.llm.client import LlmClient
+from jarvis.llm.client import LlmClient, StreamingClient
 from jarvis.llm.errors import (
     LlmAuthError,
     LlmConnectionError,
@@ -51,6 +51,7 @@ __all__ = [
     "OpenAiCompatSettings",
     "Role",
     "StreamChunk",
+    "StreamingClient",
     "ToolCall",
     "Usage",
 ]

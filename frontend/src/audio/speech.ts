@@ -29,6 +29,16 @@ export interface SpeechSlice {
   format: string
   final: boolean
   pcm: string
+  /**
+   * Schedule and measure it, but do not let it out of the speaker.
+   *
+   * Exactly one window may play the answer or the operator hears it twice, slightly
+   * out of time -- but the desktop figure's mouth reads the same samples, so the other
+   * window is fed the identical slices with this set. Playing them silently is not a
+   * substitute for measuring: the analyser sits after the gain, so the levels are the
+   * ones the voice is really making.
+   */
+  mute?: boolean
 }
 
 /** What the audio channel carries: a slice, or a command to stop playing. */
@@ -74,6 +84,12 @@ class SpeechPlayer {
   private context: AudioContext | null = null
   private master: GainNode | null = null
   private analyser: AnalyserNode | null = null
+  private output: GainNode | null = null
+  /**
+   * The one gain node *after* the analyser, and therefore the only place a mute
+   * belongs. Silencing the master would silence the measurement too, and the entire
+   * reason a second window receives samples at all is to read them.
+   */
   // Annotated as bare `Uint8Array` these would widen to `Uint8Array<ArrayBufferLike>`
   // and the analyser's own signatures (`<ArrayBuffer>`) would refuse them.
   private timeData = new Uint8Array(0)
@@ -103,10 +119,12 @@ class SpeechPlayer {
         this.context = new Created()
         this.master = this.context.createGain()
         this.analyser = this.context.createAnalyser()
+        this.output = this.context.createGain()
         this.analyser.fftSize = ANALYSER_SIZE
         this.analyser.smoothingTimeConstant = 0.72
         this.master.connect(this.analyser)
-        this.analyser.connect(this.context.destination)
+        this.analyser.connect(this.output)
+        this.output.connect(this.context.destination)
         this.timeData = new Uint8Array(this.analyser.fftSize)
         this.frequencyData = new Uint8Array(this.analyser.frequencyBinCount)
       }
@@ -170,6 +188,10 @@ class SpeechPlayer {
     }
     if (message.seq !== undefined && message.seq <= this.lastSeq) return
     if (message.seq !== undefined) this.lastSeq = message.seq
+    // Decided per slice rather than once at mount: the same page can be the loudspeaker
+    // for one answer and the audience for the next, depending which window the operator
+    // is looking at when they press the wake word.
+    this.setMuted(message.mute === true)
     const bytes = decodeBase64(encoded)
     this.bytes += bytes.byteLength
     const samples = Math.floor(bytes.byteLength / 2)
@@ -183,6 +205,11 @@ class SpeechPlayer {
       channel[index] = view.getInt16(index * 2, true) / 0x8000
     }
     this.play(buffer)
+  }
+
+  private setMuted(muted: boolean): void {
+    const gate = this.output
+    if (gate) gate.gain.value = muted ? 0 : 1
   }
 
   private play(buffer: AudioBuffer): void {

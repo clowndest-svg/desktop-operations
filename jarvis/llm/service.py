@@ -16,7 +16,7 @@ import logging
 import os
 from collections.abc import Callable, Mapping
 
-from jarvis.config.schema import LlmSection, ProviderSection
+from jarvis.config.schema import LlmSection, ModelSpec, ProviderSection
 from jarvis.core.events import UsageEvent
 from jarvis.core.exceptions import ConfigurationError
 from jarvis.llm.client import LlmClient
@@ -122,24 +122,34 @@ class LlmService:
         section = self._require_started()
         return self.client_for(section.default_provider)
 
-    def client_for(self, provider_name: str) -> LlmClient:
-        """Client for a specific provider (cached per name).
+    def client_for(self, provider_name: str, model_id: str = "") -> LlmClient:
+        """Client for one provider/model pair (cached per pair).
+
+        The model is part of the cache key, not just the provider: one endpoint
+        serves several models, and a cache keyed by provider alone would hand a
+        request for the small model a client wired to the big one.
+
+        Args:
+            provider_name: Key under ``llm.providers``.
+            model_id: Which of that provider's models. Blank means its default.
 
         Raises:
             ConfigurationError: unknown provider name.
         """
         section = self._require_started()
-        cached = self._clients.get(provider_name)
-        if cached is not None:
-            return cached
         provider = section.providers.get(provider_name)
         if provider is None:
             raise ConfigurationError(
                 f"unknown LLM provider: '{provider_name}'",
                 details={"configured": sorted(section.providers)},
             )
-        client = self._build_client(section, provider)
-        self._clients[provider_name] = client
+        spec = provider.model_spec(model_id)
+        key = f"{provider_name}\x00{spec.id}"
+        cached = self._clients.get(key)
+        if cached is not None:
+            return cached
+        client = self._build_client(section, provider, spec)
+        self._clients[key] = client
         return client
 
     def _require_started(self) -> LlmSection:
@@ -147,11 +157,13 @@ class LlmService:
             raise ConfigurationError("LlmService is not started")
         return self._override if self._override is not None else self._section
 
-    def _build_client(self, section: LlmSection, provider: ProviderSection) -> LlmClient:
+    def _build_client(
+        self, section: LlmSection, provider: ProviderSection, spec: ModelSpec
+    ) -> LlmClient:
         settings = OpenAiCompatSettings(
             provider_name=provider.name,
             base_url=provider.base_url,
-            model=provider.model,
+            model=spec.id,
             api_key_env=provider.api_key_env,
             timeout_seconds=section.timeout_seconds,
             max_retries=section.max_retries,

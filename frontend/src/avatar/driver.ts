@@ -26,12 +26,27 @@ import { neutralPose, type Mood, type Pose, type Viseme, VISEMES } from '@/avata
 /** Typical speech RMS for the shipped voice; the loudness scale is anchored here. */
 const SPEECH_RMS = 0.09
 
-const MOOD_POSE: Record<Mood, { pitch: number; yaw: number; roll: number; brows: number; gaze: number; lids: number }> = {
-  dormant: { pitch: 0.1, yaw: 0.05, roll: 0.02, brows: -0.18, gaze: -0.35, lids: 0.42 },
-  armed: { pitch: -0.02, yaw: 0, roll: 0, brows: 0.02, gaze: 0, lids: 0 },
-  listening: { pitch: -0.07, yaw: 0.1, roll: -0.05, brows: 0.22, gaze: 0.1, lids: 0 },
-  thinking: { pitch: 0.04, yaw: -0.42, roll: 0.07, brows: 0.12, gaze: 0.5, lids: 0.08 },
-  speaking: { pitch: -0.02, yaw: 0, roll: 0, brows: 0.08, gaze: 0, lids: 0 },
+/** The head-and-attitude channels a mood sets, plus whether that mood sits down. */
+type MoodPose = {
+  pitch: number
+  yaw: number
+  roll: number
+  brows: number
+  gaze: number
+  lids: number
+  /** 0 = 站着, 1 = 坐下。只有有腿的那具身体会用它（``Pose.sit``）；全息半身像会略过。 */
+  sit: number
+}
+
+const MOOD_POSE: Record<Mood, MoodPose> = {
+  dormant: { pitch: 0.1, yaw: 0.05, roll: 0.02, brows: -0.18, gaze: -0.35, lids: 0.42, sit: 0 },
+  armed: { pitch: -0.02, yaw: 0, roll: 0, brows: 0.02, gaze: 0, lids: 0, sit: 0 },
+  listening: { pitch: -0.07, yaw: 0.1, roll: -0.05, brows: 0.22, gaze: 0.1, lids: 0, sit: 0 },
+  // 低头想，不是稍微歪一下。上一条是 pitch 0.04 / lids 0.08：在 250 像素的窗口里
+  // 和不动没有区别，用户因此说"她没反应"。这几个数是按"一眼看得出来她在想"调的。
+  // sit: 1 是同一条判断的延续 —— 用户在等的时候她该做一件"要等"的事，而不是站着发呆。
+  thinking: { pitch: 0.3, yaw: -0.34, roll: 0.1, brows: 0.16, gaze: -0.5, lids: 0.52, sit: 1 },
+  speaking: { pitch: -0.02, yaw: 0, roll: 0, brows: 0.08, gaze: 0, lids: 0, sit: 0 },
 }
 
 /** How far the head may turn to follow the pointer, in radians. */
@@ -70,7 +85,7 @@ export class FaceDriver {
   private readonly look = { yaw: 0, pitch: 0 }
   private readonly lastPointer = { x: 0, y: 0 }
   private pointerAge = 99
-  private readonly targets = { pitch: 0, yaw: 0, roll: 0, brows: 0, gaze: 0, lids: 0 }
+  private readonly targets = { pitch: 0, yaw: 0, roll: 0, brows: 0, gaze: 0, lids: 0, sit: 0 }
 
   /**
    * One frame of face.
@@ -200,6 +215,11 @@ export class FaceDriver {
     this.targets.brows += (preset.brows - this.targets.brows) * rate
     this.targets.gaze += (preset.gaze - this.targets.gaze) * rate
     this.targets.lids += (preset.lids - this.targets.lids) * rate
+    // A body-wide move gets its own, slower ease: the head may snap to "thinking" in a
+    // quarter second, but a person who drops to a seat in the same instant looks broken.
+    const sitRate = 1 - Math.exp(-delta / 0.55)
+    this.targets.sit += (preset.sit - this.targets.sit) * sitRate
+    this.pose.sit = this.targets.sit
     // While it talks, the lids open a fraction wider: closed-by-default eyes plus a
     // moving mouth reads as sleeping, which is a hard thing to unsee.
     const speaking = talking ? -0.06 : 0

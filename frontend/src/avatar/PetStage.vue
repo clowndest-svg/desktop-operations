@@ -53,14 +53,14 @@
  * hidden -- which the shell has to *say*, because a hidden WebView2 page still
  * reports itself visible.
  */
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import * as THREE from 'three'
 import { createCharacter, type Character, type Mood } from '@/avatar/character'
 import { loadVrmCharacter } from '@/avatar/vrm'
 import { FaceDriver } from '@/avatar/driver'
 import { levels, startAudioChannel, stopAudioChannel, talking } from '@/audio/channel'
-import { pushPetFrame, reportPetGrip, setPetDragging, togglePet } from '@/api/bridge'
-import { currentSkin } from '@/theme'
+import { pushPetFrame, reportPetArrived, reportPetGrip, setPetDragging, togglePet } from '@/api/bridge'
+import { currentSkin, skin } from '@/theme'
 import { useVoiceStore } from '@/stores/voice'
 
 const FRAME_MS_TALKING = 33
@@ -107,6 +107,9 @@ let pointer: { x: number; y: number } | null = null
 /** One frame in flight at a time; see ``shipFrame``. */
 let pushing = false
 
+/** How sat she was last frame, so the camera only gets re-laid-out while she moves. */
+let lastSit = 0
+
 const driver = new FaceDriver()
 
 /** The last thing the assistant said, shortened to what reads at a glance. */
@@ -122,11 +125,22 @@ const caption = computed(() => {
   return ''
 })
 
+/**
+ * What she looks like right now, in this order on purpose.
+ *
+ * Samples first: if the voice is coming out, her mouth has real levels to read and
+ * nothing else may override that. Then the turn -- a question asked from a keyboard
+ * has no microphone behind it but is still a question she is thinking about. Only when
+ * neither is true does the microphone's availability decide whether she is awake at
+ * all. The old order put `phase !== 'running'` first, which made her sleep through
+ * every typed conversation and every answer read out of the speaker.
+ */
 function moodNow(): Mood {
-  if (voice.phase !== 'running') return 'dormant'
-  if (talking.value || voice.turn === 'processing') return 'speaking'
+  if (talking.value) return 'speaking'
+  if (voice.turn === 'processing') return 'thinking'
   if (voice.turn === 'listening') return 'listening'
-  return 'armed'
+  // muted 是"模型还装着、只是不听"：她该醒着，只是耳朵关了。真没加载才算睡着。
+  return voice.phase === 'running' || voice.phase === 'muted' ? 'armed' : 'dormant'
 }
 
 const clamp01 = (value: number): number => Math.min(1, Math.max(0, value))
@@ -149,6 +163,9 @@ function frame(): void {
   if (progress >= 1 && fastArrival) {
     fastArrival = false
     startLoop(talking.value ? FRAME_MS_TALKING : FRAME_MS_IDLE)
+    // She is fully drawn. The shell is holding the wake greeting until it hears this,
+    // and this frame loop is the only place that knows the animation actually ended.
+    void reportPetArrived()
   }
 
   const figure = character
@@ -157,8 +174,22 @@ function frame(): void {
     // two render passes, and walking their opacities would be a second code path for
     // the same look. Growing out of the collapsing light reads as emerging anyway.
     figure.root.scale.setScalar(0.22 + opened * 0.78)
-    figure.setPose(driver.update({ levels: levels(), mood: moodNow(), elapsed: now, delta, calm, pointer }))
+    const pose = driver.update({
+      levels: levels(),
+      mood: moodNow(),
+      elapsed: now,
+      delta,
+      calm,
+      pointer,
+    })
+    figure.setPose(pose)
     figure.advance(now, delta, calm)
+    // 坐下换的是取景（她矮了一截，相机得跟着往下），而相机只在 ``resize`` 里被摆过。
+    // 跟着缓动跑：坐下去那半秒里重排十几次，之后一分钱不花。
+    if (Math.abs(pose.sit - lastSit) > 0.01) {
+      lastSit = pose.sit
+      resize()
+    }
   }
 
   if (ring) {
@@ -287,6 +318,27 @@ async function dismiss(): Promise<void> {
   await togglePet().catch(() => undefined)
 }
 
+/**
+ * Take the wormhole apart before rebuilding it in another palette.
+ *
+ * Every piece here owns a geometry and a material; a skin switch that only added new
+ * ones would leak a little GPU memory on every click, and this window is the one that
+ * lives on the desktop for days.
+ */
+function disposeWormhole(): void {
+  for (const piece of [ring, halo, sparks]) {
+    if (!piece) continue
+    piece.parent?.remove(piece)
+    piece.geometry.dispose()
+    const material = piece.material
+    if (Array.isArray(material)) material.forEach((entry) => entry.dispose())
+    else material.dispose()
+  }
+  ring = null
+  halo = null
+  sparks = null
+}
+
 function glowTexture(): THREE.Texture {
   const size = 128
   const surface = document.createElement('canvas')
@@ -396,8 +448,11 @@ function installPetCommand(): void {
     if (command === 'emerge') {
       emergeAt = elapsed()
       asleep = false
-      // The arrival is the one moment worth 30 fps; it is also the only one that
-      // lasts less than two seconds.
+      // The arrival is 30 fps *and* it has to end: ``fastArrival`` is what makes the
+      // frame loop fall back to the idle rate once the wormhole has closed. Without it
+      // every wake word left her shading a 3D scene at 30 fps forever, which is a third
+      // of the cost this window was measured at.
+      fastArrival = true
       startLoop(FRAME_MS_TALKING)
     } else if (command === 'wake') {
       asleep = false
@@ -415,9 +470,36 @@ function installPetCommand(): void {
   }
 }
 
+/**
+ * The desktop's skin reached this window.
+ *
+ * She is a separate page: the dashboard changing colours while the figure on the
+ * desktop stayed blue is the bug this watch closes. The cue arrives through the
+ * bridge (``jarvis.ui.pet.apply_skin``) or, if Chromium happens to share storage
+ * between the two windows, through ``theme.ts``'s storage listener -- either way the
+ * ref changes and this rebuilds her inks from ``currentSkin()``.
+ */
+watch(skin, () => {
+  const stage = scene
+  if (!stage) return
+  disposeWormhole()
+  buildWormhole()
+  void swapFigure(stage)
+  startLoop(talking.value ? FRAME_MS_TALKING : FRAME_MS_IDLE)
+})
+
 function onMotionChange(): void {
   calm = mediaQuery?.matches ?? false
 }
+
+/**
+ * The frame rate follows the voice, not the shell's last cue.
+ *
+ * ``AvatarStage`` has had this watch since the beginning; the pet was written without
+ * it, so she drew a whole answer at the idle rate -- ten frames a second, at which a
+ * mouth reads as a twitch rather than as speech.
+ */
+watch(talking, (active) => startLoop(active ? FRAME_MS_TALKING : FRAME_MS_IDLE))
 
 onMounted(() => {
   const element = host.value

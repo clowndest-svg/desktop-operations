@@ -1,4 +1,4 @@
-"""Architecture enforcement: the layering rules in ``docs/architecture.md`` are code.
+"""Architecture enforcement: the layering rules in ``docs/架构分层.md`` are code.
 
 The document has always said "依赖只能自上而下". It was honoured by convention, and
 convention leaked: ``jarvis/ui/state_bridge.py`` imported ``jarvis.orchestration.types``
@@ -35,7 +35,7 @@ PACKAGE_DIR = REPO_ROOT / "jarvis"
 # stay a version string, so it is checked like any other module.
 COMPOSITION_ROOT = "jarvis/__main__.py"
 
-# Mirrors the "允许依赖" column of docs/architecture.md section 2.
+# Mirrors the "允许依赖" column of docs/架构分层.md section 2.
 ALLOWED: dict[str, frozenset[str]] = {
     "core": frozenset(),
     "config": frozenset({"core"}),
@@ -172,7 +172,7 @@ def test_every_package_is_registered_in_the_layer_table() -> None:
     unregistered = sorted(on_disk - set(ALLOWED))
     assert not unregistered, (
         f"packages missing from ALLOWED (decide where they sit, "
-        f"and update docs/architecture.md too): {unregistered}"
+        f"and update docs/架构分层.md too): {unregistered}"
     )
     stale = sorted(set(ALLOWED) - on_disk)
     assert not stale, f"ALLOWED lists packages that no longer exist: {stale}"
@@ -228,15 +228,60 @@ def test_app_never_imports_the_presentation_layer() -> None:
         assert "ui" not in _imported_jarvis_packages(path), _relative(path)
 
 
+def _imported_module_roots(path: pathlib.Path) -> set[str]:
+    """Top-level names a file imports, stdlib and third-party included.
+
+    :func:`_imported_jarvis_packages` answers "which first-party package", which
+    is the wrong question for "does this module do its own HTTP": that import is
+    ``import urllib.request`` and has no ``jarvis`` prefix at all. Parsing rather
+    than searching the text matters for the same reason it does there -- a
+    docstring may name a module it deliberately does not use.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    roots: set[str] = set()
+    for node in ast.walk(tree):
+        names: list[str] = []
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names = [node.module]
+        for name in names:
+            roots.add(name.split(".")[0])
+    return roots
+
+
+def test_the_voice_store_does_not_reach_for_the_network() -> None:
+    """The store stays a directory plus an index; the upload lives beside it.
+
+    This is not a style preference -- it is what keeps ``VoiceLibrary`` testable
+    without a key, a network or the ``tts`` package, and it is precisely the seam
+    that was crossed by mistake once: the upload was written into the HUD layer
+    to avoid adding a module, which put ``ui -> tts`` on the import graph and
+    failed :func:`test_no_layer_violations`.
+
+    Both halves of the boundary are checked by *parsing*, not by searching the
+    text. The module's own docstring discusses ``jarvis.tts.cloud`` at length, so
+    a substring test would flag the explanation as though it were a dependency.
+    """
+    source = PACKAGE_DIR / "app" / "voice_library.py"
+    assert "tts" not in _imported_jarvis_packages(source), "must not know the cloud client"
+    assert not _imported_module_roots(source) & {
+        "urllib",
+        "http",
+        "socket",
+        "ssl",
+    }, "the store must not do its own networking"
+
+
 def test_architecture_doc_table_matches_the_enforced_table() -> None:
-    """``docs/architecture.md`` section 2 is the contract; this keeps it honest.
+    """``docs/架构分层.md`` section 2 is the contract; this keeps it honest.
 
     The document claims to be machine-checked, so the dependency column is compared
     against :data:`ALLOWED` cell by cell. A row that says "core, config, llm" while
     the code allows more (or less) is a documentation bug that would mislead the next
     person to add an import.
     """
-    text = (REPO_ROOT / "docs" / "architecture.md").read_text(encoding="utf-8")
+    text = (REPO_ROOT / "docs" / "架构分层.md").read_text(encoding="utf-8")
     documented: dict[str, str] = {}
     for line in text.splitlines():
         cells = [cell.strip() for cell in line.strip().strip("|").split("|")]

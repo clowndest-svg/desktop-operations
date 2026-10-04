@@ -63,10 +63,95 @@
             {{ totals.prompt_tokens.toLocaleString() }} tokens
           </template>
           · 平均延迟 {{ Math.round(totals.avg_latency_ms) }} ms ·
-          窗口 {{ windowLabel }}
+          窗口 {{ windowLabel }}<template v-if="!days && span.rows">
+            · 账本共 {{ span.rows.toLocaleString() }} 条记录</template>
         </p>
 
-        <div v-if="daily.length" class="usage__chart" role="img" :aria-label="chartLabel">
+        <!--
+          各模型这张扇形图：扇区是"谁花了多少"，右边那列是同一个问题的精确读数。
+          两边都从同一次查询出来（`models` 和 `summary` 共用一组窗口边界），所以扇区加起来
+          必然等于顶上那个总数 —— 对不上就说明两半用了两个窗口，那是这个面板唯一不能犯的错。
+        -->
+        <div v-if="modelRows.length" class="usage__split">
+          <div class="usage__pie">
+            <svg :viewBox="`0 0 ${DONUT} ${DONUT}`" class="usage__donut" role="img" :aria-label="donutLabel">
+              <circle :cx="RING_C" :cy="RING_C" :r="RING_R" class="usage__track" :stroke-width="RING_W" />
+              <circle
+                v-for="slice in slices"
+                :key="slice.key"
+                :cx="RING_C"
+                :cy="RING_C"
+                :r="RING_R"
+                :stroke="slice.color"
+                :stroke-width="RING_W"
+                :stroke-dasharray="`${slice.len} ${CIRCUMFERENCE - slice.len}`"
+                :stroke-dashoffset="`${-slice.offset}`"
+                :transform="`rotate(-90 ${RING_C} ${RING_C})`"
+                class="usage__slice"
+              >
+                <title>{{ slice.label }}</title>
+              </circle>
+              <text :x="RING_C" :y="RING_C - 2" class="usage__donut-num">{{ compactGrand }}</text>
+              <text :x="RING_C" :y="RING_C + 15" class="usage__donut-cap">TOTAL TOKENS</text>
+            </svg>
+            <ul class="usage__swatches">
+              <li v-for="slice in slices" :key="`k-${slice.key}`">
+                <i :style="{ background: slice.color }"></i>
+                <span class="hud-num">{{ slice.label }}</span>
+                <b class="hud-num">{{ slice.percent.toFixed(2) }}%</b>
+              </li>
+            </ul>
+          </div>
+
+          <table class="usage__mt">
+            <thead>
+              <tr>
+                <th>模型</th>
+                <th class="usage__num">token</th>
+                <th class="usage__num">占比</th>
+                <th class="usage__num">输入 / 输出</th>
+                <th class="usage__num">次数</th>
+                <th class="usage__num">缓存</th>
+                <th class="usage__num">均延迟</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in modelRows" :key="row.key" :class="{ 'usage__mt--rest': row.rest }">
+                <td>
+                  <i class="usage__chip" :style="{ background: row.color }"></i>
+                  <span>{{ row.label }}</span>
+                </td>
+                <td class="usage__num hud-num">{{ row.total.toLocaleString() }}</td>
+                <td class="usage__num hud-num">{{ row.percent.toFixed(2) }}%</td>
+                <td class="usage__num hud-num">
+                  {{ row.prompt.toLocaleString() }} / {{ row.completion.toLocaleString() }}
+                </td>
+                <td class="usage__num hud-num">{{ row.calls.toLocaleString() }}</td>
+                <td class="usage__num hud-num">{{ row.cache }}</td>
+                <td class="usage__num hud-num">{{ Math.round(row.latency) }} ms</td>
+              </tr>
+              <tr class="usage__mt--sum">
+                <td>合计</td>
+                <td class="usage__num hud-num">{{ totals.total_tokens.toLocaleString() }}</td>
+                <td class="usage__num hud-num">100.00%</td>
+                <td class="usage__num hud-num">
+                  {{ totals.prompt_tokens.toLocaleString() }} /
+                  {{ totals.completion_tokens.toLocaleString() }}
+                </td>
+                <td class="usage__num hud-num">{{ totals.calls.toLocaleString() }}</td>
+                <td class="usage__num hud-num">{{ cacheLine }}</td>
+                <td class="usage__num hud-num">{{ Math.round(totals.avg_latency_ms) }} ms</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p v-else-if="!loading" class="usage__loading">还没有按模型分开的记录。</p>
+
+        <p v-if="!days && totals" class="usage__note">
+          从始至终这一段不画每日柱：一天一根、跑过一年就是几百根，那不是图。总数、输入/输出、
+          调用次数、缓存命中和各模型占比这里都是全量的。
+        </p>
+        <div v-else-if="daily.length" class="usage__chart" role="img" :aria-label="chartLabel">
           <div v-for="row in daily" :key="row.day" class="usage__col" :title="tipFor(row)">
             <div class="usage__stack" :style="{ height: scaled(row) + 'px' }">
               <div class="usage__bar usage__bar--out" :style="{ height: share(row, row.completion_tokens) + '%' }"></div>
@@ -90,23 +175,47 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 
-import { fetchUsage, type UsageDay, type UsageTotals } from '@/api/bridge'
+import {
+  fetchUsage,
+  type UsageDay,
+  type UsageModelRow,
+  type UsageSpan,
+  type UsageTotals,
+} from '@/api/bridge'
 
 const props = defineProps<{ open: boolean }>()
 const emit = defineEmits<{ (e: 'close'): void }>()
 
 /** The longest range the backend will answer with, mirrored here as a choice. */
+/** `days: 0` is the whole ledger -- the one value the month ceiling does not apply to. */
 const RANGES = [
   { days: 1, label: '今天' },
   { days: 7, label: '7 天' },
   { days: 31, label: '一个月' },
+  { days: 0, label: '从始至终' },
 ]
 
 const CHART_HEIGHT = 120
 
+/** Ring geometry for the donut. Numbers, not percentages, so the arcs are checkable. */
+const DONUT = 168
+const RING_W = 20
+const RING_R = (DONUT - RING_W) / 2 - 6
+const RING_C = DONUT / 2
+const CIRCUMFERENCE = 2 * Math.PI * RING_R
+
+/** The palette is the HUD's own tokens; the eighth slot is "其余 N 家". */
+const SLICE_COLORS = ['#4dd8ff', '#9d7cff', '#46e6a8', '#ffb547', '#ff5d5d', '#59a7ff', '#7fd3e8']
+const REST_COLOR = '#42627a'
+
+/** More than this and the ring turns into a barber pole; the table still shows every row. */
+const MAX_SLICES = 7
+
 const days = ref(7)
 const totals = ref<UsageTotals | null>(null)
 const daily = ref<UsageDay[]>([])
+const models = ref<UsageModelRow[]>([])
+const span = ref<UsageSpan>({ first_at: '', last_at: '', rows: 0, days: 0 })
 const loading = ref(false)
 const loadError = ref('')
 
@@ -118,8 +227,85 @@ const cacheLine = computed(() =>
 
 const windowLabel = computed(() => {
   if (!totals.value) return ''
+  if (!days.value) {
+    // Quote the ledger's own first row rather than an install date: a database carried
+    // over from an older build starts earlier than the app did on this machine.
+    const first = (span.value.first_at || totals.value.since).slice(0, 10)
+    const last = (span.value.last_at || totals.value.until).slice(0, 10)
+    return `从始至终 ${first} → ${last}（${span.value.days} 天）`
+  }
   const { since, until } = totals.value
   return `${since.slice(0, 10)} → ${until.slice(0, 10)}`
+})
+
+/** Rows big enough to matter, then one collapsed remainder so the ring sums exactly. */
+const modelRows = computed(() => {
+  const grand = totals.value?.total_tokens ?? 0
+  if (!grand) return []
+  const sorted = [...models.value].sort((a, b) => b.total_tokens - a.total_tokens)
+  const head = sorted.slice(0, MAX_SLICES)
+  const tail = sorted.slice(head.length)
+  const rows = head.map((row, index) => ({
+    key: `${row.provider}/${row.model}`,
+    label: `${row.provider} / ${row.model}`,
+    color: SLICE_COLORS[index % SLICE_COLORS.length],
+    total: row.total_tokens,
+    prompt: row.prompt_tokens,
+    completion: row.completion_tokens,
+    calls: row.calls,
+    latency: row.avg_latency_ms,
+    cache: row.cache_hit_percent === null ? '无读数' : `${row.cache_hit_percent.toFixed(1)}%`,
+    percent: (row.total_tokens / grand) * 100,
+    rest: false,
+  }))
+  if (tail.length) {
+    const sum = (pick: (row: UsageModelRow) => number) => tail.reduce((acc, row) => acc + pick(row), 0)
+    const cached = sum((row) => row.cached_tokens)
+    const prompt = sum((row) => row.prompt_tokens)
+    rows.push({
+      key: '__rest__',
+      label: `其余 ${tail.length} 家合计`,
+      color: REST_COLOR,
+      total: sum((row) => row.total_tokens),
+      prompt,
+      completion: sum((row) => row.completion_tokens),
+      calls: sum((row) => row.calls),
+      latency: sum((row) => row.avg_latency_ms * row.calls) / Math.max(1, sum((row) => row.calls)),
+      cache: prompt > 0 && cached > 0 ? `${((100 * cached) / prompt).toFixed(1)}%` : '无读数',
+      percent: (sum((row) => row.total_tokens) / grand) * 100,
+      rest: true,
+    })
+  }
+  return rows
+})
+
+const slices = computed(() => {
+  let offset = 0
+  // A hairline between slices so two adjacent equal-sized ones are still two slices.
+  const gap = modelRows.value.length > 1 ? 2 : 0
+  return modelRows.value.map((row) => {
+    const len = Math.max(0, (row.percent / 100) * CIRCUMFERENCE - gap)
+    const slice = { ...row, offset, len }
+    offset += (row.percent / 100) * CIRCUMFERENCE
+    return slice
+  })
+})
+
+const donutLabel = computed(() => {
+  const grand = totals.value?.total_tokens ?? 0
+  return modelRows.value.length
+    ? `${modelRows.value.length} 段，共 ${grand.toLocaleString()} tokens，${
+        days.value ? `最近 ${days.value} 天` : '从始至终'
+      }`
+    : '没有记录'
+})
+
+/** 1.23M / 456k -- the ring's centre has ~7 characters of room and no need for more. */
+const compactGrand = computed(() => {
+  const value = totals.value?.total_tokens ?? 0
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`
+  return String(value)
 })
 
 const chartLabel = computed(() =>
@@ -158,6 +344,8 @@ async function load() {
     const report = await fetchUsage(days.value)
     totals.value = report.summary
     daily.value = report.daily
+    models.value = report.models ?? []
+    span.value = report.span ?? { first_at: '', last_at: '', rows: 0, days: 0 }
     loadError.value = report.error ?? ''
   } catch (err) {
     loadError.value = `读取用量失败：${err instanceof Error ? err.message : String(err)}`
@@ -336,5 +524,155 @@ watch(
 .usage__loading {
   color: var(--hud-amber);
   font-size: 12px;
+}
+
+/* ---- 各模型：扇形图 + 精确读数，同一块地方上下对齐 ------------------ */
+
+.usage__split {
+  display: grid;
+  grid-template-columns: 176px minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--hud-line);
+}
+
+.usage__pie {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.usage__donut {
+  width: 168px;
+  height: 168px;
+}
+
+/* The unfilled track: without it a 3-slice ring reads as a broken circle. */
+.usage__track {
+  fill: none;
+  stroke: var(--hud-line);
+  opacity: 0.55;
+}
+
+.usage__slice {
+  fill: none;
+  stroke-linecap: butt;
+  filter: drop-shadow(0 0 5px var(--hud-glow));
+}
+
+.usage__donut-num {
+  fill: var(--hud-cyan);
+  font-family: var(--hud-mono);
+  font-size: 23px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-anchor: middle;
+  text-shadow: 0 0 14px var(--hud-glow);
+}
+
+.usage__donut-cap {
+  fill: var(--hud-dim);
+  font-family: var(--hud-mono);
+  font-size: 8px;
+  letter-spacing: 2px;
+  text-anchor: middle;
+}
+
+.usage__swatches {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 10px;
+}
+
+.usage__swatches li {
+  display: grid;
+  grid-template-columns: 9px minmax(0, 1fr) auto;
+  gap: 5px;
+  align-items: center;
+  color: var(--hud-dim);
+}
+
+.usage__swatches i {
+  width: 9px;
+  height: 3px;
+  border-radius: 2px;
+}
+
+.usage__swatches span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--hud-text);
+}
+
+.usage__swatches b {
+  font-weight: 500;
+  color: var(--hud-cyan);
+}
+
+.usage__mt {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.usage__mt th {
+  padding: 0 6px 5px 0;
+  border-bottom: 1px solid var(--hud-line);
+  color: var(--hud-dim);
+  font-family: var(--hud-mono);
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 1.2px;
+  text-align: left;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.usage__mt td {
+  padding: 4px 6px 4px 0;
+  border-bottom: 1px dashed rgba(77, 216, 255, 0.1);
+  color: var(--hud-text);
+  white-space: nowrap;
+}
+
+/* Tabular figures so three rows of six-digit numbers line up in their decimals. */
+.usage__num,
+.usage__mt .hud-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.usage__num {
+  padding-left: 6px;
+}
+
+.usage__mt th.usage__num {
+  padding-left: 6px;
+}
+
+.usage__chip {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 5px;
+  border-radius: 2px;
+  vertical-align: -1px;
+}
+
+.usage__mt--rest td {
+  color: var(--hud-dim);
+  font-style: italic;
+}
+
+.usage__mt--sum td {
+  border-bottom: none;
+  border-top: 1px solid var(--hud-line);
+  color: var(--hud-cyan);
 }
 </style>

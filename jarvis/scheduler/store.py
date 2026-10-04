@@ -250,5 +250,24 @@ class SchedulerRepository(Repository):
             value = self.scalar("SELECT COUNT(*) FROM scheduler_runs WHERE ok = ?", (int(ok),))
         return int(value) if isinstance(value, (int, float)) else 0
 
+    def prune_runs(self, keep: int) -> int:
+        """Keep only the newest ``keep`` runs; return how many rows were dropped.
+
+        "Append-only" was taken to mean "never delete", and this process is meant to
+        run for weeks. A reminder firing every day, plus a count query that scans the
+        whole table on every panel read, turns a history into a slow leak. The newest
+        rows are the ones the panel shows and the failure count is about, so those are
+        the ones that stay.
+        """
+        if keep <= 0:
+            return 0
+        return self.execute(
+            """
+            DELETE FROM scheduler_runs
+            WHERE id NOT IN (SELECT id FROM scheduler_runs ORDER BY id DESC LIMIT ?)
+            """,
+            (keep,),
+        )
+
 
 __all__ = ["MIGRATIONS", "NAMESPACE", "SchedulerRepository"]

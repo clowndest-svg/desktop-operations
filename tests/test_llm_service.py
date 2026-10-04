@@ -22,14 +22,15 @@ def make_section() -> LlmSection:
             "providers": {
                 "alpha": {
                     "base_url": "https://alpha.example/v1",
-                    "model": "alpha-1",
+                    "models": ["alpha-1", "alpha-small"],
+                    "default_model": "alpha-1",
                     "api_key_env": "ALPHA_KEY",
                     "cost_input_per_1m": 0.0,
                     "cost_output_per_1m": 0.0,
                 },
                 "beta": {
                     "base_url": "https://beta.example/v1",
-                    "model": "beta-9",
+                    "models": ["beta-9"],
                     "api_key_env": "BETA_KEY",
                     "cost_input_per_1m": 0.0,
                     "cost_output_per_1m": 0.0,

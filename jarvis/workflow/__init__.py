@@ -14,7 +14,7 @@ evaluator and the value types they exchange.
 
 from jarvis.workflow.conditions import ConditionEvaluator
 from jarvis.workflow.loader import WorkflowLoader
-from jarvis.workflow.service import JOB_PREFIX, WorkflowService
+from jarvis.workflow.service import ACTION_PREFIX, JOB_PREFIX, WorkflowService
 from jarvis.workflow.store import MIGRATIONS, NAMESPACE, WorkflowRepository
 from jarvis.workflow.types import (
     StepResult,
@@ -25,6 +25,7 @@ from jarvis.workflow.types import (
 )
 
 __all__ = [
+    "ACTION_PREFIX",
     "JOB_PREFIX",
     "MIGRATIONS",
     "NAMESPACE",

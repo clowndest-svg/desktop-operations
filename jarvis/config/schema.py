@@ -262,12 +262,70 @@ class LoggingSection:
 
 
 @dataclass(frozen=True, slots=True)
+class ModelSpec:
+    """One model a provider offers (``llm.providers.<name>.models[]``).
+
+    Two spellings, because they answer two different needs: a bare string is what a
+    hand-written config wants (a list of ids is readable, and a typo is visible),
+    while the mapping form exists so the picker has something to show when the id is
+    not what a person calls the model.
+    """
+
+    id: str
+    """Identifier sent to the API."""
+
+    label: str = ""
+    """What the picker shows; the id when empty."""
+
+    _ALLOWED: ClassVar[frozenset[str]] = frozenset({"id", "label"})
+
+    @property
+    def display(self) -> str:
+        """The name to put in front of a person."""
+        return self.label or self.id
+
+    def to_dict(self) -> dict[str, object]:
+        """JSON-ready view for the settings panel and the chat picker."""
+        return {"id": self.id, "label": self.display}
+
+    @classmethod
+    def from_entry(cls, entry: object, prefix: str) -> ModelSpec:
+        """Parse one entry of a ``models`` list.
+
+        Raises:
+            ConfigurationError: if the entry is neither a string nor a mapping with
+                an ``id``, or the id is blank.
+        """
+        if isinstance(entry, str):
+            text = entry.strip()
+            if not text:
+                raise _key_error(prefix, "model id must not be empty", entry)
+            return cls(id=text)
+        if isinstance(entry, Mapping):
+            reject_unknown_keys(entry, cls._ALLOWED, prefix)
+            model_id = require_str(entry, "id", prefix).strip()
+            if not model_id:
+                raise _key_error(f"{prefix}.id", "model id must not be empty", entry)
+            return cls(id=model_id, label=str(entry.get("label") or "").strip())
+        raise _key_error(
+            prefix,
+            f"expected a model id or a mapping with 'id', got {type(entry).__name__}",
+            entry,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderSection:
     """One LLM provider endpoint (``llm.providers.<name>.*``).
 
     Providers are *data*: adding another OpenAI-compatible vendor is a pure
     YAML edit, no code change. The API key itself never appears here — only
     the name of the environment variable that holds it (``api_key_env``).
+
+    A provider carries a *list* of models rather than one, because that is how
+    vendors actually sell them: one endpoint, one key, several model names. Which
+    one is used is a per-conversation choice, so the section also names the one to
+    start from.
     """
 
     name: str
@@ -276,8 +334,11 @@ class ProviderSection:
     base_url: str
     """OpenAI-compatible API root, e.g. ``https://api.deepseek.com/v1``."""
 
-    model: str
-    """Model identifier sent with every request."""
+    models: tuple[ModelSpec, ...]
+    """Every model this endpoint offers. Never empty."""
+
+    default_model: str
+    """Which of ``models`` is used until a caller picks another."""
 
     api_key_env: str
     """Environment variable that holds the API key (never the key itself)."""
@@ -289,17 +350,86 @@ class ProviderSection:
     """USD per 1M completion tokens for cost accounting (0 = don't report)."""
 
     _ALLOWED: ClassVar[frozenset[str]] = frozenset(
-        {"base_url", "model", "api_key_env", "cost_input_per_1m", "cost_output_per_1m"}
+        {
+            "base_url",
+            "models",
+            "default_model",
+            "api_key_env",
+            "cost_input_per_1m",
+            "cost_output_per_1m",
+        }
     )
+
+    @property
+    def model(self) -> str:
+        """The id of this provider's default model.
+
+        Kept as a property rather than renamed everywhere: every caller that asks
+        for "the model of this provider" means exactly this one, and the client
+        factory plus the settings snapshot would have had to change for no gain.
+        """
+        return self.default_model
+
+    @property
+    def model_ids(self) -> tuple[str, ...]:
+        """Every model id, in configuration order."""
+        return tuple(spec.id for spec in self.models)
+
+    def model_spec(self, model_id: str = "") -> ModelSpec:
+        """The named model, or the provider's default when the name is blank/unknown.
+
+        Unknown names fall back rather than raising: a saved preference can name a
+        model that was removed from the config since, and refusing to answer would
+        turn a stale picker entry into a dead chat panel.
+        """
+        wanted = (model_id or "").strip()
+        for spec in self.models:
+            if spec.id == wanted:
+                return spec
+        for spec in self.models:
+            if spec.id == self.default_model:
+                return spec
+        return self.models[0]
 
     @classmethod
     def from_mapping(cls, name: str, data: Mapping[str, object]) -> ProviderSection:
         prefix = f"llm.providers.{name}"
+        # Named explicitly, because the generic "unknown key" message would leave the
+        # operator to work out that one field became two.
+        if "model" in data:
+            raise _key_error(
+                f"{prefix}.model",
+                "renamed: list model names under 'models' and pick the starting one "
+                "with 'default_model'",
+                data["model"],
+            )
         reject_unknown_keys(data, cls._ALLOWED, prefix)
+        raw_models = data.get("models")
+        if not isinstance(raw_models, (list, tuple)) or not raw_models:
+            raise _key_error(
+                f"{prefix}.models",
+                "at least one model is required (a list of ids, or mappings with 'id')",
+                raw_models,
+            )
+        models = tuple(
+            ModelSpec.from_entry(entry, f"{prefix}.models[{index}]")
+            for index, entry in enumerate(raw_models)
+        )
+        ids = [spec.id for spec in models]
+        if len(set(ids)) != len(ids):
+            raise _key_error(f"{prefix}.models", f"duplicate model ids: {', '.join(ids)}", ids)
+        default_model = str(data.get("default_model") or "").strip() or ids[0]
+        if default_model not in ids:
+            raise _key_error(
+                f"{prefix}.default_model",
+                f"not one of this provider's models ({', '.join(ids)})",
+                default_model,
+            )
         return cls(
             name=name,
             base_url=require_str(data, "base_url", prefix).rstrip("/"),
-            model=require_str(data, "model", prefix),
+            models=models,
+            default_model=default_model,
             api_key_env=require_str(data, "api_key_env", prefix),
             cost_input_per_1m=require_float(data, "cost_input_per_1m", prefix, minimum=0),
             cost_output_per_1m=require_float(data, "cost_output_per_1m", prefix, minimum=0),
@@ -598,8 +728,33 @@ class TtsSection:
     model: str
     """Model id / path for the offline engine (e.g. ``iic/CosyVoice2-0.5B``)."""
 
+    cloud_api_key_env: str = "DASHSCOPE_API_KEY"
+    """Environment variable holding the DashScope key for cloud cloned voices.
+
+    Declared *here* rather than hardcoded in :mod:`jarvis.tts.cloud` for one
+    reason: the settings panel stores a key by looking up ``api_key_env`` on the
+    section that owns it, and a section without that field has no way to be told
+    a key. The variable name matches what the cloud client already reads, so a
+    key typed into the panel takes effect on the next recording, not the next
+    restart.
+
+    Defaulted so that every call site which constructs this section directly --
+    the tests, and the composition root -- keeps compiling. A field added purely
+    so that *something else* can be addressed has no business breaking six
+    unrelated callers.
+    """
+
     _ALLOWED: ClassVar[frozenset[str]] = frozenset(
-        {"enabled", "engine", "voice", "speed", "volume", "device", "model"}
+        {
+            "enabled",
+            "engine",
+            "voice",
+            "speed",
+            "volume",
+            "device",
+            "model",
+            "cloud_api_key_env",
+        }
     )
 
     @classmethod
@@ -617,6 +772,9 @@ class TtsSection:
             volume=volume,
             device=require_str(data, "device", "tts"),
             model=require_str(data, "model", "tts"),
+            # Optional, so an older config file keeps loading: an absent field
+            # means the cloud client falls back to its own default variable.
+            cloud_api_key_env=str(data.get("cloud_api_key_env") or "DASHSCOPE_API_KEY"),
         )
 
 
@@ -1000,11 +1158,18 @@ class ComputerSection:
     allow_keyboard: bool
     """Permit typing and key presses."""
 
+    allow_typing: bool
+    """输入文字的总闸，独立于四个档位，默认关。
+
+    ``allow_keyboard`` 管的是"能不能碰键盘"（按键、组合键），这一条管的是**能不能把字写进
+    别人的输入框** —— 风险不同：切窗口要按键，但把一句话说给另一个人是另一回事。
+    """
+
     confirm_dangerous: bool
     """Require an explicit confirmation flag for risky actions."""
 
     _ALLOWED: ClassVar[frozenset[str]] = frozenset(
-        {"enabled", "dry_run", "allow_mouse", "allow_keyboard", "confirm_dangerous"}
+        {"enabled", "dry_run", "allow_mouse", "allow_keyboard", "allow_typing", "confirm_dangerous"}
     )
 
     @classmethod
@@ -1015,7 +1180,57 @@ class ComputerSection:
             dry_run=require_bool(data, "dry_run", "computer"),
             allow_mouse=require_bool(data, "allow_mouse", "computer"),
             allow_keyboard=require_bool(data, "allow_keyboard", "computer"),
+            allow_typing=require_bool(data, "allow_typing", "computer"),
             confirm_dangerous=require_bool(data, "confirm_dangerous", "computer"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class MobileSection:
+    """Phone access over the local network (``mobile.*``).
+
+    ``enabled`` defaults to ``false`` in ``defaults.yaml``, and the schema insists
+    the key is present: this section turns on a listener that other machines on the
+    Wi-Fi can reach, so "it switched on because nothing said otherwise" is the one
+    outcome this design refuses. The switch lives in the tray menu; this file only
+    says where it listens once somebody flips it.
+    """
+
+    enabled: bool
+    """Serve the LAN endpoint at all."""
+
+    bind_host: str
+    """Interface to bind. ``0.0.0.0`` means every LAN interface, which is what a
+    phone on Wi-Fi needs; ``127.0.0.1`` makes the endpoint unreachable remotely."""
+
+    port: int
+    """TCP port. Fixed rather than ephemeral because the pairing screen has to say
+    a number the phone can type; ``0`` would be a lie."""
+
+    pair_minutes: int
+    """How long a 6-digit pairing code stays valid."""
+
+    max_pair_attempts: int
+    """Wrong codes accepted before the current one is burned. Brute-forcing 10^6
+    codes has to be stopped by a counter, not by the math."""
+
+    max_devices: int
+    """Ceiling on paired devices, so an old token cannot accumulate forever."""
+
+    _ALLOWED: ClassVar[frozenset[str]] = frozenset(
+        {"enabled", "bind_host", "port", "pair_minutes", "max_pair_attempts", "max_devices"}
+    )
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, object]) -> MobileSection:
+        reject_unknown_keys(data, cls._ALLOWED, "mobile")
+        return cls(
+            enabled=require_bool(data, "enabled", "mobile"),
+            bind_host=require_str(data, "bind_host", "mobile"),
+            port=require_int(data, "port", "mobile", minimum=1),
+            pair_minutes=require_int(data, "pair_minutes", "mobile", minimum=1),
+            max_pair_attempts=require_int(data, "max_pair_attempts", "mobile", minimum=1),
+            max_devices=require_int(data, "max_devices", "mobile", minimum=1),
         )
 
 
@@ -1334,6 +1549,7 @@ class AppConfig:
     vision: VisionSection
     browser: BrowserSection
     computer: ComputerSection
+    mobile: MobileSection
     mcp: McpSection
     plugins: PluginsSection
     prompt: PromptSection
@@ -1360,6 +1576,7 @@ class AppConfig:
             "vision",
             "browser",
             "computer",
+            "mobile",
             "mcp",
             "plugins",
             "prompt",
@@ -1395,6 +1612,7 @@ class AppConfig:
             vision=VisionSection.from_mapping(require_section(data, "vision")),
             browser=BrowserSection.from_mapping(require_section(data, "browser")),
             computer=ComputerSection.from_mapping(require_section(data, "computer")),
+            mobile=MobileSection.from_mapping(require_section(data, "mobile")),
             mcp=McpSection.from_mapping(require_section(data, "mcp")),
             plugins=PluginsSection.from_mapping(require_section(data, "plugins")),
             prompt=PromptSection.from_mapping(require_section(data, "prompt")),

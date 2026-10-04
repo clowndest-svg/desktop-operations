@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN" data-appearance="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      这一行决定手机上能不能用：
+        width=device-width   没有它 Android 会按 980px 布局再缩，按钮小得按不准
+        viewport-fit=cover   给刘海屏/手势条留位，配合安全区内边距用
+
+      **故意不写 `interactive-widget=resizes-content`**：键盘那件事由原生层
+      （`MainActivity.liftAboveKeyboard` 把 IME 高度变成 WebView 的下外边距）负责。
+      两边都管的话，Android 15+ 上会把键盘高度减两次，界面凭空少一大块。
+      一条链路上只留一个负责人。
+    -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#070d15" />
+    <title>小夜</title>
+    <script>
+      // 外观必须在**第一帧之前**定下来。放到 Vue 的 onMounted 里做的话，
+      // 选了浅色的用户每次启动都会先闪一下深色底 —— 读起来就是"这 App 启动不对"。
+      // 所以它和桌面上宠物模式那次一样，走 index.html 里的同步脚本。
+      try {
+        var want = localStorage.getItem('xiaoye.appearance')
+        if (want === 'light') {
+          document.documentElement.dataset.appearance = 'light'
+          document.querySelector('meta[name="theme-color"]').setAttribute('content', '#f1f4f8')
+        }
+      } catch (e) {
+        /* 无痕模式取不到 localStorage：保持默认深色，不影响使用 */
+      }
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="../src/mobile-main.ts"></script>
+  </body>
+</html>

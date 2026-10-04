@@ -12,11 +12,13 @@ because passing ``true`` is what a model does when a boolean looks required.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 from jarvis.computer.service import ComputerService
 from jarvis.computer.types import PlannedAction
 from jarvis.config.schema import ComputerSection
+from jarvis.core.exceptions import DangerousOperationRejectedError
 from jarvis.tools.builtins import build_builtin_tools
 from jarvis.tools.builtins.computer_tools import build
 from jarvis.tools.policy import ToolPolicy
@@ -29,6 +31,7 @@ def _section(**overrides: object) -> ComputerSection:
         "dry_run": True,
         "allow_mouse": True,
         "allow_keyboard": True,
+        "allow_typing": True,
         "confirm_dangerous": False,
     }
     data.update(overrides)
@@ -219,3 +222,128 @@ class TestDeclaredRisk:
         _handlers, specs, _ = _tools()
 
         assert all(spec.risk is not RiskLevel.DANGEROUS for spec in specs.values())
+
+
+class _FakeApp:
+    """One search hit, shaped like ``jarvis.computer.app_launcher.AppCandidate``."""
+
+    def __init__(
+        self,
+        name: str,
+        source: str = "开始菜单",
+        target: str = r"C:\ProgramData\Start Menu\Programs\X\X.lnk",
+        *,
+        running: bool = False,
+        pid: int = 0,
+        note: str = "",
+    ) -> None:
+        self.name = name
+        self.source = source
+        self.target = target
+        self.running = running
+        self.pid = pid
+        self.note = note
+
+
+class _AppService:
+    """A desktop-control service that answers the app search from a script."""
+
+    name = "fake-apps"
+
+    def __init__(self, hits: list[Any], *, sources: tuple[str, ...] = ("开始菜单",)) -> None:
+        self._hits = hits
+        self._sources = sources
+        self.launched: list[tuple[str, str, int]] = []
+        self.queries: list[str] = []
+
+    def find_apps(self, query: str) -> Any:
+        self.queries.append(query)
+        return tuple(self._hits), self._sources
+
+    def launch(self, target: str, *, label: str = "", pid: int = 0) -> Any:
+        self.launched.append((target, label, pid))
+        return SimpleNamespace(ok=True, executed=True, detail=f"启动「{label}」（{target}）")
+
+    def stats(self) -> dict[str, object]:
+        return {
+            "enabled": True,
+            "dry_run": False,
+            "controller": self.name,
+            "executed": 0,
+            "failed": 0,
+        }
+
+
+class TestOpenApp:
+    r"""按名字打开程序 —— 这一条是用户拿真话问出来的。
+
+    他让助手"打开微信给老妈发句你好"，助手自己写 PowerShell 去 ``Program Files\Tencent``
+    找 ``WeChat.exe``、去 App Paths 找 ``WeChat.exe``，然后回答"这台电脑上找不到微信" ——
+    而它当时正跑在 ``D:\RuanJian\微信\Weixin\Weixin.exe``，开始菜单里还有它的快捷方式。
+    查找不该靠模型自由发挥，答案里必须写着它是在哪儿找到的。
+    """
+
+    def _handlers(self, service: _AppService) -> dict[str, ToolHandler]:
+        return {spec.name: handler for spec, handler in build(cast(Any, lambda: service))}
+
+    def test_the_top_hit_is_launched_and_the_source_is_named(self) -> None:
+        service = _AppService(
+            [
+                _FakeApp("微信", "开始菜单", r"C:\ProgramData\...\微信.lnk"),
+                _FakeApp("微信输入法", "用户程序目录", r"C:\Users\x\...\WeixinIME.exe"),
+            ]
+        )
+
+        answer = self._handlers(service)["open_app"]({"name": "微信"})
+
+        assert service.launched == [(r"C:\ProgramData\...\微信.lnk", "微信", 0)]
+        assert "开始菜单" in answer
+        assert "微信输入法" in answer, "另外那些候选要说出来，否则她只能靠猜"
+
+    def test_an_already_running_app_is_brought_forward_instead_of_started_again(self) -> None:
+        service = _AppService(
+            [
+                _FakeApp(
+                    "Weixin.exe",
+                    "正在运行",
+                    r"D:\RuanJian\微信\Weixin\Weixin.exe",
+                    running=True,
+                    pid=13532,
+                )
+            ]
+        )
+
+        self._handlers(service)["open_app"]({"name": "微信"})
+
+        assert service.launched == [(r"D:\RuanJian\微信\Weixin\Weixin.exe", "Weixin.exe", 13532)]
+
+    def test_not_finding_it_lists_where_it_looked(self) -> None:
+        service = _AppService([], sources=("正在运行", "开始菜单", "注册表 App Paths"))
+
+        answer = self._handlers(service)["open_app"]({"name": "微信"})
+
+        assert "没找到" in answer
+        assert "开始菜单" in answer and "注册表 App Paths" in answer
+        assert "完整路径" in answer
+        assert service.launched == []
+
+    def test_an_empty_name_is_refused_before_any_search(self) -> None:
+        service = _AppService([_FakeApp("微信")])
+
+        answer = self._handlers(service)["open_app"]({"name": "   "})
+
+        assert "不能为空" in answer
+        assert service.queries == []
+
+    def test_a_policy_refusal_comes_back_as_text(self) -> None:
+        class _Refusing(_AppService):
+            def launch(self, target: str, *, label: str = "", pid: int = 0) -> Any:
+                raise DangerousOperationRejectedError(
+                    "桌面控制未启用；请在配置中设置 computer.enabled=true"
+                )
+
+        service = _Refusing([_FakeApp("微信")])
+
+        answer = self._handlers(service)["open_app"]({"name": "微信"})
+
+        assert "被安全策略拒绝" in answer and "computer.enabled" in answer

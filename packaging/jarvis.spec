@@ -197,8 +197,28 @@ try:
     hiddenimports += collect_submodules("funasr")
 except Exception:
     pass
+
+
+def _keep_modelscope_submodule(name: str) -> bool:
+    """Everything except the one submodule that compiles CUDA when imported.
+
+    ``collect_submodules`` imports every submodule in a child process, so a single
+    module that hangs at import time stops the entire build **with no error at all**:
+    the log just stops and the build sits there. ``modelscope.ops.ailut`` does
+    exactly that -- its ``pyinterfaces`` calls ``torch.utils.cpp_extension.load()``
+    at import time, which compiles a CUDA extension from the bundled ``.cu`` sources.
+    With no CUDA toolchain and no cached build, that call waits indefinitely.
+
+    It is a 3D image LUT transform. Nothing in this project imports it (grep for
+    ``ailut`` under ``jarvis/`` returns nothing), and ``modelscope`` is only here
+    because ``funasr`` uses it to fetch model weights -- so excluding it costs the
+    frozen app nothing and buys back a build that finishes.
+    """
+    return not name.startswith("modelscope.ops.ailut")
+
+
 try:
-    hiddenimports += collect_submodules("modelscope")
+    hiddenimports += collect_submodules("modelscope", filter=_keep_modelscope_submodule)
 except Exception:
     pass
 
@@ -218,7 +238,26 @@ a = Analysis(
     ],
     # The QQ bot channel is a separate product (``python -m jarvis.qqbot``) and
     # pulls its own SDK; nothing in the HUD can reach it.
-    excludes=["PySide6", "shiboken6", "tkinter", "pytest", "IPython", "botpy", "notebook"],
+    #
+    # ``modelscope.ops.ailut`` is excluded for a different reason, and it is the one
+    # that cost a day: importing it calls ``torch.utils.cpp_extension.load()``, which
+    # takes a lock file and then tries to build a CUDA extension. There is no CUDA
+    # toolchain on the build machine, and a killed build leaves that lock behind --
+    # after which every import blocks on it forever. PyInstaller imports every
+    # collected package in ``find_binary_dependencies``, so one such module is enough
+    # to hang the whole build with no error at all: the log just stops.
+    # See ``_keep_modelscope_submodule`` above; that filter keeps it out of the
+    # hidden imports, and this keeps it out of the module graph.
+    excludes=[
+        "PySide6",
+        "shiboken6",
+        "tkinter",
+        "pytest",
+        "IPython",
+        "botpy",
+        "notebook",
+        "modelscope.ops.ailut",
+    ],
     noarchive=False,
 )
 

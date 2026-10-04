@@ -69,6 +69,9 @@ _STATE_TO_STATUS: dict[str, str] = {
     "idle": STATUS_WAITING,
 }
 
+_TURN_OVER_STATES: frozenset[str] = frozenset({"listening", "idle"})
+"""Pipeline states that mean "that utterance is finished with", answered or not."""
+
 #: Milestone events and what they mean for the icon, for the same reason.
 _KIND_TO_STATUS: dict[str, str] = {
     "speech_start": STATUS_HEARING,
@@ -106,6 +109,8 @@ class _Pet(Protocol):
     def summon(self) -> bool: ...
 
     def close(self) -> None: ...
+
+    def set_thinking(self, active: bool, *, source: str = "turn") -> None: ...
 
 
 class _Tray(Protocol):
@@ -161,6 +166,7 @@ class ShellLifecycle:
         pet: _Pet | None = None,
         hide_to_tray: bool = True,
         on_audio_window: Callable[[Any], None] | None = None,
+        on_spectator_window: Callable[[Any], None] | None = None,
     ) -> None:
         self._window = window
         self._tray: _Tray | None = tray
@@ -169,11 +175,14 @@ class ShellLifecycle:
         # it is *possible* is a second question, answered by :attr:`hides_to_tray`.
         self._hide_to_tray = hide_to_tray
         self._on_audio_window = on_audio_window
+        self._on_spectator_window = on_spectator_window
         self._exiting = False
         self._visible = True
         self._minimized = False
         self._hinted = False
         self._status = STATUS_OFF
+        self._greeter: Any = None
+        """Set by :meth:`attach_greeter`; ``None`` means nobody is waiting on the figure."""
 
     # ------------------------------------------------------------------
     # Attaching
@@ -187,6 +196,15 @@ class ShellLifecycle:
 
     def attach_pet(self, pet: _Pet) -> None:
         self._pet = pet
+
+    def attach_greeter(self, greeter: Any) -> None:
+        """The wake greeting's gate, so an arrival can be armed from where it is played.
+
+        Attached rather than passed in: the gate is built by the composition root and
+        the shell is built before the voice stack that consults it exists, and this is
+        the same shape as ``attach_pet`` for the same reason.
+        """
+        self._greeter = greeter
 
     @property
     def hides_to_tray(self) -> bool:
@@ -342,15 +360,25 @@ class ShellLifecycle:
         in the tray and the figure is on the desktop. A page that is neither is left
         in charge, which is how the assistant still talks out loud when both windows
         are hidden.
+
+        The other window is not left out, it is made a *spectator*: it gets the same
+        samples with the gain closed, so its mouth and the voice are still reading one
+        signal. That distinction was not cosmetic -- with only the owner hook wired,
+        the desktop figure received no audio at all while the HUD was on screen, and
+        "she does not move when I talk to her" was the symptom.
         """
-        handler = self._on_audio_window
-        if handler is None:
-            return
-        window: Any = self._window
         pet = self._pet
+        window: Any = self._window
         if not self._visible and pet is not None and pet.shown:
             window = pet.audio_window
-        handler(window)
+        handler = self._on_audio_window
+        if handler is not None:
+            handler(window)
+        spectator_handler = self._on_spectator_window
+        if spectator_handler is None:
+            return
+        spectator = pet.audio_window if pet is not None and pet.shown else None
+        spectator_handler(None if spectator is window else spectator)
 
     def _announce_background(self, foreground: bool) -> None:
         window = self._window
@@ -388,7 +416,11 @@ class ShellLifecycle:
             return
         text = str(getattr(event, "text", "") or "")
         if kind == VOICE_STATUS_KIND:
-            self._publish(STATUS_WAITING if text == _PHASE_RUNNING else STATUS_OFF)
+            running = text == _PHASE_RUNNING
+            self._publish(STATUS_WAITING if running else STATUS_OFF)
+            if not running:
+                # A microphone that stopped cannot still be chewing on a sentence.
+                self._voice_thinking(False)
             return
         if kind == PIPELINE_STATE_KIND:
             mapped = _STATE_TO_STATUS.get(text)
@@ -396,12 +428,33 @@ class ShellLifecycle:
                 # A pipeline that reports "idle" with the microphone released is
                 # still not listening; only a voice_status event may say otherwise.
                 self._publish(mapped if self._status != STATUS_OFF else STATUS_OFF)
+            if text in _TURN_OVER_STATES:
+                # Back to listening means this turn is done -- whether it answered,
+                # heard nothing, or raised. Clearing on the state rather than only on
+                # the answer is what stops a failed turn from leaving 「思考中」 on the
+                # desktop for the rest of the session.
+                self._voice_thinking(False)
             return
         mapped = _KIND_TO_STATUS.get(kind)
         if mapped is not None:
             self._publish(mapped if self._status != STATUS_OFF else STATUS_OFF)
+        if kind == "speech_end":
+            self._voice_thinking(True)
+        elif kind in ("reply", "error"):
+            self._voice_thinking(False)
         if kind == "wake":
             self.summon_pet()
+
+    def _voice_thinking(self, active: bool) -> None:
+        """The pet's 「思考中」 as the microphone sees it.
+
+        The typed questions drive the same card off the task table. They are two named
+        sources rather than one shared flag so that the voice path finishing cannot put
+        away a card a keyboard turn still needs -- and the other way round.
+        """
+        pet = self._pet
+        if pet is not None:
+            pet.set_thinking(active, source="voice")
 
     def _publish(self, status: str) -> None:
         self._status = status
@@ -422,16 +475,33 @@ class ShellLifecycle:
     # ------------------------------------------------------------------
 
     def summon_pet(self) -> bool:
-        """The wake word while the HUD is in the tray: the figure answers, not a window.
+        """The wake word: she comes out through the wormhole.
 
-        Only ever *re-plays* the arrival -- it does not switch the pet on by itself.
-        A figure appearing on the desktop that nobody asked for is the desktop-pet
-        equivalent of the assistant talking unprompted.
+        The gate is one clause, and it is about *where the operator is looking*. While
+        the HUD is on screen, a figure appearing over the window they are reading is a
+        jump scare, so the wake word leaves it alone. While the window is in the tray
+        the figure is the interface, so the wake word has to put her on the desktop --
+        including the first time, which is why this no longer insists she was already
+        shown. That reversal is the operator's, on 2026-10-02: 「点显示时说出唤醒词，
+        赛博女性人物从虫洞中散发光粒子显示出来」.
+
+        It still never *hides* her, and no tool can either: the switch that takes her
+        away stays a human press.
         """
         pet = self._pet
-        if pet is None or self._visible or not pet.shown:
+        if pet is None or self._visible:
             return False
-        return bool(pet.summon())
+        if not pet.summon():
+            return False
+        # Arm the gate only once the emergence is actually commanded, and only here:
+        # this runs inside the pipeline's ``wake`` emit, so the voice thread that asks
+        # "may I greet yet?" is asking about an arrival already in flight. When the HUD
+        # is on screen nothing is summoned and nothing is armed, which is the same
+        # answer as "she is already visible" -- the greeting does not wait for an
+        # animation nobody is watching.
+        if self._greeter is not None:
+            self._greeter.expect_figure()
+        return True
 
     def toggle_pet(self) -> bool:
         """Tray menu 「桌面宠物」. Returns whether the pet ended up shown."""

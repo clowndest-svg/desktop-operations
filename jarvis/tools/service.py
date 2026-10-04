@@ -12,7 +12,16 @@ import logging
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING
 
-from jarvis.tools.builtins import assistant_tools, build_builtin_tools, computer_tools, shell_tools
+from jarvis.tools.builtins import (
+    assistant_tools,
+    build_builtin_tools,
+    computer_tools,
+    insight_tools,
+    process_tools,
+    selfconfig_tools,
+    shell_tools,
+    system_tools,
+)
 from jarvis.tools.registry import ToolRegistry
 from jarvis.tools.types import ToolCall, ToolResult, ToolSpec
 
@@ -40,6 +49,15 @@ class ToolService:
         web_opener: object | None = None,
         speaker: assistant_tools.Speaker | None = None,
         reminders: assistant_tools.Reminders | None = None,
+        memory: assistant_tools.MemorySurface | None = None,
+        knowledge: assistant_tools.KnowledgeSurface | None = None,
+        monitor: SystemMonitor | None = None,
+        usage: insight_tools.UsageLedger | None = None,
+        proposals: process_tools.ProposalQueue | None = None,
+        settings: selfconfig_tools.SettingsMirror | None = None,
+        voices: selfconfig_tools.VoiceChanger | None = None,
+        conversations: selfconfig_tools.ConversationSearch | None = None,
+        alerts: system_tools.AlertCentre | None = None,
         registry: ToolRegistry | None = None,
     ) -> None:
         """Create the service.
@@ -61,6 +79,16 @@ class ToolService:
         ``None`` leaves ``run_powershell`` unregistered, which is the same rule the
         desktop tools follow: a capability the registry cannot reach must not be
         advertised, because the model will then promise it to the operator.
+
+        ``memory`` and ``knowledge`` are the assistant's own stores. They are checked
+        at :meth:`start`, not at construction, because ``start()`` runs after they
+        have started -- and a search tool pointed at a store that never came up would
+        answer "没找到" about something the operator did tell it.
+
+        ``monitor`` and ``usage`` are the two panels she could not see: the load
+        sampler and the token ledger. ``monitor`` must be the *same* instance the HUD
+        polls, not another one -- a freshly built ``SystemMonitor`` has no previous CPU
+        sample and has therefore been reporting 0.0% on a machine at 80%.
         """
         self._settings_provider = settings_provider
         self._monitor_factory = monitor_factory
@@ -70,6 +98,15 @@ class ToolService:
         self._web_opener = web_opener
         self._speaker = speaker
         self._reminders = reminders
+        self._memory = memory
+        self._knowledge = knowledge
+        self._monitor = monitor
+        self._usage = usage
+        self._proposals = proposals
+        self._settings = settings
+        self._voices = voices
+        self._conversations = conversations
+        self._alerts = alerts
         self._registry = registry or ToolRegistry(settings_provider)
         self._started = False
 
@@ -98,6 +135,15 @@ class ToolService:
             shell_gate_factory=self._shell_gate_factory,
             speaker=self._speaker,
             reminders=self._reminders,
+            memory=self._memory,
+            knowledge=self._knowledge,
+            monitor=self._monitor,
+            usage=self._usage,
+            proposals=self._proposals,
+            settings=self._settings,
+            voices=self._voices,
+            conversations=self._conversations,
+            alerts=self._alerts,
             web_opener=self._web_opener,
         ):
             self._registry.register(spec, handler)

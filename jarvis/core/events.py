@@ -32,7 +32,12 @@ class PipelineEvent:
     """
 
     kind: str
-    """One of: wake | speech_start | speech_end | reply | barge_in | error | state."""
+    """One of: wake | speech_start | speech_end | user_text | reply | barge_in | error | state.
+
+    ``user_text`` is what the microphone heard and ``reply`` is what she answered. They
+    are different kinds because a listener must never have to guess who spoke from what
+    arrived last -- one half-finished turn would then mislabel every turn after it.
+    """
 
     text: str = ""
     """Associated text (the transcribed utterance or the agent reply)."""
@@ -64,6 +69,13 @@ class UsageEvent:
     completion_tokens: int
     cached_tokens: int | None = None
     latency_ms: float = 0.0
+    task_id: str = ""
+    """Which turn or round-table task this call was made for, when there was one.
+
+    Empty is honest for a call made outside a tracked turn. The ledger groups by it so
+    "what did that cost" can be answered for one piece of work instead of only for a
+    week -- the grouping that a three-model task needs and a time window cannot give.
+    """
 
 
 class VoicePhase(StrEnum):

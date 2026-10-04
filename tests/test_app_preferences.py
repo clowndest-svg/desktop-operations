@@ -106,3 +106,36 @@ def test_read_is_cached_within_one_instance(tmp_path: Path) -> None:
     # Deliberate: one process must not change its mind because something else
     # edited the file mid-conversation.
     assert store.flag(VOICE_AUTO_ARM) is False
+
+
+def test_every_exported_key_is_registered_for_round_tripping() -> None:
+    """A key that is spelled but not registered writes nothing at all.
+
+    This is not hypothetical: ``llm.tuning`` shipped with a constant, a reader, a
+    writer and a dropdown, but no entry in ``PREFERENCE_TYPES`` -- so ``set``
+    refused every save with nothing louder than a log line, and the per-model
+    thinking level looked like it worked until the next question was answered
+    with the old one. Enumerating the module's own constants is what catches it,
+    because a hand-written list of keys is the thing that was already wrong.
+    """
+    import jarvis.app.preferences as module
+
+    declared = {
+        value
+        for name, value in vars(module).items()
+        if name.isupper() and isinstance(value, str) and "." in value
+    }
+
+    assert declared - set(module.PREFERENCE_TYPES) == set()
+
+
+def test_a_registered_key_really_writes_a_dict(tmp_path: Path) -> None:
+    """The concrete half of the check above: the tuning table has to land on disk."""
+    from jarvis.app.preferences import LLM_TUNING
+
+    path = tmp_path / "preferences.json"
+    store = Preferences(path)
+    table = {"alpha\x00alpha-1": {"thinking": "high", "turns": 20}}
+
+    assert store.set(LLM_TUNING, table) is True
+    assert Preferences(path).get(LLM_TUNING) == table

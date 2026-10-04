@@ -9,33 +9,42 @@ import os
 import sys
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from jarvis import __version__
+from jarvis.app.alerts import Alert, AlertService
 from jarvis.app.announcer import Announcer
 from jarvis.app.application import Application
-from jarvis.app.chat_service import ChatService
+from jarvis.app.chat_service import ChatService, ConversationTuning, ThinkingRequest
+from jarvis.app.collaboration import Collaboration
 from jarvis.app.command_access import CommandAccess
 from jarvis.app.computer_access import ComputerAccess
 from jarvis.app.demo import run_voice_demo
 from jarvis.app.disk_service import DiskService
+from jarvis.app.model_probe import ModelCaps, ModelProber
 from jarvis.app.preferences import Preferences
 from jarvis.app.process_service import ProcessService
 from jarvis.app.reminder_service import ReminderService
-from jarvis.app.settings_service import SettingsService
+from jarvis.app.settings_service import THINKING_LEVELS, SettingsService
 from jarvis.app.system_service import SystemService
 from jarvis.app.transcript_service import TranscriptService
+from jarvis.app.turns import TurnRegistry
 from jarvis.app.usage_service import UsageService
+from jarvis.app.voice_call import VoiceCall
+from jarvis.app.voice_graph import ChatGraph
+from jarvis.app.voice_library import VoiceLibrary
 from jarvis.app.voice_picker import VoicePicker
 from jarvis.app.voice_service import LoopBuilder, VoiceService
+from jarvis.app.wake_greeting import WakeGreeter
+from jarvis.app.wake_keywords import WakeWords
 from jarvis.asr import AsrService, AsrSettings
 from jarvis.browser import BrowserService
 from jarvis.computer import ComputerService
 from jarvis.config import AppPaths, ConfigService
 from jarvis.core.events import VoicePhase
-from jarvis.core.exceptions import JarvisError
+from jarvis.core.exceptions import JarvisError, ToolError
 from jarvis.database import SqliteStore
 from jarvis.knowledge import KnowledgeService
 from jarvis.llm import LlmService
@@ -58,7 +67,7 @@ from jarvis.vad import VadService, VadSettings
 from jarvis.vector import VectorService
 from jarvis.vision import VisionService
 from jarvis.wakeword import WakeWordService, WakeWordSettings
-from jarvis.workflow import WorkflowService
+from jarvis.workflow import ACTION_PREFIX, WorkflowService
 
 logger = logging.getLogger("jarvis.main")
 
@@ -167,6 +176,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="list the registered tools with their risk level, then exit",
     )
     parser.add_argument(
+        "--thinking",
+        type=int,
+        default=None,
+        metavar="TOKENS",
+        help="with --ask: ask the model for its reasoning and print it, capped at this "
+        "many tokens; the only way to check the thinking chain without opening the window",
+    )
+    parser.add_argument(
         "--memory",
         action="store_true",
         help="show what the assistant has remembered, then exit",
@@ -218,6 +235,7 @@ class _Capabilities:
     plugins: PluginService
     prompts: PromptService
     planner: PlannerService
+    transcript: TranscriptService
 
 
 def _logging_settings_factory(
@@ -243,16 +261,37 @@ def _logging_settings_factory(
     return settings
 
 
-def _tool_action_runner(tools: ToolService) -> Callable[[str, Mapping[str, object]], str]:
+def _tool_action_runner(
+    tools: ToolService,
+    workflows: Callable[[], WorkflowService | None] | None = None,
+) -> Callable[[str, Mapping[str, object]], str]:
     """Adapt the tool registry into the plain callable the scheduler wants.
 
     The scheduler and the workflow engine both need "run this named action",
     and neither is allowed to import ``jarvis.tools`` — ``scheduler`` sits at L3
     above ``database`` only, and the dependency table is machine-checked. An
     injected callable is also what lets their tests pass a fake.
+
+    A ``workflow:`` action is the one exception and it exists because the job table
+    stores a single string. A cron workflow used to store its own bare name, which the
+    registry looked up as a tool and refused -- so every scheduled workflow failed the
+    moment it fired, and nothing showed it because the definitions folder was empty.
+    Prefixed here rather than registering each workflow as a dynamic tool, because that
+    would put a name collision and an unchosen risk level into the registry.
     """
 
     def run(action: str, arguments: Mapping[str, object]) -> str:
+        if action.startswith(ACTION_PREFIX):
+            if workflows is None:
+                raise JarvisError(f"没有工作流服务，动作 {action} 跑不了")
+            service = workflows()
+            name = action[len(ACTION_PREFIX) :]
+            if service is None:
+                raise JarvisError(f"工作流服务还没起来，动作 {action} 跑不了")
+            outcome = service.run(name)
+            if not outcome.ok:
+                raise JarvisError(outcome.error or f"工作流 {name} 有步骤失败")
+            return f"工作流 {name}：{len(outcome.steps)} 步全部成功"
         result = tools.invoke(action, dict(arguments))
         if not result.ok:
             # Raising is how the caller records a failed run; returning the
@@ -263,12 +302,78 @@ def _tool_action_runner(tools: ToolService) -> Callable[[str, Mapping[str, objec
     return run
 
 
+def _tuning_reader(
+    settings: SettingsService,
+) -> Callable[[str, str], ConversationTuning | None]:
+    """Read one provider/model's knobs as a chat service wants them.
+
+    An adapter rather than a call the service makes itself, because the stored shape is
+    a named level (``off`` / ``low`` / ``medium`` / ``high``) while the request wants a
+    token budget. Translating that here keeps the mapping table owned by the settings
+    layer, where the levels are defined, instead of leaking a magic number into chat.
+    """
+
+    def read(provider: str, model: str) -> ConversationTuning | None:
+        row = settings.tuning_for(provider, model)
+        budget = THINKING_LEVELS.get(str(row.get("thinking") or ""), 0)
+        return ConversationTuning(
+            thinking=ThinkingRequest(enabled=budget > 0, budget=budget),
+            history_turns=_int_or_none(row.get("turns")),
+        )
+
+    return read
+
+
+def _int_or_none(value: object) -> int | None:
+    """An int from a settings row, or ``None`` meaning "this pair never said"."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _shared_monitor() -> SystemMonitor | None:
+    """One sampler for the whole process, or ``None`` when psutil is absent.
+
+    Two samplers were the previous behaviour, and both halves of it were wrong. The
+    tool service called ``monitor_factory()`` per invocation, so every ``system_report``
+    built a brand new ``SystemMonitor``, primed ``cpu_percent``, and read back the
+    elapsed microseconds as ``0.0%`` -- measured on this machine: 0.0 from a fresh
+    monitor against 81.7 from one that had been polled. And the desktop was paying for
+    a second 355-process walk (1.35 s of a core) that the window had already just done.
+    """
+    try:
+        return SystemMonitor(top_processes=10)
+    except JarvisError as exc:
+        logger.warning("system telemetry unavailable: %s", exc)
+        return None
+
+
+def _monitor_factory(monitor: SystemMonitor | None) -> Callable[[], SystemMonitor]:
+    """Adapt the shared sampler to the factory the tool service asks for.
+
+    Raises on the same terms ``SystemMonitor()`` would have: the system service turns
+    that into an ``error`` report rather than a dashboard of zeros.
+    """
+
+    def build() -> SystemMonitor:
+        if monitor is None:
+            raise ToolError("system monitoring requires the 'psutil' package")
+        return monitor
+
+    return build
+
+
 def _register_capabilities(
     app: Application,
     config_service: ConfigService,
     llm_service: LlmService,
     computer_access: ComputerAccess | None = None,
     command_access: CommandAccess | None = None,
+    monitor: SystemMonitor | None = None,
+    process: ProcessService | None = None,
+    settings: SettingsService | None = None,
+    voices: VoicePicker | None = None,
+    alerts: AlertService | None = None,
 ) -> _Capabilities:
     """Register every phase-11-to-18 service on ``app``, in dependency order.
 
@@ -318,6 +423,13 @@ def _register_capabilities(
         llm_provider=lambda: llm_service.client,
     )
     app.register(knowledge)
+    # Built here rather than in the desktop branch because the tool that lets her
+    # search what she said last needs it, and a tool must be wired where every other
+    # tool is wired. Conversations outlive the window either way: same SQLite file the
+    # token ledger and memory already use, so "where does my history live" has one
+    # answer.
+    transcript = TranscriptService(database)
+    app.register(transcript)
 
     # Built before the tool service, not after it: the mouse and keyboard tools
     # are only registered when a desktop-control service exists to back them, and
@@ -332,9 +444,10 @@ def _register_capabilities(
     # nor the tray exists yet -- and says so rather than pretending it spoke.
     announcer = Announcer()
     reminders = ReminderService(lambda: scheduler)
+    sampler = monitor if monitor is not None else _shared_monitor()
     tools = ToolService(
         lambda: config_service.config.tools,
-        monitor_factory=lambda: SystemMonitor(top_processes=10),
+        monitor_factory=_monitor_factory(sampler),
         cleaner_factory=lambda: DiskCleaner(
             audit_log=paths.audit_dir / "deletions.jsonl",
             protected_dirs=(paths.data_dir,),
@@ -347,12 +460,43 @@ def _register_capabilities(
         shell_gate_factory=(lambda: command_access) if command_access is not None else None,
         speaker=announcer,
         reminders=reminders,
+        # Her own memory and corpus. These are the pull half of the pair: the chat
+        # service keeps pushing the profile block and one automatic retrieval, and
+        # these let her re-search with a keyword she picked herself mid-turn.
+        memory=memory,
+        knowledge=knowledge,
+        # The same sampler the window polls, and the ledger the statistics popup
+        # aggregates. Handing the tools a second one of either is how her number and
+        # the number on screen stop being the same number.
+        monitor=sampler,
+        usage=usage,
+        # The window's pending-confirmation queue. Only the desktop has one, and only
+        # a window has a person to press 确认, so ``--ask`` gets no proposal tool.
+        proposals=process,
+        # Her own configuration, the voice list, and the stored conversations. All three
+        # are objects rather than factories because a tool that cannot reach its backing
+        # service must not be advertised at all -- and only the desktop passes settings
+        # and voices, which is why the CLI gets neither.
+        settings=settings,
+        voices=voices,
+        conversations=transcript,
+        # What the alert centre still has open, read-only through ``system_report``.
+        # She can see that C: is under the line; saying 「知道了」 stays a human act.
+        alerts=alerts,
     )
     app.register(tools)
     app.register(computer)
 
-    runner = _tool_action_runner(tools)
-    scheduler = SchedulerService(database, lambda: config_service.config.scheduler, runner)
+    # Late-bound on purpose, the same way ``ReminderService(lambda: scheduler)`` is:
+    # the workflow engine needs the runner to execute its steps, and the runner needs
+    # the engine to answer a ``workflow:`` action. One of the two has to be a closure.
+    runner = _tool_action_runner(tools, lambda: workflow)
+    scheduler = SchedulerService(
+        database,
+        lambda: config_service.config.scheduler,
+        runner,
+        on_failure=_job_failure_reporter(alerts),
+    )
     app.register(scheduler)
 
     workflow = WorkflowService(
@@ -411,6 +555,7 @@ def _register_capabilities(
         plugins=plugins,
         prompts=prompts,
         planner=planner,
+        transcript=transcript,
     )
 
 
@@ -444,6 +589,17 @@ class _VoiceStack:
     def listening(self) -> bool:
         return self._orchestration.listening
 
+    def stop_listening(self) -> None:
+        """Release the microphone, keep everything else loaded.
+
+        The 「聆听」 switch asks for this instead of :meth:`stop`, because ``stop``
+        closes the player as well -- and then a page that only wanted her to stop
+        listening also loses the voice she reads answers with.
+        """
+        pipeline = self._orchestration.pipeline
+        if pipeline is not None:
+            pipeline.stop_listening()
+
     def speak_now(self) -> bool:
         pipeline = self._orchestration.pipeline
         return pipeline is not None and pipeline.speak_now()
@@ -463,7 +619,11 @@ def _voice_stack_builder(
     llm_service: LlmService,
     player_factory: Callable[[], AudioPlayer] | None = None,
     voice_provider: Callable[[], str | None] | None = None,
-    transcript_sink: Callable[[str, str], None] | None = None,
+    speed_provider: Callable[[], float | None] | None = None,
+    volume_provider: Callable[[], float | None] | None = None,
+    graph_factory: Callable[[], ChatGraph] | None = None,
+    greeter: WakeGreeter | None = None,
+    keywords_provider: Callable[[], Sequence[str]] | None = None,
 ) -> LoopBuilder:
     """Return the callable that loads the voice models when the page asks.
 
@@ -476,6 +636,11 @@ def _voice_stack_builder(
     :class:`~jarvis.orchestration.player.BridgePlayer` bound to the window, so the
     page hears the same samples the speaker would and can draw the rhythm off
     them; a console run leaves it out and gets PortAudio.
+
+    ``graph_factory`` is the whole answer the microphone gives. Omit it and
+    :class:`~jarvis.orchestration.graph.AgentGraph` answers instead -- a graph with
+    its own two hard-coded capabilities, which is how a spoken question and the same
+    question typed got different tools. The desktop must pass one.
     """
 
     def build(on_event: Callable[[PipelineEvent], None]) -> _VoiceStack:
@@ -502,7 +667,15 @@ def _voice_stack_builder(
             player_factory=player_factory,
             on_event=report,
             voice_provider=voice_provider,
-            transcript_sink=transcript_sink,
+            speed_provider=speed_provider,
+            volume_provider=volume_provider,
+            graph_factory=graph_factory,
+            # The two halves of the wake greeting: the words, and the gate in front of them.
+            # Both are callables because neither is ours to cache -- the sentence can be edited
+            # between any two wakes, and the figure's state is the shell's to know.
+            greeting_provider=greeter.text if greeter else None,
+            greeting_gate=(lambda stop: greeter.wait_for_figure(stop)) if greeter else None,
+            keywords_provider=keywords_provider,
         )
         return _VoiceStack([asr, tts], orchestration)
 
@@ -512,6 +685,29 @@ def _voice_stack_builder(
 PROBE_UTTER_TIMEOUT_SECONDS: float = 120.0
 """How long ``--speak`` waits for the voice stack. Generous: the first launch of the
 day downloads about 900 MB of weights."""
+
+
+def _job_failure_reporter(
+    alerts: AlertService | None,
+) -> Callable[[str, str, str], None] | None:
+    """Turn a failed scheduled run into an alert the operator actually sees.
+
+    Returns ``None`` when there is no alert centre, which is how the console and the
+    tests keep their scheduler quiet: the job still records its failure in the run
+    ledger, and nothing tries to interrupt a person who has no window open.
+    """
+    if alerts is None:
+        return None
+
+    def report(job_id: str, name: str, error: str) -> None:
+        alerts.note(
+            f"job:{job_id}",
+            "定时任务",
+            f"「{name}」这一轮失败了：{error}" if error else f"「{name}」这一轮失败了",
+        )
+        logger.warning("scheduled job %s reported to the alert centre", job_id)
+
+    return report
 
 
 def _schedule_probe_utterance(voice: VoiceService, text: str) -> None:
@@ -552,8 +748,21 @@ def _run_desktop(args: argparse.Namespace) -> int:
     # and start() is idempotent so the later full walk is a no-op.
     config_service.start()
     app.register(LoggingService(_logging_settings_factory(config_service, verbose=args.verbose)))
-    # The UI never touches psutil directly; it reads this L4 service instead.
-    system = SystemService(lambda: SystemMonitor(top_processes=10))
+    # The UI never touches psutil directly; it reads this L4 service instead. The
+    # sampler is built once here and handed to the tool service below, so the panel and
+    # the assistant answer from one reading rather than two competing ones.
+    monitor = _shared_monitor()
+    # One Preferences object for the whole desktop: the settings overrides, the alert
+    # thresholds and the remembered microphone consent are the same file, and two readers
+    # of it would each hold a stale snapshot of the other's writes. It has to exist before
+    # the alert service, which has to exist before the telemetry service that feeds it.
+    preferences = Preferences(config_service.paths.preferences_file)
+    alerts = AlertService(preferences)
+    # What the operator calls her, in two layers: the shipped spellings in ``wakeword.keywords``
+    # and their own list on top. Read per utterance rather than baked, because the wake engine
+    # cannot be rebuilt without reloading the speech model and losing the sentence in progress.
+    wake_words = WakeWords(preferences, lambda: config_service.config.wakeword.keywords)
+    system = SystemService(_monitor_factory(monitor), alerts=alerts)
     app.register(system)
     # JARVIS' own data root sits under %LOCALAPPDATA% like any other cache, so the
     # cleaner is told explicitly to leave it alone -- otherwise "clean my temp files"
@@ -570,14 +779,12 @@ def _run_desktop(args: argparse.Namespace) -> int:
     # no gigabytes of speech models.
     llm_service = LlmService(lambda: config_service.config.llm)
     app.register(llm_service)
-    # One Preferences object for the whole desktop: the settings overrides and the
-    # remembered microphone consent are the same file, and two readers of it would
-    # each hold a stale snapshot of the other's writes.
-    preferences = Preferences(config_service.paths.preferences_file)
     settings = SettingsService(
         preferences,
         llm_service,
         lambda: config_service.config.llm,
+        alerts=alerts,
+        wake_words=wake_words,
     )
     app.register(settings)
     # Memory, knowledge, tools, scheduler, workflow, plugins, MCP, vision,
@@ -600,25 +807,87 @@ def _run_desktop(args: argparse.Namespace) -> int:
             audit_log=config_service.paths.audit_dir / "process-kills.jsonl",
         )
     )
+    # Built before the capability stack because the tool that changes her voice is
+    # wired in the same place every other tool is wired, and that tool needs the
+    # picker's list to refuse a name that does not exist. The picker itself is not
+    # inside the voice stack: it has two customers with different lifetimes -- the
+    # pipeline reads the chosen voice per utterance, and the HUD's popup needs the list
+    # and the preview channel whether or not the microphone was ever enabled.
+    from jarvis.ui.audio_bridge import AudioPusher
+
+    audio_pusher = AudioPusher()
+    # The recorded voices, before the picker, because the picker lists them and the
+    # tool that changes her voice checks names against the same list. It is only a
+    # directory and an index -- no model is loaded here, and with CosyVoice absent
+    # the whole feature degrades to "you can record, and you will be told why she
+    # cannot speak it yet".
+    voice_library = VoiceLibrary(config_service.paths.voices_dir)
+    app.register(voice_library)
+    voice_picker = VoicePicker(
+        lambda: config_service.config.tts,
+        preferences,
+        emit=audio_pusher.emit,
+        library=voice_library,
+    )
+    app.register(voice_picker)
     capabilities = _register_capabilities(
         app,
         config_service,
         llm_service,
         computer_access,
         command_access,
+        monitor,
+        process_service,
+        settings,
+        voice_picker,
+        alerts=alerts,
     )
-    # Conversations outlive the window: the store is the same SQLite file the token
-    # ledger and memory already use, so "where does my history live" has one answer.
-    transcript = TranscriptService(capabilities.database)
-    app.register(transcript)
+    # What each configured model turned out to be able to do, measured rather than
+    # declared: the panel writes a row here when 测一下 passes, and a picture is only
+    # promised to a model that has been shown one it could describe.
+    caps = ModelCaps(preferences)
+    prober = ModelProber(llm_service.client_for, caps)
+    # Several models, one question, three shapes (圆桌 / 主管分发 / 匿名互评投票). They
+    # reach the network through the same cached client factory everything else uses, so a
+    # seat pointed at a model with no key fails with that provider's own complaint rather
+    # than through a second error path invented here.
+    collaboration = Collaboration(llm_service.client_for)
     chat = ChatService(
         lambda: llm_service.client,
         memory_provider=lambda: capabilities.memory,
         knowledge_provider=lambda: capabilities.knowledge,
         tool_provider=lambda: capabilities.tools,
-        transcript=transcript,
+        transcript=capabilities.transcript,
+        # Both read per turn rather than being passed as values, because the settings
+        # panel can move them while the window is open and 「保存后立即生效」 is the
+        # whole point of the two knobs.
+        thinking_provider=lambda: ThinkingRequest(
+            settings.thinking_enabled(), settings.thinking_budget()
+        ),
+        history_turns_provider=settings.history_turns,
+        # The per-conversation pair. ``client_for`` is what lets one tab answer from
+        # DeepSeek while another answers from Qwen -- which a round table needs, and
+        # which the single global client could never express.
+        client_for=llm_service.client_for,
+        tuning_for=_tuning_reader(settings),
+        pair_provider=settings.selected_pair,
+        collaboration=collaboration,
+        vision_for=caps.vision,
     )
     app.register(chat)
+    # The spoken round trip a phone performs. It owns no brain and no voice: it
+    # holds the *same* ChatService the input box uses, so a question asked out loud
+    # on the phone and the same question typed on the desktop reach one agent with
+    # one tool table and one transcript. Nothing here loads a model -- the
+    # recognizer is pulled in lazily on the first sentence and kept.
+    voice_call = VoiceCall(
+        asr_section=lambda: config_service.config.asr,
+        tts_section=lambda: config_service.config.tts,
+        chat=chat,
+        picker=voice_picker,
+        library=voice_library,
+    )
+    app.register(voice_call)
     # Deliberately *not* registered here: WakeWordService and VadService each run
     # their own capture loop, and a second one would fight the voice pipeline for
     # the same microphone. Mic exclusivity is enforced by what this list contains,
@@ -628,37 +897,63 @@ def _run_desktop(args: argparse.Namespace) -> int:
     # boots -- which happens when the page asks, tens of seconds after this line --
     # and it needs a window before it can push anything, which the desktop shell
     # hands it once the window exists.
-    from jarvis.ui.audio_bridge import AudioPusher
-
-    audio_pusher = AudioPusher()
-    # The picker is built here rather than inside the voice stack because it has
-    # two customers with different lifetimes: the pipeline reads the chosen voice
-    # per utterance, and the HUD's popup needs the list and the preview channel
-    # whether or not the microphone was ever enabled.
-    voice_picker = VoicePicker(
-        lambda: config_service.config.tts,
-        preferences,
-        emit=audio_pusher.emit,
-    )
-    app.register(voice_picker)
+    # Built here rather than inside the pipeline because two worlds have to agree on it:
+    # the voice thread asks whether it may greet, and the shell is what knows whether a
+    # figure is on its way out of the wormhole. One object, both attached to it.
+    greeter = WakeGreeter(settings.wake_greeting)
+    # One table of running turns for the whole desktop: what the panel lists, what 停止 acts on,
+    # and what a round table will submit its seats to. Built here because both the bridge and the
+    # collaboration need the same one.
+    turns = TurnRegistry()
     voice = VoiceService(
         _voice_stack_builder(
             config_service,
             llm_service,
             player_factory=lambda: BridgePlayer(audio_pusher.emit),
             voice_provider=voice_picker.effective_voice,
-            transcript_sink=chat.append_turn,
+            # The rate and volume sliders live in the same panel and travel with the
+            # voice: all three are read per utterance, so a drag changes the next
+            # sentence instead of the next restart.
+            speed_provider=voice_picker.effective_speed,
+            volume_provider=voice_picker.effective_volume,
+            # Out loud and typed go through the *same* agent from here on, which is why
+            # there is no ``transcript_sink`` any more: ChatService.ask records both
+            # halves of the turn itself, so a sink would store every spoken sentence
+            # twice. Before this line existed, the microphone had its own two-tool
+            # worker and "本机有没有装 Java" had two different answers depending on
+            # whether the operator typed it or said it.
+            graph_factory=lambda: ChatGraph(chat),
+            greeter=greeter,
+            keywords_provider=wake_words.effective,
         ),
         permission=lambda: args.voice or config_service.config.orchestration.enabled,
-        keywords=lambda: config_service.config.wakeword.keywords,
+        # The status line must name the words she is *actually* watching for, which after a
+        # rename in the panel are not the ones in the config file.
+        keywords=wake_words.effective,
         preferences=preferences,
     )
     app.register(voice)
+
+    # Claimed here, before ``app.start()``. Starting the app opens the database and
+    # brings up the scheduler and the workflow engine, and a second copy doing that
+    # means two sets of persistent jobs racing to fire the same reminder -- with
+    # ``misfire_grace_seconds`` on, one that came due seconds ago fires immediately.
+    # The lock used to be taken inside ``desktop.run``, which runs after all of that
+    # has already happened: the second double-click was turned away only once it had
+    # done the thing the lock exists to prevent.
+    from jarvis.ui.instance import InstanceGate
+
+    gate = InstanceGate(config_service.paths.data_dir / "desktop.lock")
+    if not gate.claim():
+        logger.info("another 小夜 owns the lock; this launch is only the alarm clock")
+        print("小夜已在运行：已把它的前台窗口叫回来，这次启动直接退出。", flush=True)
+        return 0
 
     try:
         app.start()
     except Exception:
         logger.exception("desktop mode failed to start")
+        gate.release()
         return 1
     try:
         from jarvis.ui import desktop
@@ -668,6 +963,15 @@ def _run_desktop(args: argparse.Namespace) -> int:
         # synthesiser is the operator's decision. With neither channel bound an
         # announcement says so instead of reporting a delivery that never happened.
         capabilities.announcer.bind(speak=voice.speak_text)
+
+        # A critical alert gets the same voice, once. The engine decides "once" --
+        # it knows this disk warning is the third sighting of the same full drive -- and
+        # the announcer decides "where": with the tray down and the microphone off this
+        # reports that it had nowhere to go rather than pretending it spoke.
+        def _speak_alert(alert: Alert) -> None:
+            capabilities.announcer.announce(f"提醒：{alert.message}")
+
+        alerts.on_fire = _speak_alert
         if args.speak:
             _schedule_probe_utterance(voice, args.speak)
         # -v doubles as "show me the page's console": WebView2 devtools are the
@@ -679,9 +983,12 @@ def _run_desktop(args: argparse.Namespace) -> int:
             chat=chat,
             usage=capabilities.usage,
             settings=settings,
+            alerts=alerts,
             audio=audio_pusher,
             tools=capabilities.tools,
             voice_picker=voice_picker,
+            voice_library=voice_library,
+            voice_call=voice_call,
             computer_access=computer_access,
             command_access=command_access,
             process=process_service,
@@ -691,7 +998,17 @@ def _run_desktop(args: argparse.Namespace) -> int:
             announcer=capabilities.announcer,
             memory=capabilities.memory,
             knowledge=capabilities.knowledge,
-            instance_lock=config_service.paths.data_dir / "desktop.lock",
+            # The three engines the 「自动化」 tab reads. They have been registered and
+            # running all along; what was missing was the door, not the capability.
+            scheduler=capabilities.scheduler,
+            workflow=capabilities.workflow,
+            planner=capabilities.planner,
+            instance_gate=gate,
+            mobile=config_service.config.mobile,
+            mobile_dir=config_service.paths.mobile_dir,
+            greeter=greeter,
+            turns=turns,
+            model_probe=prober,
             executable=Path(sys.executable) if getattr(sys, "frozen", False) else None,
             debug=args.verbose,
         )
@@ -739,6 +1056,7 @@ _PIPELINE_EVENT_LABELS = {
     "wake": "唤醒",
     "speech_start": "听到说话",
     "speech_end": "识别中",
+    "user_text": "听到你说",
     "reply": "回答",
     "barge_in": "被打断",
     "error": "出错",
@@ -828,18 +1146,30 @@ def _run_ask(args: argparse.Namespace) -> int:
     """Answer one question from the command line, with the full stack."""
     context = _bootstrap_cli(args)
     try:
+        thinking = None if args.thinking is None else lambda: ThinkingRequest(True, args.thinking)
         chat = ChatService(
             lambda: context.llm_service.client,
             memory_provider=lambda: context.capabilities.memory,
             knowledge_provider=lambda: context.capabilities.knowledge,
             tool_provider=lambda: context.capabilities.tools,
             session_id="cli",
+            thinking_provider=thinking,
         )
         chat.start()
         reply = chat.ask(args.ask)
         if reply.error:
             print(f"回答失败：{reply.error}", file=sys.stderr)
             return 1
+        if reply.reasoning:
+            spent = reply.reasoning_tokens
+            print(f"【思考】{reply.reasoning}", file=sys.stderr)
+            print(
+                f"【思考成本】{spent if spent is not None else '无读数'} token"
+                f"（预算 {args.thinking}）",
+                file=sys.stderr,
+            )
+        elif args.thinking is not None:
+            print("【思考】这个 provider 没有回任何思考内容。", file=sys.stderr)
         print(reply.answer)
         if reply.tools_used:
             print(f"\n（调用了工具：{'、'.join(reply.tools_used)}）", file=sys.stderr)

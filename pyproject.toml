@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "jarvis-assistant"
 version = "0.1.0"
 description = "JARVIS: a voice-first, agentic Windows AI assistant."
-readme = "README.md"
+readme = "docs/总览.md"
 requires-python = ">=3.12"
 authors = [{ name = "JARVIS Team" }]
 keywords = ["ai", "agent", "assistant", "voice", "windows"]
@@ -100,6 +100,13 @@ docs = [
     "pypdf>=4.2.0",       # PDF text extraction
     "python-docx>=1.1.0",  # DOCX text extraction
 ]
+# 手机版 M1：电脑端局域网服务。唯一的新依赖是 TLS 自签证书——stdlib 的 ``ssl`` 能
+# *用* 证书却不能 *造* 证书，而「只在内网跑、没有 CA 会给一台 192.168.x.x 签发」是
+# 这个产品的立场，不是偷懒。缺它时 「手机接入」 直接拒绝并说明要装这个 extra，
+# 绝不退化成明文 HTTP（jarvis/ui/lan_server.py 的 CertificateUnavailable）。
+mobile = [
+    "cryptography>=42.0.0",
+]
 
 [project.scripts]
 jarvis = "jarvis.__main__:main"
@@ -144,7 +151,13 @@ select = [
 # assignment -- which is how the sentence-splitting regex in
 # jarvis/knowledge/chunker.py gets flagged: the full-width marks ARE the pattern,
 # so replacing them with their ASCII lookalikes would silently change behaviour.
-ignore = ["RUF001", "RUF002"]
+#
+# RUF003 is the same rule applied to *comments*. It is ignored for the same
+# reason: the comments in this repository are Chinese prose, and swapping `，`
+# for `,` inside a Chinese sentence does not make it clearer -- it makes it
+# wrong, the same way it would in the strings above. Code is still ASCII-only;
+# only prose is allowed to use prose punctuation.
+ignore = ["RUF001", "RUF002", "RUF003"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["jarvis"]
@@ -152,6 +165,16 @@ known-first-party = ["jarvis"]
 [tool.black]
 line-length = 100
 target-version = ["py312"]
+# pytest 的 basetemp 目录（`--basetemp=.pytest-full` 那种调试留下的）里装的是
+# **测试夹具**，包括故意写坏的、语法不通的 Python 文件。black 不看 .gitignore，
+# 不挡掉的话它会把"坏文件"报成"格式化失败"，而那个红和这个仓库的代码质量毫无关系。
+extend-exclude = '''
+/(
+    \.ptmp
+  | \.pytest-full
+  | \.pytest-[^/]+
+)/
+'''
 
 [tool.mypy]
 python_version = "3.12"

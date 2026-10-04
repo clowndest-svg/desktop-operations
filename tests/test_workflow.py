@@ -19,7 +19,8 @@ from jarvis.core.exceptions import WorkflowError
 from jarvis.database import SqliteStore
 from jarvis.scheduler import JobSpec, SchedulerService
 from jarvis.scheduler import TriggerKind as SchedulerTriggerKind
-from jarvis.workflow import ConditionEvaluator, WorkflowLoader, WorkflowService
+from jarvis.workflow import ACTION_PREFIX, ConditionEvaluator, WorkflowLoader, WorkflowService
+from jarvis.workflow.store import MIGRATIONS, NAMESPACE, WorkflowRepository
 
 _MAIN = """
     name: 每日早报
@@ -70,7 +71,12 @@ class RecordingRunner:
 
 
 class FakeSchedulerService:
-    """Records the ``JobSpec`` values the workflow service registers."""
+    """Records the ``JobSpec`` values the workflow service registers.
+
+    ``list_jobs`` and ``remove_job`` are part of the double because the service now
+    sweeps as well as registers: a fake that could only accept jobs would let the
+    withdrawal half go untested, which is how it went missing in the first place.
+    """
 
     def __init__(self) -> None:
         self.specs: dict[str, JobSpec] = {}
@@ -78,6 +84,12 @@ class FakeSchedulerService:
     def add_job(self, spec: JobSpec) -> JobSpec:
         self.specs[spec.job_id] = spec
         return spec
+
+    def remove_job(self, job_id: str) -> bool:
+        return self.specs.pop(job_id, None) is not None
+
+    def list_jobs(self) -> list[JobSpec]:
+        return list(self.specs.values())
 
 
 def _service(
@@ -410,7 +422,11 @@ class TestScheduling:
         spec = fake.specs["workflow:每日早报"]
         assert spec.trigger is SchedulerTriggerKind.CRON
         assert spec.expression == "0 9 * * *"
-        assert spec.action == "每日早报"
+        # Prefixed, and this assertion used to read ``== "每日早报"`` -- which was the
+        # bug, pinned. The scheduler hands that string to the composition root's runner
+        # and the runner looks it up in the tool registry, where no workflow lives, so
+        # every cron workflow failed at fire time with "未注册的工具".
+        assert spec.action == f"{ACTION_PREFIX}每日早报"
 
     def test_manual_workflow_is_not_registered(self, tmp_path: Path) -> None:
         _write(
@@ -451,6 +467,74 @@ class TestScheduling:
         _write(tmp_path, "daily.yaml", _MAIN)
         service.reload()
         assert "workflow:每日早报" in fake.specs
+
+    def test_deleting_a_definition_withdraws_its_job(self, tmp_path: Path) -> None:
+        """The half that was missing: registering without ever withdrawing.
+
+        The job stayed behind after its definition was gone, so the cron kept firing,
+        ``run(name)`` kept not finding the definition, and every fire was recorded as
+        a failure with nothing on screen connecting it to the edit that caused it.
+        """
+        path = _write(tmp_path, "daily.yaml", _MAIN)
+        service, _, fake = _service(tmp_path)
+        service.start()
+        assert "workflow:每日早报" in fake.specs
+        path.unlink()
+        service.reload()
+        assert fake.specs == {}
+
+    def test_switching_a_workflow_to_manual_withdraws_its_job(self, tmp_path: Path) -> None:
+        """Dropping ``trigger: cron`` has to take the schedule with it."""
+        _write(tmp_path, "daily.yaml", _MAIN)
+        service, _, fake = _service(tmp_path)
+        service.start()
+        _write(
+            tmp_path,
+            "daily.yaml",
+            """
+            name: 每日早报
+            steps:
+              - name: 检查磁盘
+                action: system_report
+            """,
+        )
+        service.reload()
+        assert fake.specs == {}
+
+    def test_a_job_from_another_component_survives_the_sweep(self, tmp_path: Path) -> None:
+        """``reminder:`` is a different namespace and not this package's to remove."""
+        _write(tmp_path, "daily.yaml", _MAIN)
+        service, _, fake = _service(tmp_path)
+        service.start()
+        fake.specs["reminder:喝水"] = JobSpec(
+            job_id="reminder:喝水",
+            name="喝水",
+            action="speak",
+            arguments={},
+            trigger=SchedulerTriggerKind.DATE,
+            expression="2030-01-01T09:30",
+        )
+        service.reload()
+        assert "reminder:喝水" in fake.specs
+        assert "workflow:每日早报" in fake.specs
+
+    def test_disabling_the_config_withdraws_everything_we_registered(self, tmp_path: Path) -> None:
+        """Off means off: the jobs an enabled run registered must not linger."""
+        _write(tmp_path, "daily.yaml", _MAIN)
+        live = {"enabled": True}
+        fake = FakeSchedulerService()
+        service = WorkflowService(
+            _store(),
+            lambda: _section(enabled=bool(live["enabled"])),
+            RecordingRunner(),
+            directory_provider=lambda: tmp_path,
+            scheduler=cast("SchedulerService", fake),
+        )
+        service.start()
+        assert "workflow:每日早报" in fake.specs
+        live["enabled"] = False
+        service.reload()
+        assert fake.specs == {}
 
 
 class TestStatsAndHistory:
@@ -495,3 +579,56 @@ class TestStatsAndHistory:
         store.stop()
         assert service.history() == []
         assert service.stats()["runs"] == 0
+
+
+def _record_run(repo: WorkflowRepository, index: int) -> None:
+    """One workflow run record, with row order and timestamp order agreeing."""
+    repo.record_run(
+        workflow="每日早报",
+        started_at=f"2026-10-03T09:0{index}:00",
+        finished_at=f"2026-10-03T09:0{index}:01",
+        ok=True,
+        steps=[],
+        error="",
+    )
+
+
+class TestHistoryRetention:
+    """The workflow run table gets the same cap as the scheduler's, for the same reason.
+
+    A cron workflow running every few minutes writes a row every few minutes, and
+    nothing ever removed one. That is fine for a demo and a leak for an app that is
+    meant to sit in the tray.
+    """
+
+    def test_prune_keeps_the_newest_runs(self) -> None:
+        store = _store()
+        store.migrate(NAMESPACE, MIGRATIONS)
+        repo = WorkflowRepository(store)
+        for index in range(10):
+            _record_run(repo, index)
+        assert repo.prune_runs(3) == 7
+        assert repo.count_runs() == 3
+        assert [run.started_at for run in repo.history(limit=10)] == [
+            "2026-10-03T09:09:00",
+            "2026-10-03T09:08:00",
+            "2026-10-03T09:07:00",
+        ]
+
+    def test_start_applies_the_limit(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Wired into the lifecycle, not merely available as a method."""
+        monkeypatch.setattr("jarvis.workflow.service.RUN_HISTORY_LIMIT", 2)
+        _write(tmp_path, "daily.yaml", _MAIN)
+        store = _store()
+        store.migrate(NAMESPACE, MIGRATIONS)
+        repo = WorkflowRepository(store)
+        for index in range(5):
+            _record_run(repo, index)
+        service = WorkflowService(
+            store,
+            lambda: _section(),
+            RecordingRunner(),
+            directory_provider=lambda: tmp_path,
+        )
+        service.start()
+        assert repo.count_runs() == 2

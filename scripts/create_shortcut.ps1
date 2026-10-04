@@ -55,15 +55,30 @@ if ([string]::IsNullOrWhiteSpace($ExePath)) {
     # Only ever consider a delivered artifact -- <round>\dist\小夜\小夜.exe -- never the
     # intermediate copy under <round>\build\, which is written hours before the one you
     # would actually want to launch.
-    $ExePath = Get-ChildItem -LiteralPath $root -Filter "*.exe" -Recurse -ErrorAction SilentlyContinue |
-        Where-Object { $_.FullName -like "*\dist\*\小夜.exe" } |
-        Sort-Object LastWriteTime -Descending |
+    #
+    # Sorted by ROUND NUMBER first, not just by file time. Rounds are delivered in
+    # order, so the highest round is the newest by definition, while mtime is a
+    # property an aborted or re-run packaging pass can move around -- a half-built
+    # r29 sat on disk looking newer than the r28 in use, and "run the shortcut
+    # script" would have pointed the icon at the broken one.
+    $candidates = Get-ChildItem -LiteralPath $root -Filter "*.exe" -Recurse -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -like "*\dist\*\小夜.exe" }
+    $ExePath = $candidates |
+        Sort-Object `
+            @{ Expression = {
+                # JARVIS_HOME looks like ...\JarvisBuild\r30\dist\小夜\小夜.exe, so the
+                # round is the \r<digits>\ segment. Anything else -> -1, so a
+                # differently named bundle can never outrank a numbered round.
+                $m = [regex]::Match($_.FullName, '\\r(\d+)\\')
+                if ($m.Success) { [int]$m.Groups[1].Value } else { -1 }
+            }; Descending = $true },
+            @{ Expression = { $_.LastWriteTime }; Descending = $true } |
         Select-Object -First 1 -ExpandProperty FullName
     if (-not $ExePath) {
         Write-Host "$root 下没有任何 dist 产物，先打包。" -ForegroundColor Red
         exit 1
     }
-    Write-Host "未指定 -ExePath，选用最新的产物：" -ForegroundColor Yellow
+    Write-Host "未指定 -ExePath，选用编号最大的产物：" -ForegroundColor Yellow
 }
 if (-not (Test-Path -LiteralPath $ExePath)) {
     Write-Host "找不到可执行文件：$ExePath" -ForegroundColor Red

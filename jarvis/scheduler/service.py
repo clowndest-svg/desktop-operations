@@ -103,6 +103,15 @@ def _build_trigger(kind: TriggerKind, expression: str, timezone: str) -> object:
     return IntervalTrigger(seconds=int(text))
 
 
+RUN_HISTORY_LIMIT: int = 2000
+"""How many execution records to keep.
+
+Enough to answer "what has this thing been doing" and to let a failure be looked up
+after the fact; bounded, so a machine left on for a year does not carry a year of
+rows into every ``COUNT(*)`` the panel does.
+"""
+
+
 class SchedulerService:
     """Lifecycle component running persisted cron/interval jobs."""
 
@@ -115,6 +124,7 @@ class SchedulerService:
         action_runner: Callable[[str, Mapping[str, object]], str],
         *,
         scheduler: object | None = None,
+        on_failure: Callable[[str, str, str], None] | None = None,
     ) -> None:
         """Wire the service.
 
@@ -127,10 +137,17 @@ class SchedulerService:
                 independent of ``jarvis.tools``.
             scheduler: A pre-built APScheduler-like object. ``None`` builds a
                 real ``BackgroundScheduler`` on ``start()``; tests pass a fake.
+            on_failure: Called with ``(job_id, name, error)`` after a run is filed as
+                failed. This is the alert centre's door: a job that only writes a warning
+                line into a log file the operator never opens has not actually told anyone
+                anything. Optional, and called after the run is persisted, because a
+                notification must never be able to break a run -- or to be the reason one
+                is reported as succeeded when it was not.
         """
         self._store = store
         self._settings_provider = settings_provider
         self._action_runner = action_runner
+        self._on_failure = on_failure
         self._repo = SchedulerRepository(store)
         self._scheduler: _SchedulerLike | None = cast("_SchedulerLike | None", scheduler)
         self._injected = scheduler is not None
@@ -147,6 +164,7 @@ class SchedulerService:
         if self._started:
             return
         self._store.migrate(NAMESPACE, MIGRATIONS)
+        self._trim_history()
         settings = self._settings_provider()
         if not settings.enabled:
             self._started = True
@@ -169,6 +187,21 @@ class SchedulerService:
         self._scheduler.start()
         self._started = True
         logger.info("scheduler started with %d job(s)", len(self._repo.list_jobs()))
+
+    def _trim_history(self) -> None:
+        """Cap the run history at start-up.
+
+        Not worth failing a start over: the worst case is that the table keeps its
+        old rows for one more launch, which is exactly what it did before this
+        existed.
+        """
+        try:
+            dropped = self._repo.prune_runs(RUN_HISTORY_LIMIT)
+        except Exception:  # pragma: no cover - depends on the database
+            logger.exception("trimming the run history failed")
+            return
+        if dropped:
+            logger.info("trimmed %d old run record(s) from the history", dropped)
 
     def stop(self) -> None:
         """Shut the background thread down. Never raises, safe to call twice."""
@@ -413,6 +446,11 @@ class SchedulerService:
             detail=detail,
             error=error,
         )
+        if not ok and self._on_failure is not None:
+            try:
+                self._on_failure(job_id, spec.name if spec is not None else job_id, error)
+            except Exception:  # a notification that throws must not fail the run twice
+                logger.exception("could not report the failure of job %s", job_id)
         return JobRun(
             run_id=run_id,
             job_id=job_id,

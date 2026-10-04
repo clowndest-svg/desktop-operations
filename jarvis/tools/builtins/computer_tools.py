@@ -23,7 +23,7 @@ model is allowed to ask for. Four rules, in order of how much they matter:
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Final, Protocol
 
 from jarvis.core.exceptions import JarvisError
@@ -44,7 +44,7 @@ class DesktopControl(Protocol):
     """What the tools need from a desktop-control service, and nothing more.
 
     Declared structurally instead of imported: ``tools`` is not allowed to depend
-    on ``computer`` (the layering table in ``docs/architecture.md``, enforced by
+    on ``computer`` (the layering table in ``docs/架构分层.md``, enforced by
     ``tests/test_architecture_layers.py``), and the composition root is the only
     place allowed to know both sides. A protocol keeps the type checking without
     the import -- the same seam ``ui/audio_bridge.py`` uses to read pipeline
@@ -60,6 +60,10 @@ class DesktopControl(Protocol):
     def press_key(self, key: str) -> object: ...
 
     def type_text(self, text: str) -> object: ...
+
+    def find_apps(self, query: str) -> tuple[Sequence[object], Sequence[str]]: ...
+
+    def launch(self, target: str, *, label: str = "", pid: int = 0) -> object: ...
 
     def stats(self) -> dict[str, object]: ...
 
@@ -176,6 +180,64 @@ def _status(service_factory: Callable[[], DesktopControl]) -> ToolHandler:
     return handler
 
 
+def _candidate_summary(candidate: object) -> str:
+    """One search hit, as a line a model can repeat to the operator."""
+    name = str(getattr(candidate, "name", "") or "?")
+    source = str(getattr(candidate, "source", "") or "")
+    note = str(getattr(candidate, "note", "") or "")
+    target = str(getattr(candidate, "target", "") or "")
+    where = target or note or "（路径读不到）"
+    return f"{name}（{source}：{where}）"
+
+
+def _open_app(service_factory: Callable[[], DesktopControl]) -> ToolHandler:
+    """Find a program by name and start it -- or bring its window back.
+
+    Written after a real failure: asked to 打开微信, the assistant wrote its own
+    PowerShell to look for ``WeChat.exe`` in ``Program Files\\Tencent`` and in App
+    Paths, found nothing, and told the operator WeChat was not installed -- while
+    the program was running from ``D:\\RuanJian\\微信\\Weixin\\Weixin.exe`` and its
+    shortcut sat in the Start Menu. Searching is a solved problem; guessing at it
+    is not. The tool says where it looked so "找不到" is auditable.
+    """
+
+    def handler(arguments: Mapping[str, object]) -> str:
+        query = str(arguments.get("name") or "").strip()
+        if not query:
+            return "参数不对：name 不能为空。"
+        service = service_factory()
+        try:
+            candidates, sources = service.find_apps(query)
+            hits = list(candidates)
+        except Exception as exc:  # a search failure must not abort the turn
+            logger.exception("app search failed unexpectedly")
+            return f"查找出错了：{type(exc).__name__}: {exc}"
+        if not hits:
+            return (
+                f"没找到叫「{query}」的程序。查过：{'、'.join(str(s) for s in sources)}。"
+                "如果知道它在哪，把完整路径（.exe 或开始菜单快捷方式）告诉我，我直接启动。"
+            )
+        top = hits[0]
+        pid = int(getattr(top, "pid", 0) or 0)
+        target = str(getattr(top, "target", "") or "")
+        try:
+            result = service.launch(target, label=str(getattr(top, "name", "") or query), pid=pid)
+        except JarvisError as exc:
+            logger.info("launch refused: %s", exc)
+            return f"被安全策略拒绝：{exc}"
+        except Exception as exc:
+            logger.exception("launch failed unexpectedly")
+            return f"启动出错了：{type(exc).__name__}: {exc}"
+        line = _describe(result)
+        extra = ""
+        if len(hits) > 1:
+            others = "、".join(_candidate_summary(item) for item in hits[1:4])
+            extra = f"；另外还匹配到 {others}，如果不是这一个就说清楚要哪个"
+        return f"{line}（来源：{getattr(top, 'source', '')}{extra}）"
+
+    return handler
+
+
 def build(service_factory: Callable[[], DesktopControl]) -> list[tuple[ToolSpec, ToolHandler]]:
     """Return the desktop-control tools.
 
@@ -186,6 +248,24 @@ def build(service_factory: Callable[[], DesktopControl]) -> list[tuple[ToolSpec,
     """
     return [
         (_STATUS, _status(service_factory)),
+        (
+            _action(
+                "open_app",
+                (
+                    "按名字打开一个程序，或者把已经开着的它显示到最前面。"
+                    "查找顺序：正在运行的进程 → 开始菜单快捷方式 → 注册表里登记的安装位置 → "
+                    "用户程序目录 → PATH；Windows 自带的那几个（记事本/计算器/任务管理器…）"
+                    "有单独的中文名表。找不到时会告诉你查过哪些地方。"
+                    "演练档只报告会启动什么。别改用 PowerShell 去翻目录找程序 —— 那条路"
+                    "曾经答出「这台电脑上没有微信」，而它当时正开着。"
+                ),
+                object_schema(
+                    {"name": string_property("程序名，例如 微信、记事本、chrome")},
+                    required=("name",),
+                ),
+            ),
+            _open_app(service_factory),
+        ),
         (
             _action(
                 "mouse_move",

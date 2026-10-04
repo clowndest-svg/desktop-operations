@@ -27,6 +27,33 @@
         </li>
       </ul>
 
+      <!--
+        打字这把锁和四个档位分开，是因为它们管的不是一件事：档位管"能碰哪儿"
+        （指针、按键），这把管"能不能把字写进别人的输入框"。默认关，开了等于你本人
+        对"她会替你敲出消息正文"这件事点头 —— 所以它不藏在档位里面。
+      -->
+      <h3 class="ca__sub hud-title">打字 · TYPING</h3>
+
+      <label class="ca__toggle">
+        <input
+          type="checkbox"
+          :checked="current.allow_typing"
+          :disabled="typingSetting"
+          @change="toggleTyping(($event.target as HTMLInputElement).checked)"
+        />
+        <span>
+          允许她替你在输入框里打字
+          <em>
+            关了：她只能按键（切窗口、回车、Esc），一个字都打不出来。
+            开了：她能输入文字 —— 包括消息正文；发出去之前仍然要你按回车。
+          </em>
+        </span>
+      </label>
+
+      <p v-if="typingNote" class="ca__note-line" :class="{ 'ca__note-line--bad': typingNoteBad }">
+        {{ typingNote }}
+      </p>
+
       <p v-if="note" class="ca__note-line" :class="{ 'ca__note-line--bad': noteBad }">{{ note }}</p>
 
       <!--
@@ -98,6 +125,7 @@ import {
   fetchComputerLevels,
   fetchShellLevels,
   setComputerTier,
+  setComputerTyping,
   setShellTier,
   type ComputerAccessState,
   type ComputerLevel,
@@ -117,11 +145,15 @@ const current = ref<ComputerAccessState>({
   dry_run: true,
   allow_mouse: false,
   allow_keyboard: false,
+  allow_typing: false,
 })
 const error = ref('')
 const note = ref('')
 const noteBad = ref(false)
 const setting = ref(-1)
+const typingSetting = ref(false)
+const typingNote = ref('')
+const typingNoteBad = ref(false)
 
 async function load(): Promise<void> {
   error.value = ''
@@ -195,6 +227,30 @@ async function loadShell(): Promise<void> {
   } catch (err) {
     shellNote.value = err instanceof Error ? err.message : String(err)
     shellNoteBad.value = true
+  }
+}
+
+async function toggleTyping(allowed: boolean): Promise<void> {
+  typingSetting.value = true
+  typingNote.value = ''
+  try {
+    const list = await setComputerTyping(allowed)
+    levels.value = list.levels
+    current.value = list.current
+    if (list.error) {
+      typingNote.value = list.error
+      typingNoteBad.value = true
+    } else {
+      typingNote.value = allowed
+        ? '已允许她打字：下一句话里她就能输入文字了（发送仍然由你按回车）'
+        : '已禁止她打字：她只能按键，打不出一个字'
+      typingNoteBad.value = false
+    }
+  } catch (err) {
+    typingNote.value = err instanceof Error ? err.message : String(err)
+    typingNoteBad.value = true
+  } finally {
+    typingSetting.value = false
   }
 }
 
@@ -333,6 +389,34 @@ async function setShell(tier: number): Promise<void> {
 
 .ca__note-line--bad {
   color: var(--hud-red);
+}
+
+.ca__toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--hud-line);
+  border-radius: var(--hud-radius);
+  font-size: 12px;
+  color: var(--hud-text);
+  cursor: pointer;
+}
+
+.ca__toggle input {
+  margin-top: 2px;
+  accent-color: var(--hud-cyan);
+  cursor: pointer;
+}
+
+.ca__toggle em {
+  display: block;
+  margin-top: 4px;
+  font-style: normal;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--hud-dim);
 }
 
 .ca__note {

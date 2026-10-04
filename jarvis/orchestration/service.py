@@ -14,7 +14,7 @@ in the composition root (``jarvis.__main__``).
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
@@ -119,7 +119,12 @@ class OrchestrationService:
         graph_factory: Callable[[], _GraphPort] | None = None,
         on_event: Callable[[PipelineEvent], None] | None = None,
         voice_provider: Callable[[], str | None] | None = None,
+        speed_provider: Callable[[], float | None] | None = None,
+        volume_provider: Callable[[], float | None] | None = None,
         transcript_sink: Callable[[str, str], None] | None = None,
+        greeting_provider: Callable[[], str] | None = None,
+        greeting_gate: Callable[[Callable[[], bool]], bool] | None = None,
+        keywords_provider: Callable[[], Sequence[str]] | None = None,
     ) -> None:
         self._settings_provider = settings_provider
         self._asr = asr
@@ -131,7 +136,12 @@ class OrchestrationService:
         self._vad_engine_factory = vad_engine_factory
         self._graph_factory = graph_factory
         self._voice_provider = voice_provider
+        self._speed_provider = speed_provider
+        self._volume_provider = volume_provider
         self._transcript_sink = transcript_sink
+        self._greeting_provider = greeting_provider
+        self._greeting_gate = greeting_gate
+        self._keywords_provider = keywords_provider
         self._on_event = on_event
         self._pipeline: VoicePipeline | None = None
 
@@ -204,7 +214,10 @@ class OrchestrationService:
             # gets its own segmenter so resetting on a wake cannot disturb the
             # listening stage.
             ww_engine = AsrWakeWordEngine(
-                keywords=ww.keywords,
+                # Read live when the shell has a settings-backed provider: the operator
+                # renames herself in the panel and the next sentence is addressed to her,
+                # with no microphone restart and no model reload.
+                keywords=self._keywords_provider or ww.keywords,
                 transcriber=self._asr,
                 segmenter=build_segmenter(),
             )
@@ -245,7 +258,11 @@ class OrchestrationService:
             barge_in=settings.section.barge_in,
             on_event=self._on_event,
             voice_provider=self._voice_provider,
+            speed_provider=self._speed_provider,
+            volume_provider=self._volume_provider,
             transcript_sink=self._transcript_sink,
+            greeting_provider=self._greeting_provider,
+            greeting_gate=self._greeting_gate,
         )
         self._pipeline.start()
         logger.info(

@@ -94,6 +94,7 @@ class InstanceGate:
         self._socket: socket.socket | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._claimed = False
 
     @property
     def port(self) -> int:
@@ -102,6 +103,18 @@ class InstanceGate:
     @property
     def owns_lock(self) -> bool:
         return self._socket is not None
+
+    @property
+    def claimed(self) -> bool:
+        """Whether this process has already won the lock.
+
+        The composition root claims before starting the services and the shell claims
+        again on its way in, so the second call has to be a no-op. It used to bind a
+        *second* ephemeral port and rewrite the lock file, which pointed every later
+        double-click at a socket nobody was listening on -- the wake-up would fail and
+        the newcomer would start a second copy after all.
+        """
+        return self._claimed
 
     def claim(self) -> bool:
         """Whether this process is the one that gets to open a window.
@@ -113,6 +126,8 @@ class InstanceGate:
         because of a file a dead process left behind is how an app ends up
         unstartable until someone finds and deletes it.
         """
+        if self._claimed:
+            return True
         recorded = read_lock(self._path)
         if recorded is not None and send_activate(recorded[1]):
             logger.info("another copy owns port %s; asked it to show its window", recorded[1])
@@ -127,6 +142,7 @@ class InstanceGate:
                 self._close_socket()
                 return False
             self._write_lock(force=True)
+        self._claimed = True
         return True
 
     def _bind(self) -> None:
@@ -211,6 +227,9 @@ class InstanceGate:
             self._thread = None
         mine = read_lock(self._path) == (os.getpid(), self._port)
         self._close_socket()
+        # Released means claimable again: leaving this set would make a later
+        # ``claim()`` answer "you already have it" for a lock nobody holds.
+        self._claimed = False
         if mine:
             try:
                 self._path.unlink()

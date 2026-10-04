@@ -1,9 +1,17 @@
-"""Tests for the process-table refresh cadence in :class:`SystemMonitor`.
+"""Tests for the process ranking's two paths in :class:`SystemMonitor`.
 
-The ranking used to be re-walked on every snapshot. On a machine with a few hundred
-processes that walk costs more than the polling interval, which turns a HUD that is
-merely open into a process burning most of a core -- so the walk now has its own,
-slower clock, and these tests are what keeps it that way.
+The ranking used to be re-walked on every snapshot with psutil, one process at a
+time. On a machine with a few hundred processes that walk costs more than the
+polling interval, which turns a HUD that is merely open into a process burning
+most of a core -- and it made the CPU column jump, because psutil's number is a
+delta against *its own* last call on that object.
+
+Two paths now, and both are pinned here:
+
+* the fast one (Windows): the whole table in one call, re-read every poll, with the
+  CPU share averaged over a rolling window the monitor controls (``_FakeTable``);
+* the fallback (psutil): the old walk with its slower clock (``_CountingMonitor``,
+  ``_WalkingPs``).
 """
 
 from __future__ import annotations
@@ -12,7 +20,48 @@ import time
 
 import pytest
 
-from jarvis.tools.monitor import ProcessReading, SystemMonitor, SystemSnapshot
+from jarvis.tools.monitor import (
+    PROCESS_CPU_WINDOW_SECONDS,
+    ProcessReading,
+    SystemMonitor,
+    SystemSnapshot,
+)
+from jarvis.tools.proctable import ProcessSample
+
+
+class _FakeTable:
+    """The whole-process-table double: pid -> (name, working set, cumulative CPU)."""
+
+    def __init__(self, rows: dict[int, tuple[str, int, float]]) -> None:
+        self.rows = rows
+        self.calls = 0
+
+    def sample(self) -> dict[int, ProcessSample]:
+        self.calls += 1
+        return {
+            pid: ProcessSample(pid=pid, name=name, working_set_bytes=rss, cpu_seconds=cpu_seconds)
+            for pid, (name, rss, cpu_seconds) in self.rows.items()
+        }
+
+
+class _NoTable:
+    """A fast reader that cannot: what a non-Windows machine looks like."""
+
+    def sample(self) -> None:
+        return None
+
+
+class _UnusablePs:
+    """psutil that must not be asked for anything expensive."""
+
+    def cpu_percent(self, interval: float | None = None, *, percpu: bool = False) -> object:
+        return [0.0] * 4 if percpu else 0.0
+
+    def cpu_count(self) -> int:
+        return 4
+
+    def process_iter(self, attrs: object) -> list[object]:
+        raise AssertionError("the fast path must not walk the table one process at a time")
 
 
 class _FakePs:
@@ -327,3 +376,197 @@ class TestNetworkRate:
         net = monitor.snapshot().net
         assert net is not None
         assert net.send_bps is None and net.receive_bps is None
+
+
+class TestTheFastTablePath:
+    """One call for the whole table, averaged over a window this class controls.
+
+    The complaint this answers: the CPU column flipped between 100% and 0%. Two
+    causes, both measured (``build/probe_process_cpu.py``): psutil's number covers
+    whatever interval elapsed since its own last call -- a 2 s window on the priming
+    walk against a 10 s window afterwards -- and the walk's own cost lands inside
+    the window it is measuring, so the process doing the walking reported 74.7%
+    while idle. Here the window is a rolling one the monitor computes from plain
+    cumulative seconds, and every poll gets a fresh table.
+    """
+
+    @staticmethod
+    def _monitor(table: object, **kwargs: object) -> SystemMonitor:
+        return SystemMonitor(
+            psutil_module=_UnusablePs(),  # type: ignore[arg-type]
+            process_table=table,  # type: ignore[arg-type]
+            top_processes=5,
+            **kwargs,  # type: ignore[arg-type]
+        )
+
+    def test_every_poll_gets_a_fresh_table(self) -> None:
+        table = _FakeTable({2: ("burner", 3 * 1024**3, 0.0), 4: ("idle", 1024, 0.0)})
+        monitor = self._monitor(table)
+
+        first = monitor.snapshot()
+        table.rows[2] = ("burner", 3 * 1024**3, 1.0)
+        second = monitor.snapshot()
+
+        assert table.calls == 2, "the fast path is cheap enough to run every poll"
+        assert [row.pid for row in first.top_processes] == [2, 4], "ranked by memory"
+        assert [row.pid for row in second.top_processes] == [2, 4]
+
+    def test_two_readings_apart_become_a_share_of_one_core(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock = {"now": 100.0}
+        monkeypatch.setattr("jarvis.tools.monitor.time.monotonic", lambda: clock["now"])
+        table = _FakeTable({2: ("burner", 1024, 0.0)})
+        monitor = self._monitor(table)
+
+        assert _cpu_of(monitor.snapshot(), 2) is None, "one reading is not a rate"
+
+        clock["now"] = 105.0
+        table.rows[2] = ("burner", 1024, 5.0)  # five seconds of CPU in five seconds
+
+        assert _cpu_of(monitor.snapshot(), 2) == pytest.approx(100.0)
+
+    def test_a_half_busy_process_is_not_rounded_to_100(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock = {"now": 0.0}
+        monkeypatch.setattr("jarvis.tools.monitor.time.monotonic", lambda: clock["now"])
+        table = _FakeTable({9: ("half", 1024, 10.0)})
+        monitor = self._monitor(table)
+        monitor.snapshot()
+
+        clock["now"] = 8.0
+        table.rows[9] = ("half", 1024, 14.0)  # four seconds of CPU in eight
+
+        assert _cpu_of(monitor.snapshot(), 9) == pytest.approx(50.0)
+
+    def test_the_window_forgets_what_is_older_than_it_says(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Otherwise the label "last 10 seconds" would be a claim the code does not keep."""
+        clock = {"now": 0.0}
+        monkeypatch.setattr("jarvis.tools.monitor.time.monotonic", lambda: clock["now"])
+        table = _FakeTable({3: ("long", 1024, 0.0)})
+        monitor = self._monitor(table)
+
+        monitor.snapshot()  # t=0, cpu=0
+        clock["now"] = 4.0
+        table.rows[3] = ("long", 1024, 2.0)
+        monitor.snapshot()  # t=4, cpu=2
+        clock["now"] = PROCESS_CPU_WINDOW_SECONDS + 4.0
+        table.rows[3] = ("long", 1024, 3.0)
+        snapshot = monitor.snapshot()  # t=14: the t=0 sample is outside the window
+
+        # (3 - 2) seconds of CPU over the 10 seconds that remain in the window.
+        assert _cpu_of(snapshot, 3) == pytest.approx(10.0)
+
+    def test_a_recycled_pid_does_not_inherit_the_old_window(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Windows reuses pids; a new process's cumulative time starts lower."""
+        clock = {"now": 0.0}
+        monkeypatch.setattr("jarvis.tools.monitor.time.monotonic", lambda: clock["now"])
+        table = _FakeTable({7: ("first", 1024, 500.0)})
+        monitor = self._monitor(table)
+        monitor.snapshot()
+        clock["now"] = 5.0
+        table.rows[7] = ("first", 1024, 505.0)
+        monitor.snapshot()
+
+        clock["now"] = 8.0
+        table.rows[7] = ("second", 2048, 0.2)  # same pid, brand-new process
+
+        assert _cpu_of(monitor.snapshot(), 7) is None
+
+    def test_an_exited_process_leaves_the_window_behind(self) -> None:
+        table = _FakeTable({2: ("gone", 1024, 0.0), 4: ("stays", 512, 0.0)})
+        monitor = self._monitor(table)
+        monitor.snapshot()
+
+        del table.rows[2]
+        monitor.snapshot()
+
+        assert set(monitor._proc_cpu) == {4}, "a map that only grows is the leak we measure"
+
+    def test_no_table_means_the_psutil_path_still_answers(self) -> None:
+        ps = _WalkingPs({2: 37.5})
+        monitor = SystemMonitor(
+            psutil_module=ps,  # type: ignore[arg-type]
+            process_table=_NoTable(),
+            top_processes=5,
+            process_refresh_seconds=0.0,
+        )
+
+        assert _cpu_of(monitor.snapshot(), 2) is None
+        assert _cpu_of(monitor.snapshot(), 2) == 37.5
+
+    def test_a_pause_longer_than_the_window_starts_over(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The page stops polling while the window is hidden, and laptops sleep.
+
+        Averaging across that gap would report a five-minute mean and label it "last
+        10 seconds" -- so a break longer than the window drops the old baseline and
+        the first frame after it says "not measured yet" instead of a wrong number.
+        """
+        clock = {"now": 0.0}
+        monkeypatch.setattr("jarvis.tools.monitor.time.monotonic", lambda: clock["now"])
+        table = _FakeTable({5: ("slept", 1024, 0.0)})
+        monitor = self._monitor(table)
+        monitor.snapshot()
+        clock["now"] = 5.0
+        table.rows[5] = ("slept", 1024, 5.0)
+        assert _cpu_of(monitor.snapshot(), 5) == pytest.approx(100.0)
+
+        clock["now"] = 5.0 + PROCESS_CPU_WINDOW_SECONDS + 1.0
+        table.rows[5] = ("slept", 1024, 300.0)
+
+        assert _cpu_of(monitor.snapshot(), 5) is None
+
+
+class TestTheMachineCpuRead:
+    """The ring and the per-core bars, against the real psutil.
+
+    Reported as "cpu占用统计一下100%一下0%". The cause was not the machine: psutil keys
+    ``cpu_percent(interval=None)`` to the **calling thread**, and the HUD is served by
+    pywebview's thread pool -- so a poll answered by a thread that had never asked
+    before read 0.0 (measured: four fresh threads read ``[100.0, 100.0, 0.0, 0.0]``,
+    and ``percpu=True`` returned a row of zeros every time). No fake psutil can
+    reproduce that, so this one drives the real library.
+    """
+
+    def test_the_read_never_relies_on_the_thread_local_baseline(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import psutil
+
+        seen: list[float | None] = []
+        real = psutil.cpu_percent
+
+        def spy(interval: float | None = None, *, percpu: bool = False) -> object:
+            seen.append(interval)
+            return real(interval=interval, percpu=percpu)
+
+        monkeypatch.setattr(psutil, "cpu_percent", spy)
+
+        snapshot = SystemMonitor(top_processes=0).snapshot()
+
+        assert seen, "the snapshot must ask for a CPU reading at all"
+        assert all(
+            value is not None and value > 0 for value in seen
+        ), "interval=None means 'since the last call on this thread', which is the bug"
+        assert snapshot.cpu.percent > 0.0
+        assert len(snapshot.cpu.per_core) >= 1
+
+    def test_the_machine_number_is_the_mean_of_the_cores(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One sampled call answers both, so ring and bars cannot disagree."""
+        import psutil
+
+        monkeypatch.setattr(psutil, "cpu_percent", lambda interval=None, percpu=False: [40.0, 20.0])
+
+        snapshot = SystemMonitor(top_processes=0).snapshot()
+
+        assert snapshot.cpu.percent == pytest.approx(30.0)
+        assert snapshot.cpu.per_core == (40.0, 20.0)

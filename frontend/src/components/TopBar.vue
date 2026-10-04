@@ -35,8 +35,18 @@
       </button>
       <button v-else class="hud-btn" type="button" @click="voice.mute()">释放麦克风</button>
 
-      <span v-if="store.warnings.length" class="hud-chip hud-chip--warn" :title="store.warnings.join('\n')">
-        <span class="hud-label">告警 {{ store.warnings.length }}</span>
+      <!--
+        One number for both kinds of trouble, and the tooltip says which is which: this
+        chip's job is "look over there", and two chips competing for that glance are two
+        chips the eye learns to skip. A critical alert tints it red.
+      -->
+      <span
+        v-if="alertLines.length"
+        class="hud-chip"
+        :class="anyCritical ? 'hud-chip--bad' : 'hud-chip--warn'"
+        :title="alertLines.join('\n')"
+      >
+        <span class="hud-label">告警 {{ alertLines.length }}</span>
       </span>
 
       <span class="hud-chip">
@@ -60,13 +70,30 @@
       >
         控制{{ accessLabel ? ` · ${accessLabel}` : '' }}
       </button>
+      <!--
+        手机接入 is a listening port, so its state belongs on the bar next to 控制:
+        "is something on the network able to reach my machine right now" is the same
+        kind of question, and it should not cost a trip into a dialog to answer.
+      -->
       <button
         class="hud-btn bar__entry"
         type="button"
-        :title="`皮肤：${skinLabel}（点击换下一个）`"
-        @click="cycleSkin"
+        :title="phoneLabel ? `手机接入：${phoneLabel}` : '手机接入'"
+        @click="emit('phone')"
       >
-        皮肤
+        手机{{ phoneLabel ? ` · ${phoneLabel}` : '' }}
+      </button>
+      <!--
+        带一个当前色的圆点：一排按钮里，「皮肤」是唯一一个"现在是什么"看不出来的，
+        而把当前皮肤的名字写进按钮会把这一行的宽度顶歪（见 bar__entry 的说明）。
+      -->
+      <button
+        class="hud-btn bar__entry bar__skin"
+        type="button"
+        :title="`皮肤：${skinLabel}`"
+        @click="emit('skin')"
+      >
+        <span class="bar__dot" :style="{ background: hex(currentSkin().line) }"></span>皮肤
       </button>
       <button class="hud-btn bar__entry" type="button" title="最近动作" aria-label="最近动作" @click="emit('activity')">
         动作
@@ -123,9 +150,10 @@ import {
   hideWindow,
   togglePet,
   toggleWindowMax,
+  fetchMobileState,
   type AppInfo,
 } from '@/api/bridge'
-import { SKINS, setSkin, skin } from '@/theme'
+import { SKINS, currentSkin, hex, skin } from '@/theme'
 import { useSystemStore } from '@/stores/system'
 import { useVoiceStore } from '@/stores/voice'
 
@@ -135,13 +163,16 @@ const emit = defineEmits<{
   (e: 'settings'): void
   (e: 'activity'): void
   (e: 'access'): void
+  (e: 'phone'): void
   (e: 'assistant'): void
+  (e: 'skin'): void
 }>()
 const voice = useVoiceStore()
 
 const info = ref<AppInfo>({ name: '小夜', version: '--', engine: '--' })
 const petShown = ref(false)
 const accessLabel = ref('')
+const phoneLabel = ref('')
 const maximized = ref(false)
 
 /**
@@ -180,16 +211,18 @@ function hideToTray(): void {
 }
 
 const skinLabel = computed(() => SKINS.find((entry) => entry.id === skin.value)?.label ?? skin.value)
+/** 选皮肤是一个带预览的选择，不是"盲点着换下一个"——按钮只负责打开那个选择器。 */
 
-/** One button, cycling: a skin is a preference you flip through, not a form. */
-function cycleSkin(): void {
-  const index = SKINS.findIndex((entry) => entry.id === skin.value)
-  setSkin(SKINS[(index + 1) % SKINS.length].id)
-}
 const clock = ref('')
 
 const linkClass = computed(() => (store.connected ? 'live' : 'error'))
 const uptime = computed(() => formatUptime(store.metrics.uptime_seconds ?? 0))
+/** 告警（过了线的）在前，读数残缺（warnings）在后 —— 一起进那颗 chip。 */
+const alertLines = computed(() => [
+  ...store.alerts.map((row) => row.message),
+  ...store.warnings,
+])
+const anyCritical = computed(() => store.alerts.some((row) => row.severity === 'critical'))
 
 let timer: ReturnType<typeof setInterval> | undefined
 
@@ -202,7 +235,11 @@ function tickClock(): void {
 }
 
 function onVisibility(): void {
-  if (!document.hidden) tickClock()
+  if (document.hidden) return
+  tickClock()
+  // The tray's 「手机接入」 usually moves the port while this window is hidden, and a
+  // label that only knew about its own clicks would disagree with the socket.
+  void refreshPhone()
 }
 
 /**
@@ -223,14 +260,40 @@ async function refreshWindowState(): Promise<void> {
   }
 }
 
+/**
+ * Whether the phone port is open, and how many phones it will answer.
+ *
+ * Asked of Python rather than remembered from a click, because the tray's
+ * 「手机接入」 switches the very same listener.
+ */
+/**
+ * The popup switched the port. The event carries a label, and it is ignored: the
+ * reading comes from Python, so the bar cannot be told something the socket
+ * disagrees with.
+ */
+function onPhoneSwitched(): void {
+  void refreshPhone()
+}
+
+async function refreshPhone(): Promise<void> {
+  try {
+    const state = await fetchMobileState()
+    phoneLabel.value = state.running ? `开 · ${state.devices.length} 台` : '关'
+  } catch {
+    phoneLabel.value = ''
+  }
+}
+
 onMounted(async () => {
   tickClock()
   timer = setInterval(tickClock, 1000)
   document.addEventListener('visibilitychange', onVisibility)
   window.addEventListener('resize', onResize)
+  window.addEventListener('jarvis-phone-changed', onPhoneSwitched)
   info.value = await fetchAppInfo()
   void refreshWindowState()
   void refreshPet()
+  void refreshPhone()
   try {
     accessLabel.value = (await fetchComputerLevels()).current.label
   } catch {
@@ -242,6 +305,7 @@ onBeforeUnmount(() => {
   if (timer !== undefined) clearInterval(timer)
   document.removeEventListener('visibilitychange', onVisibility)
   window.removeEventListener('resize', onResize)
+  window.removeEventListener('jarvis-phone-changed', onPhoneSwitched)
 })
 </script>
 
@@ -299,6 +363,19 @@ onBeforeUnmount(() => {
  */
 .bar__entry {
   min-width: 52px;
+}
+
+.bar__skin {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.bar__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  box-shadow: 0 0 6px currentColor;
 }
 
 .bar__uptime {

@@ -12,6 +12,7 @@ import logging
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING
 
+from jarvis.computer.app_launcher import AppCandidate, find_apps
 from jarvis.computer.controller import PyAutoGuiController
 from jarvis.computer.policy import SafetyPolicy
 from jarvis.computer.types import ActionKind, ActionResult, InputController, PlannedAction
@@ -49,6 +50,10 @@ def _describe(kind: ActionKind, params: Mapping[str, object]) -> str:
             return f"按下按键 {params.get('key')}"
         case ActionKind.SCROLL:
             return f"滚动 {params.get('amount')} 个单位"
+        case ActionKind.LAUNCH:
+            if params.get("pid"):
+                return f"把「{params.get('label') or ''}」的窗口显示到最前面"
+            return f"启动「{params.get('label') or ''}」（{params.get('target')}）"
         case ActionKind.DRAG:
             return (
                 f"从 ({params.get('x1')}, {params.get('y1')}) "
@@ -132,6 +137,23 @@ class ComputerService:
     def press_key(self, key: str) -> ActionResult:
         """Press a single named key (``enter``, ``esc``, …)."""
         return self._run(self.plan(ActionKind.KEY, key=key))
+
+    def find_apps(self, query: str) -> tuple[tuple[AppCandidate, ...], tuple[str, ...]]:
+        """Where an app called ``query`` can be found. Read-only, never gated.
+
+        Read-only because looking is not acting: the operator's dial decides whether
+        something may be *started*, not whether the assistant may know where it is.
+        The sources come back with the hits so "找不到" can name what was searched.
+        """
+        return find_apps(query)
+
+    def launch(self, target: str, *, label: str = "", pid: int = 0) -> ActionResult:
+        """Show ``pid``'s window, or start ``target``.
+
+        A path that was resolved by :meth:`find_apps`, never a name the model made up
+        -- the launcher itself refuses anything that is not an ``.exe`` or ``.lnk``.
+        """
+        return self._run(self.plan(ActionKind.LAUNCH, target=target, label=label, pid=pid))
 
     def scroll(self, amount: int) -> ActionResult:
         """Scroll by ``amount`` units (positive is up, as pyautogui defines it)."""

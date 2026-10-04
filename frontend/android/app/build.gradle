@@ -1,0 +1,87 @@
+apply plugin: 'com.android.application'
+
+/**
+ * 签名材料在**仓库外面**：E:/BianChengGongJu/JarvisKeys/keystore.properties。
+ *
+ * 两件事要记住：
+ * 1) 密钥库丢了 = 老用户装不上新版本（Android 按签名认应用），只能重新发布一个包名。
+ *    所以这个文件必须单独备份，不能跟着仓库走——仓库是公开的。
+ * 2) 找不到密钥库时 release 构建**直接失败**，不退化成 debug 签名。
+ *    debug 签名的 APK 看起来一模一样，装上之后却和正式版互不兼容，
+ *    那种事故是在用户手机上才暴露的。
+ */
+def keystorePropsFile = System.getenv("XY_KEYSTORE")
+        ?: "E:/BianChengGongJu/JarvisKeys/keystore.properties"
+
+android {
+    namespace "com.xiaoye.assistant"
+    compileSdk rootProject.ext.compileSdkVersion
+    defaultConfig {
+        applicationId "com.xiaoye.assistant"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode 8
+        versionName "0.4.0"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        aaptOptions {
+             // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
+             // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
+            ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+        }
+    }
+    signingConfigs {
+        release {
+            def props = new Properties()
+            // 局部变量别叫 file：Groovy 里它会盖掉 Gradle 的 file() 方法，
+            // 下一行 `file(...)` 就变成"调用一个 File 对象"，报的是 No signature of method。
+            def propsFile = new File(keystorePropsFile)
+            if (!propsFile.isFile()) {
+                throw new GradleException(
+                        "找不到签名用的 keystore.properties: " + keystorePropsFile
+                                + "。没有它就不能出 release 包 —— debug 签名的 APK 和正式版互不兼容。")
+            }
+            propsFile.withInputStream { props.load(it) }
+            storeFile new File(props['storeFile'])
+            storePassword props['storePassword']
+            keyAlias props['keyAlias']
+            keyPassword props['keyPassword']
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.release
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+    }
+}
+
+repositories {
+    flatDir{
+        dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
+    }
+}
+
+dependencies {
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
+    implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
+    implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
+    implementation project(':capacitor-android')
+    testImplementation "junit:junit:$junitVersion"
+    androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
+    androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
+    implementation project(':capacitor-cordova-android-plugins')
+}
+
+apply from: 'capacitor.build.gradle'
+
+try {
+    def servicesJSON = file('google-services.json')
+    if (servicesJSON.text) {
+        apply plugin: 'com.google.gms.google-services'
+    }
+} catch(Exception e) {
+    logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work")
+}

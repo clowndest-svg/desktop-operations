@@ -371,7 +371,7 @@ class TestLauncher:
         assert "if not defined" in bat, "an existing operator setting must win"
 
     def test_points_at_the_troubleshooting_doc(self) -> None:
-        assert r"docs\desktop-operations.md" in self._bat()
+        assert r"docs\桌面运维手册.md" in self._bat()
 
     def test_encourages_python_utf8_output(self) -> None:
         """The console prints Chinese; without a code page it is mojibake."""
@@ -394,3 +394,58 @@ class TestShippedBundleOverHttp:
     def test_the_index_declares_a_utf8_charset(self) -> None:
         """The UI is Chinese; without a declared charset a webview may guess."""
         assert "charset" in index_path().read_text(encoding="utf-8").lower()
+
+
+def _page(relative: str) -> str:
+    return (REPO_ROOT / "frontend" / "src" / relative).read_text(encoding="utf-8")
+
+
+class TestCopyButtonsOnThePairingPanel:
+    """手机接入那面板上，每一串要照抄的东西都得能复制，且失败要说得出口。
+
+    配对码六位、证书指纹二十来个十六进制字符 —— 用手机一个字一个字敲错一位，表现是
+    "连不上，不知道为什么"。这类值不给复制按钮，等于把一次输入错误的代价留给用户去猜。
+    而"按了没反应"和"复制成功"必须在界面上分得开，所以断言的是三种文字都在。
+    """
+
+    PANEL = "components/MobileAccessPopup.vue"
+
+    def test_every_hand_typed_value_has_a_copy_button(self) -> None:
+        panel = _page(self.PANEL)
+        for name, value in (
+            ("地址", "state.url"),
+            ("配对码", "code"),
+            ("指纹", "state.fingerprint"),
+            ("命令", "state.firewall"),
+        ):
+            assert f"copy('{name}', {value})" in panel, f"{value} 还要人手抄"
+            assert panel.count('class="ma__copy"') >= 4
+
+    def test_the_button_reports_three_states_not_just_success(self) -> None:
+        panel = _page(self.PANEL)
+        for label in ("已复制", "没复制上", "没有内容"):
+            assert label in panel, f"少了「{label}」这一档，失败就看不见了"
+
+    def test_the_marker_is_written_from_the_result_not_a_constant(self) -> None:
+        """ "已复制" 只能由复制的返回值决定。
+
+        写死的成功提示是这个项目最常见的一类假：按钮变绿了，剪贴板里什么都没有。
+        """
+        panel = _page(self.PANEL)
+        assert "copied.value = { ...copied.value, [name]: await copyText(value) }" in panel
+        assert "await copyText" not in panel.replace(
+            "copied.value = { ...copied.value, [name]: await copyText(value) }", ""
+        ), "第二条复制路径绕开了结果记录"
+
+    def test_the_clipboard_helper_looks_at_the_fallback_answer(self) -> None:
+        """``execCommand('copy')`` 失败时不抛异常，只返回 false。
+
+        所以那条老路必须看返回值 —— 只 try/except 的话，浏览器会一路"复制成功"下去。
+        """
+        helper = _page("api/clipboard.ts")
+        assert "document.execCommand('copy') ? 'copied' : 'failed'" in helper
+        assert "navigator.clipboard.writeText" in helper
+        assert "box.remove()" in helper, "每按一次留一个隐藏 textarea 在 DOM 里"
+
+    def test_the_pending_timers_are_cancelled_with_the_panel(self) -> None:
+        assert "onBeforeUnmount" in _page(self.PANEL)

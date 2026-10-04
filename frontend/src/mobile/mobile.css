@@ -1,0 +1,164 @@
+/* 手机版的全局底 + 设计变量。
+ *
+ * 这一层只做三件事：定一套名字（颜色、圆角、间距、触摸尺寸）、切深浅两套外观、
+ * 以及把"页面不许整体滚动、键盘弹起后还剩多高"这两条平台规则按住。
+ *
+ * 为什么单独起一套 `--xy-` 前缀而不是直接用 hud.css 的 `--hud-`：那套变量是给
+ * **桌面**的深色玻璃面板算的（1px 硬边框 + 霓虹描边），在手机上按那个思路做出来
+ * 就是满屏的线框，密、硬、按不准。手机要的是"面"不是"线"：分层靠背景色差和圆角，
+ * 边框只用在真正需要分隔的地方。两套变量并存，桌面那份一个字节都不用动。
+ */
+
+:root {
+  /* 圆角：手机上比桌面大一档才显得松弛。 */
+  --xy-r-xs: 8px;
+  --xy-r-sm: 12px;
+  --xy-r-md: 16px;
+  --xy-r-lg: 20px;
+  --xy-r-xl: 26px;
+  --xy-pill: 999px;
+
+  /* 拇指能按准的最小边长。低于这个数的按钮在真机上就是"点不中"。 */
+  --xy-tap: 44px;
+
+  --xy-font: -apple-system, 'HarmonyOS Sans', 'MiSans', 'PingFang SC', 'Noto Sans CJK SC',
+    'Microsoft YaHei', system-ui, sans-serif;
+  --xy-mono: var(--hud-mono, ui-monospace, monospace);
+
+  /* 软键盘挡住的高度。由**原生层**写进来（MainActivity.reportKeyboardHeight
+     把 IME inset 换算成 CSS 像素），页面拿它算自己的高度。
+     默认 0：桌面浏览器预览、以及还没收到上报的那一瞬间，都退化成"没有键盘"。
+
+     为什么是"原生报告、页面应用"，而不是原生直接改 WebView 尺寸：
+     后者等于两个层同时拥有布局的控制权，出错时是整屏空白（没有崩溃、没有日志）。
+     见 MainActivity 顶部那段。 */
+  --xy-kb: 0px;
+
+  /* 深色是默认：桌面端本来就是深色 HUD，手机跟着走才像同一个产品。 */
+  --xy-bg: #070d15;
+  --xy-bg-soft: #0b131e;
+  --xy-card: #121c29;
+  --xy-card-2: #182433;
+  --xy-line: rgba(255, 255, 255, 0.07);
+  --xy-line-2: rgba(255, 255, 255, 0.14);
+  --xy-text: #e9f2fb;
+  --xy-text-2: #9db0c6;
+  --xy-text-3: #6d8199;
+
+  /* 强调色跟着皮肤走：桌面上选了哪套，手机上就是哪套。
+     深色外观下六套皮肤都是亮色，所以"压在强调色上的字"统一用近黑，对比度都够。 */
+  --xy-accent: var(--hud-cyan, #4dd8ff);
+  --xy-accent-soft: color-mix(in srgb, var(--xy-accent) 16%, transparent);
+  --xy-accent-line: color-mix(in srgb, var(--xy-accent) 34%, transparent);
+  --xy-on-accent: #06121f;
+
+  --xy-danger: #ff6b7a;
+  --xy-danger-soft: rgba(255, 107, 122, 0.14);
+  --xy-ok: #3fd6a0;
+  --xy-warn: #ffb454;
+
+  --xy-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  --xy-shadow-soft: 0 2px 10px rgba(0, 0, 0, 0.3);
+}
+
+/* 浅色外观：豆包那种白底 + 极淡分隔 + 一层薄阴影。
+   浅色下强调色不跟皮肤走 —— 皮肤那六套是给深色玻璃算的亮色（比如琥珀 #ffb45a），
+   放在白底上要么看不清要么刺眼。这里换成一个固定的中蓝，对比度是可算的。 */
+:root[data-appearance='light'] {
+  --xy-bg: #f1f4f8;
+  --xy-bg-soft: #ffffff;
+  --xy-card: #ffffff;
+  --xy-card-2: #f6f8fb;
+  --xy-line: rgba(18, 35, 58, 0.07);
+  --xy-line-2: rgba(18, 35, 58, 0.14);
+  --xy-text: #131c28;
+  --xy-text-2: #5f6f80;
+  --xy-text-3: #93a1b0;
+
+  --xy-accent: #2f7cf6;
+  --xy-accent-soft: rgba(47, 124, 246, 0.1);
+  --xy-accent-line: rgba(47, 124, 246, 0.3);
+  --xy-on-accent: #ffffff;
+
+  --xy-danger: #d93b41;
+  --xy-danger-soft: rgba(217, 59, 65, 0.1);
+  --xy-ok: #12855a;
+  --xy-warn: #a8690f;
+
+  --xy-shadow: 0 10px 28px rgba(20, 40, 70, 0.12);
+  --xy-shadow-soft: 0 2px 8px rgba(20, 40, 70, 0.07);
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  /* 整页不许滚动：手机上"橡皮筋"式整体回弹看着像卡住了，而且会把顶栏拖出屏幕。
+     更要紧的是，一旦整页可滚，浏览器就会为了露出被键盘挡住的光标去**平移可视区**，
+     而 fixed/absolute 定位的界面不跟着走 —— 那正是"点输入框之后整屏变黑"的成因。
+     滚动只发生在消息流和面板内部，整页不动。 */
+  overflow: hidden;
+  background: var(--xy-bg);
+  /* 用户在系统里把字体调到 200% 时，正文跟着变大但布局不能塌。 */
+  -webkit-text-size-adjust: 100%;
+  overscroll-behavior: none;
+}
+
+/* `overflow: hidden` 只是不显示滚动条，**程序化滚动照样生效** ——
+   `scrollIntoView` 之类的调用仍然能把整页滚走。`clip` 才是真的关死。
+   这一条是"设置面板里点输入框整屏变黑"那个 bug 的第二道闸：
+   第一道是 viewport.ts 里改成只滚最近的可滚动祖先。 */
+@supports (overflow: clip) {
+  html,
+  body {
+    overflow: clip;
+  }
+}
+
+#app {
+  height: 100%;
+}
+
+body {
+  font-family: var(--xy-font);
+  color: var(--xy-text);
+  /* 长按"说话"键时 Android 会弹出文本选择菜单，体验上像卡住了。 */
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+input,
+textarea {
+  -webkit-user-select: text;
+  user-select: text;
+  font-family: inherit;
+  /* 16px 是硬门槛：小于它 iOS 会在聚焦时自动放大整页，Android 部分 ROM 也会。 */
+  font-size: 16px;
+}
+
+button {
+  font-family: inherit;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+/* 只给"有形状"的按钮做下沉反馈；图标按钮靠自己的 active 规则。 */
+button:active {
+  transform: translateY(1px);
+}
+
+/* 浅色外观下滚动条不该是深色系统默认那一条。 */
+:root[data-appearance='light'] {
+  color-scheme: light;
+}
+:root {
+  color-scheme: dark;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

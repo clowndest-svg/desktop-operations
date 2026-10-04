@@ -71,6 +71,11 @@ class FakePet:
         self.toggles = 0
         self.summons = 0
         self.closed = 0
+        self.thinking: list[tuple[bool, str]] = []
+
+    def set_thinking(self, active: bool, *, source: str = "turn") -> None:
+        """Recorded, never acted on: these tests are about which window holds the mic."""
+        self.thinking.append((active, source))
 
     @property
     def shown(self) -> bool:
@@ -382,14 +387,21 @@ class TestWakeSummonsTheFigure:
         lifecycle.on_event(PipelineEvent(kind="wake"))
         assert pet.summons == 0
 
-    def test_a_wake_word_does_not_switch_the_pet_on_by_itself(self) -> None:
-        """A figure appearing unasked is the assistant talking unprompted, with geometry."""
+    def test_the_wake_word_brings_her_out_even_before_anyone_pressed_the_switch(self) -> None:
+        """2026-10-02: 「当我说出唤醒词时宠物要能从虫洞里直接显示出来」.
+
+        The rule this replaces -- only *re-play* the arrival for a figure already on
+        the desktop -- made the wake word look broken, because until someone pressed
+        桌面宠物 once in the tray menu, saying the word summoned nothing at all. What
+        stays is the other half of the old reasoning: she does not appear in front of
+        the window the operator is reading (test above), and no tool can switch her on.
+        """
         lifecycle, _, _ = shell()
         pet = FakePet()
         lifecycle.attach_pet(pet)
         lifecycle.hide()
         lifecycle.on_event(PipelineEvent(kind="wake"))
-        assert pet.summons == 0
+        assert pet.summons == 1
 
     def test_no_pet_window_means_the_wake_word_changes_only_the_icon(self) -> None:
         lifecycle, _, tray = shell()

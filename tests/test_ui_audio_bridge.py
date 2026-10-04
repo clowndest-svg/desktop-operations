@@ -24,7 +24,7 @@ from typing import Any, cast
 from jarvis.core.events import PipelineEvent
 from jarvis.orchestration.player import BridgePlayer
 from jarvis.tts.types import AudioChunk
-from jarvis.ui.audio_bridge import AudioPusher
+from jarvis.ui.audio_bridge import ROLE_HUD, ROLE_PET, AudioPusher
 
 _RATE = 24_000
 """Edge-TTS's native rate; every expectation about slice counts follows from it."""
@@ -248,11 +248,12 @@ class TestFlush:
         assert _payload(window.scripts[0])["flush"] is True
 
     def test_an_unrelated_event_sends_nothing(self) -> None:
-        """A ``reply`` event arrives twice a turn; flushing on those would cut off the
-        answer it is announcing."""
+        """One spoken line per turn, and neither kind of it is an audio cue: flushing on
+        those would cut off the answer they are announcing."""
         pusher, window = _ready_pusher()
         window.scripts.clear()
 
+        pusher.on_event(PipelineEvent(kind="user_text", text="现在几点"))
         pusher.on_event(PipelineEvent(kind="reply", text="好的"))
         pusher.on_event(PipelineEvent(kind="state", text="idle"))
         pusher.on_event(PipelineEvent(kind="speech_start"))
@@ -314,3 +315,117 @@ class TestBridgePlayer:
         player.play(AudioChunk(audio=_CHUNK, sample_rate=_RATE))
         player.close()
         assert sink.closed == 1
+
+
+class TestSpectator:
+    """The desktop figure is fed the voice in order to *watch* it, not to play it.
+
+    She reads the same samples the speaker plays because her mouth is drawn from them.
+    The rule that keeps this honest is that she must never be able to change what the
+    loudspeaker does: her window can be hidden, reloaded, or gone entirely, and the
+    operator's answer is not allowed to depend on that.
+    """
+
+    def test_she_gets_the_same_slices_with_the_speaker_closed(self) -> None:
+        pusher, owner = _ready_pusher(slice_seconds=0.01)
+        pet = FakeWebviewWindow()
+        pusher.attach_spectator(pet)
+
+        assert pusher.emit(_CHUNK * 60, _RATE, True) is True
+
+        assert owner.scripts and pet.scripts
+        assert [_payload(s)["pcm"] for s in pet.scripts] == [
+            _payload(s)["pcm"] for s in owner.scripts
+        ]
+        assert all(_payload(s)["mute"] is True for s in pet.scripts)
+        assert not any(_payload(s).get("mute") for s in owner.scripts), "one voice, one speaker"
+
+    def test_she_is_fed_even_when_the_page_cannot_play_at_all(self) -> None:
+        """The speaker-fallback case is exactly when she would otherwise freeze.
+
+        Nothing audible can come out of a second window -- Python has the chunk and is
+        already playing it -- so feeding her silenced samples costs nothing and keeps
+        her mouth in time with a voice she is not making.
+        """
+        pusher = AudioPusher(slice_seconds=0.01)
+        pusher.attach_window(FakeWebviewWindow())  # never claims readiness
+        pet = FakeWebviewWindow()
+        pusher.attach_spectator(pet)
+
+        assert pusher.emit(_CHUNK * 60, _RATE, True) is False, "the caller still owns the speaker"
+        assert pet.scripts, "and she still saw every slice"
+
+    def test_a_barge_in_stops_her_too(self) -> None:
+        """Samples already queued in her graph would keep her talking over the operator."""
+        pusher, _owner = _ready_pusher()
+        pet = FakeWebviewWindow()
+        pusher.attach_spectator(pet)
+
+        pusher.on_event(PipelineEvent(kind="wake"))
+        assert any(_payload(s).get("flush") for s in pet.scripts)
+
+    def test_three_failures_and_one_log_line(self, caplog: Any) -> None:
+        """A window that is gone answers every call the same way; do not keep asking."""
+        pusher, owner = _ready_pusher(slice_seconds=0.01)
+        pet = FakeWebviewWindow(fail_after=0)
+        pusher.attach_spectator(pet)
+
+        with caplog.at_level("WARNING"):
+            pusher.emit(_CHUNK * 600, _RATE, True)
+            pusher.emit(_CHUNK * 600, _RATE, True)
+
+        assert pet.scripts == [], "nothing ever landed, and that is the point"
+        assert caplog.text.count("desktop figure") == 1, "one line, not one per slice"
+        assert owner.scripts, "the answer itself was never her problem"
+
+    def test_her_failure_leaves_the_answer_alone(self) -> None:
+        pusher, owner = _ready_pusher(slice_seconds=0.01)
+        pusher.attach_spectator(FakeWebviewWindow(fail_after=0))
+
+        assert pusher.emit(_CHUNK * 600, _RATE, True) is True
+        assert owner.scripts
+
+    def test_the_owner_is_never_her_own_spectator(self) -> None:
+        """Two copies of one answer in one window is the echo this design prevents."""
+        pusher, owner = _ready_pusher(slice_seconds=0.01)
+        pusher.attach_spectator(owner)
+
+        assert pusher.emit(_CHUNK * 60, _RATE, True) is True
+        assert owner.scripts
+        assert not any(_payload(s).get("mute") for s in owner.scripts)
+
+
+class TestReadinessIsPerWindow:
+    """Which page may decide the output device, now that two of them open a graph."""
+
+    def test_only_the_current_loudspeakers_claim_counts(self) -> None:
+        pusher = AudioPusher()
+        pusher.attach_window(FakeWebviewWindow(), ROLE_HUD)
+
+        pusher.mark_ready(True, "", ROLE_PET)
+        assert pusher.ready is False, "she is not the one playing"
+        pusher.mark_ready(True, "", ROLE_HUD)
+        assert pusher.ready is True
+
+    def test_handing_her_the_output_switches_whose_answer_counts(self) -> None:
+        pusher = AudioPusher()
+        hud, pet = FakeWebviewWindow(), FakeWebviewWindow()
+        pusher.attach_window(hud, ROLE_HUD)
+        pusher.mark_ready(True, "", ROLE_HUD)
+        pusher.mark_ready(False, "宠物页没有可用的音频上下文", ROLE_PET)
+
+        pusher.attach_window(pet, ROLE_PET)
+        assert pusher.ready is False
+        assert "宠物页" in pusher.detail
+
+        pusher.attach_window(hud, ROLE_HUD)
+        assert pusher.ready is True, "the dashboard's earlier yes still stands"
+
+    def test_a_page_that_has_not_answered_has_not_claimed_anything(self) -> None:
+        """Absence of a claim is not a claim -- for either of them."""
+        pusher = AudioPusher()
+        pet = FakeWebviewWindow()
+        pusher.attach_window(pet, ROLE_PET)
+
+        assert pusher.emit(_CHUNK * 60, _RATE, True) is False
+        assert pet.scripts == []

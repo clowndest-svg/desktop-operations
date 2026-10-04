@@ -6,9 +6,17 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc -b && vite build",
+    "build:mobile": "vue-tsc -b && vite build --config vite.mobile.config.ts",
+    "android": "npm run build:mobile && npx cap sync android",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@capacitor/android": "^7.6.9",
+    "@capacitor/camera": "^7.0.5",
+    "@capacitor/core": "^7.6.9",
+    "@capacitor/preferences": "^7.0.4",
+    "@capacitor/splash-screen": "^7.0.5",
+    "@capacitor/status-bar": "^7.0.6",
     "@pixiv/three-vrm": "^3.5.5",
     "echarts": "^6.1.0",
     "pinia": "^4.0.3",
@@ -16,6 +24,7 @@
     "vue": "^3.5.42"
   },
   "devDependencies": {
+    "@capacitor/cli": "^7.6.9",
     "@types/node": "^24.13.3",
     "@types/three": "^0.186.0",
     "@vitejs/plugin-vue": "^6.0.8",

@@ -17,7 +17,12 @@ from jarvis.config.schema import ComputerSection
 
 def _base() -> ComputerSection:
     return ComputerSection(
-        enabled=False, dry_run=True, allow_mouse=False, allow_keyboard=False, confirm_dangerous=True
+        enabled=False,
+        dry_run=True,
+        allow_mouse=False,
+        allow_keyboard=False,
+        allow_typing=False,
+        confirm_dangerous=True,
     )
 
 
@@ -90,6 +95,7 @@ class TestLevelMapping:
             dry_run=False,
             allow_mouse=True,
             allow_keyboard=True,
+            allow_typing=True,
             confirm_dangerous=True,
         )
         access = ComputerAccess(prefs, lambda: opened)
@@ -130,3 +136,66 @@ class TestChoosing:
         access, _ = _access(tmp_path)
 
         assert access.tier() == REHEARSAL
+
+
+class TestTheTypingSwitch:
+    """打字的钥匙跟档位分开，因为风险不是一件事。
+
+    实测撞到的：档位开到「键鼠全开」，说"给老妈发句你好"，打字仍被拒 —— 而且没有任何
+    界面开关能打开它（旧规则要 `confirmed=true`，而工具层明确不让模型传那个参数）。
+    现在这把钥匙是 `computer.allow_typing`，默认关，独立于档位。
+    """
+
+    def test_off_by_default_even_at_the_widest_tier(self, tmp_path: Any) -> None:
+        access, prefs = _access(tmp_path)
+        prefs.set(COMPUTER_TIER, FULL)
+
+        section = access.section()
+
+        assert section.allow_mouse is True and section.allow_keyboard is True
+        assert section.allow_typing is False, "开鼠标键盘不等于同意往别人输入框里写字"
+
+    def test_turning_it_on_survives_a_tier_change(self, tmp_path: Any) -> None:
+        access, _prefs = _access(tmp_path)
+
+        access.set_typing(True)
+        assert access.section().allow_typing is True
+
+        access.set_tier(REHEARSAL)
+        assert access.section().allow_typing is True, "档位不该顺手把打字关掉"
+        assert access.section().dry_run is True
+
+    def test_levels_reports_it_so_the_panel_can_draw_it(self, tmp_path: Any) -> None:
+        access, _prefs = _access(tmp_path)
+
+        assert access.levels()["current"]["allow_typing"] is False  # type: ignore[index]
+        access.set_typing(True)
+        assert access.levels()["current"]["allow_typing"] is True  # type: ignore[index]
+
+    def test_a_non_boolean_is_refused_without_writing(self, tmp_path: Any) -> None:
+        access, _prefs = _access(tmp_path)
+
+        answer = access.set_typing("yes")
+
+        assert "只认 true/false" in str(answer["error"])
+        assert access.section().allow_typing is False
+
+    def test_the_base_config_can_only_open_it_explicitly(self, tmp_path: Any) -> None:
+        """配置文件里写 allow_typing: true 是操作者自己的选择，preferences 覆盖它。"""
+        prefs = Preferences(tmp_path / "prefs.json")
+        prefs.set(COMPUTER_TIER, FULL)
+
+        opened = ComputerSection(
+            enabled=True,
+            dry_run=False,
+            allow_mouse=True,
+            allow_keyboard=True,
+            allow_typing=True,
+            confirm_dangerous=True,
+        )
+        access = ComputerAccess(prefs, lambda: opened)
+
+        assert access.section().allow_typing is True
+
+        access.set_typing(False)
+        assert access.section().allow_typing is False, "界面关掉要能压住配置文件"
