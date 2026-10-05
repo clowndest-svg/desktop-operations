@@ -9,6 +9,7 @@ clicks later; an override that is remembered but never applied.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -713,6 +714,69 @@ class TestModelList:
 
         assert "gamma" in {entry["name"] for entry in outcome["models"]}
         assert "Key" in outcome["problems"]["add_model"]
+
+    def test_a_local_endpoint_can_be_added_without_any_key(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        """Ollama / LM Studio on localhost have no credential to type.
+
+        The panel already labelled the field 「可选」 while the client raised
+        ``LlmAuthError`` before opening a socket, and the connectivity gate then rolled
+        the row back with 「连不上，没保存」 -- so a local model could not be added at all.
+        """
+        service, fake_llm, _ = _service(prefs, env)
+
+        outcome = service.apply(
+            {
+                "add_model": {
+                    "name": "ollama",
+                    "base_url": "http://localhost:11434/v1",
+                    "model": "qwen2.5",
+                    "key_optional": True,
+                }
+            }
+        )
+
+        assert outcome["problems"] == {}
+        row = next(entry for entry in outcome["models"] if entry["name"] == "ollama")
+        assert row["key_optional"] is True
+        assert row["key_set"] is False, "没配钥匙就该照实说没配，而不是假装配好了"
+        assert fake_llm.override is not None
+        assert fake_llm.override.providers["ollama"].key_optional is True
+
+    def test_a_row_without_the_flag_still_demands_a_key(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        """Unlocking local servers must not unlock the cloud row next to it."""
+        service, _, _ = _service(prefs, env)
+
+        outcome = service.apply(
+            {"add_model": {"name": "cloudai", "base_url": "https://c.example/v1", "model": "m"}}
+        )
+
+        row = next(entry for entry in outcome["models"] if entry["name"] == "cloudai")
+        assert row["key_optional"] is False
+
+    def test_the_keyless_choice_survives_a_restart(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        """It is stored in the row, not remembered only in this process's memory."""
+        service, _, _ = _service(prefs, env)
+        service.apply(
+            {
+                "add_model": {
+                    "name": "ollama",
+                    "base_url": "http://localhost:11434/v1",
+                    "model": "qwen2.5",
+                    "key_optional": True,
+                }
+            }
+        )
+
+        restarted, _, _ = _service(Preferences(prefs.path), env)
+
+        row = next(entry for entry in restarted.snapshot()["models"] if entry["name"] == "ollama")
+        assert row["key_optional"] is True
 
     def test_removing_one_of_several_rows_persists(
         self, prefs: Preferences, env: dict[str, str]
@@ -1622,3 +1686,85 @@ class TestHidingAProviderRow:
 
         assert snapshot["hidden_models"] == []
         assert "ghost" in caplog.text
+
+
+class TestTurningARowKeyless:
+    """The row editor's 免 Key checkbox, for rows that already exist.
+
+    Someone who adds an Ollama row without ticking the box is refused and rolled back --
+    but a row that arrived from ``config.yaml`` (or was added while a key *was* set) would
+    otherwise have no way to become keyless, and hand-editing a yaml file is not something
+    a person who bought a desktop app should have to do.
+    """
+
+    @staticmethod
+    def _keyless_alpha() -> LlmSection:
+        return replace(
+            _section(),
+            providers={
+                **_section().providers,
+                "alpha": replace(_section().providers["alpha"], key_optional=True),
+            },
+        )
+
+    def test_turning_it_on_reaches_the_client_and_the_panel(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        service, fake_llm, _ = _service(prefs, env)
+
+        outcome = service.apply({"target": "alpha", "key_optional": True})
+
+        assert outcome["problems"] == {}
+        row = next(entry for entry in outcome["models"] if entry["name"] == "alpha")
+        assert row["key_optional"] is True
+        assert fake_llm.override is not None
+        assert fake_llm.override.providers["alpha"].key_optional is True
+
+    def test_the_flag_survives_a_restart(self, prefs: Preferences, env: dict[str, str]) -> None:
+        service, _, _ = _service(prefs, env)
+        service.apply({"target": "alpha", "key_optional": True})
+
+        restarted, _, _ = _service(Preferences(prefs.path), env)
+
+        row = next(entry for entry in restarted.snapshot()["models"] if entry["name"] == "alpha")
+        assert row["key_optional"] is True
+
+    def test_a_save_that_did_not_touch_the_box_leaves_the_file_alone(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        """The panel re-sends the whole form on every 保存.
+
+        Writing ``False`` for rows nobody re-checked would take the flag away from a
+        ``config.yaml`` provider declared keyless -- the same class of bug as the one that
+        made a blank 调用地址 mean 不覆盖.
+        """
+        service, _, _ = _service(prefs, env, section=self._keyless_alpha())
+
+        service.apply({"target": "alpha", "model": "alpha-1"})
+
+        row = next(entry for entry in service.snapshot()["models"] if entry["name"] == "alpha")
+        assert row["key_optional"] is True
+        stored = prefs.get(LLM_OVERRIDES) or {}
+        assert "key_optional" not in stored.get("alpha", {})
+
+    def test_turning_it_off_demands_a_key_again(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        service, fake_llm, _ = _service(prefs, env, section=self._keyless_alpha())
+
+        outcome = service.apply({"target": "alpha", "key_optional": False})
+
+        row = next(entry for entry in outcome["models"] if entry["name"] == "alpha")
+        assert row["key_optional"] is False
+        assert fake_llm.override is not None
+        assert fake_llm.override.providers["alpha"].key_optional is False
+
+    def test_a_row_that_is_not_there_is_named_and_changes_nothing(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        service, _, _ = _service(prefs, env)
+
+        outcome = service.apply({"target": "nope", "key_optional": True})
+
+        assert "key_optional" in outcome["problems"]
+        assert not prefs.get(LLM_OVERRIDES)

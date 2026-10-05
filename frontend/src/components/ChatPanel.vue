@@ -93,7 +93,7 @@
           @change="chooseProvider"
         >
           <option v-for="entry in providers" :key="entry.name" :value="entry.name">
-            {{ entry.name }}{{ entry.key_set ? '' : '（缺 key）' }}
+            {{ entry.name }}{{ entry.key_set ? '' : entry.key_optional ? '（免 Key）' : '（缺 key）' }}
           </option>
         </select>
         <select

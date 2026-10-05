@@ -68,4 +68,9 @@ assets-src/*.vrm
 *.keystore
 *.jks
 keystore.properties
+
+# 上架材料（定价、文案、买家说明、截图）不进仓库，也不进公开分支。
+# 公开分支那条配方只按名字排除 commercial/（docs/分发与分享.md §9），
+# 所以这个目录一旦被 git 捡走，就会被同步推到公网 —— 里面是我的报价策略。
+闲鱼展示内容/
 commercial/

@@ -144,6 +144,10 @@ with open(_buildinfo_file, "w", encoding="utf-8") as _handle:
 datas = [
     (os.path.join(ROOT, "jarvis", "config", "defaults.yaml"), "jarvis/config"),
     (os.path.join(ROOT, "jarvis", "ui", "web"), "jarvis/ui/web"),
+    # The offline-voice worker has to exist **on disk**: it is executed by the other
+    # interpreter, not imported here, and inside the PYZ archive there is no file to
+    # hand a subprocess. Without this line the packaged app cannot reach voice cloning.
+    (os.path.join(ROOT, "jarvis", "tts", "cosyvoice_worker.py"), "jarvis/tts"),
     (_buildinfo_file, "jarvis"),
 ]
 

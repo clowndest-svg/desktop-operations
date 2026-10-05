@@ -90,6 +90,9 @@ class OpenAiCompatSettings:
     cost_output_per_1m: float = 0.0
     """USD per 1M completion tokens (0 = unknown, cost not reported)."""
 
+    key_optional: bool = False
+    """Send the request without an ``Authorization`` header when no key is configured."""
+
 
 class OpenAiCompatClient:
     """Synchronous :class:`~jarvis.llm.client.LlmClient` implementation.
@@ -331,6 +334,13 @@ class OpenAiCompatClient:
     def _api_key(self) -> str:
         env = os.environ if self._environ is None else self._environ
         key = env.get(self._settings.api_key_env, "").strip()
+        if not key and self._settings.key_optional:
+            # Nothing to send, and that is the honest answer: Ollama, LM Studio and
+            # llama.cpp's server all speak the OpenAI protocol with no credential.
+            # Returning "" makes :meth:`_headers` leave the Authorization line off --
+            # sending an empty ``Bearer `` instead is a different request, and some
+            # proxies answer it with a 401 that reads exactly like a broken client.
+            return ""
         if not key:
             raise LlmAuthError(
                 f"API key environment variable '{self._settings.api_key_env}' is not set",
@@ -342,7 +352,8 @@ class OpenAiCompatClient:
         return key
 
     def _headers(self) -> dict[str, str]:
-        return {"Authorization": f"Bearer {self._api_key()}"}
+        key = self._api_key()
+        return {"Authorization": f"Bearer {key}"} if key else {}
 
     def _payload(
         self,

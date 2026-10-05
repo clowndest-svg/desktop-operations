@@ -11,6 +11,7 @@ out", because the fake model always answers.
 from __future__ import annotations
 
 import base64
+import importlib.util
 import json
 import sys
 import textwrap
@@ -24,6 +25,7 @@ from jarvis.core.exceptions import TtsError
 from jarvis.tts import sidecar as sidecar_module
 from jarvis.tts.sidecar import (
     EXIT_GRACE,
+    WORKER_MODULE,
     CosyVoiceSidecar,
     cloning_ready,
     materialised_worker,
@@ -205,6 +207,46 @@ class TestDiscovery:
         script = worker_script()
 
         assert script is not None and script.is_file()
+
+    def test_a_frozen_build_finds_the_copy_the_spec_ships(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A packaged app has no importable file, so the worker comes from ``_MEIPASS``.
+
+        r52 shipped without this second look, and the whole recording-to-voice feature was
+        unreachable for anyone who double-clicks an icon: the popup answered
+        「找不到离线语音的工作进程脚本」 while the same machine running the source tree
+        answered fine. The spec now copies the file next to the package; this test is the
+        half that reads it back.
+        """
+        shipped = tmp_path / "jarvis" / "tts" / "cosyvoice_worker.py"
+        shipped.parent.mkdir(parents=True)
+        shipped.write_bytes(b"# the copy the spec ships\n")
+        real = importlib.util.find_spec
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
+        monkeypatch.setattr(
+            importlib.util,
+            "find_spec",
+            lambda name: None if name == WORKER_MODULE else real(name),
+        )
+
+        assert worker_script() == shipped
+
+    def test_a_frozen_build_without_that_copy_still_refuses(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No file means no feature, said out loud -- not a half-state that hangs later."""
+        real = importlib.util.find_spec
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path / "empty"), raising=False)
+        monkeypatch.setattr(
+            importlib.util,
+            "find_spec",
+            lambda name: None if name == WORKER_MODULE else real(name),
+        )
+
+        assert worker_script() is None
 
     def test_the_worker_is_not_run_from_inside_the_package(self, home: Path) -> None:
         """Executing it in place shadows the standard library and kills the worker.

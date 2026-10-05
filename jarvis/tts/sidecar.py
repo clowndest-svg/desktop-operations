@@ -38,6 +38,7 @@ import json
 import logging
 import os
 import subprocess
+import sys
 import threading
 import time
 from collections import deque
@@ -114,10 +115,22 @@ def worker_script() -> Path | None:
     except (ImportError, ValueError):  # pragma: no cover - a broken install
         return None
     origin = getattr(spec, "origin", None)
-    if not isinstance(origin, str) or not origin:
-        return None
-    path = Path(origin)
-    return path if path.is_file() else None
+    if isinstance(origin, str) and origin:
+        path = Path(origin)
+        if path.is_file():
+            return path
+    # A frozen build has no file to point at: the module lives inside the archive,
+    # and ``find_spec().origin`` is empty for anything bundled in the PYZ. The spec
+    # therefore ships a **copy of the source** next to the package -- without this
+    # second look the packaged app answers 「找不到离线语音的工作进程脚本」 and the
+    # whole recording-to-voice feature is unreachable for anyone who double-clicks
+    # an icon rather than runs the source.
+    if getattr(sys, "frozen", False):
+        bundle = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+        shipped = bundle / "jarvis" / "tts" / Path(WORKER_MODULE.split(".")[-1] + ".py")
+        if shipped.is_file():
+            return shipped
+    return None
 
 
 def materialised_worker(home: Path, source: Path | None = None) -> Path | None:

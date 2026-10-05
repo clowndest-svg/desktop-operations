@@ -69,12 +69,23 @@ class LlmService:
         self._section = section
         env = os.environ if self._environ is None else self._environ
         for provider in section.providers.values():
-            if not env.get(provider.api_key_env, "").strip():
-                logger.warning(
-                    "provider '%s' has no API key yet (set %s); requests to it will fail",
+            if env.get(provider.api_key_env, "").strip():
+                continue
+            if provider.key_optional:
+                # A local server without a credential is the intended shape, not a
+                # problem to warn about every start. Still said once, at a lower level,
+                # so "why isn't it answering" has a line to point at.
+                logger.info(
+                    "provider '%s' is configured to answer without a key (%s)",
                     provider.name,
-                    provider.api_key_env,
+                    provider.base_url,
                 )
+                continue
+            logger.warning(
+                "provider '%s' has no API key yet (set %s); requests to it will fail",
+                provider.name,
+                provider.api_key_env,
+            )
         logger.info(
             "llm ready (default=%s, providers: %s)",
             section.default_provider,
@@ -170,6 +181,7 @@ class LlmService:
             retry_backoff_seconds=section.retry_backoff_seconds,
             cost_input_per_1m=provider.cost_input_per_1m,
             cost_output_per_1m=provider.cost_output_per_1m,
+            key_optional=provider.key_optional,
         )
         if self._transport is not None:
             return OpenAiCompatClient(

@@ -85,6 +85,15 @@ def require_bool(data: Mapping[str, object], key: str, prefix: str) -> bool:
     return value
 
 
+def optional_bool(data: Mapping[str, object], key: str, prefix: str, default: bool) -> bool:
+    """A boolean a row may simply not mention -- older configs predate every flag."""
+    value = data.get(key, default)
+    key_path = f"{prefix}.{key}"
+    if not isinstance(value, bool):
+        raise _key_error(key_path, "expected a boolean (true/false)", value)
+    return value
+
+
 def require_int(
     data: Mapping[str, object],
     key: str,
@@ -349,6 +358,16 @@ class ProviderSection:
     cost_output_per_1m: float
     """USD per 1M completion tokens for cost accounting (0 = don't report)."""
 
+    key_optional: bool = False
+    """Whether this endpoint answers without an API key.
+
+    Local servers (Ollama, LM Studio, llama.cpp's server) and most intranet gateways
+    speak the OpenAI protocol with no credential at all. Without this flag the client
+    refused to build a request when the environment variable was empty, so a machine
+    with a perfectly good model running on it could not be connected -- while the
+    settings panel labelled the key field 「可选」 the whole time.
+    """
+
     _ALLOWED: ClassVar[frozenset[str]] = frozenset(
         {
             "base_url",
@@ -357,6 +376,7 @@ class ProviderSection:
             "api_key_env",
             "cost_input_per_1m",
             "cost_output_per_1m",
+            "key_optional",
         }
     )
 
@@ -433,6 +453,7 @@ class ProviderSection:
             api_key_env=require_str(data, "api_key_env", prefix),
             cost_input_per_1m=require_float(data, "cost_input_per_1m", prefix, minimum=0),
             cost_output_per_1m=require_float(data, "cost_output_per_1m", prefix, minimum=0),
+            key_optional=optional_bool(data, "key_optional", prefix, False),
         )
 
 

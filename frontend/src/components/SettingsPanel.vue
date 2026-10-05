@@ -34,7 +34,7 @@
               <span class="settings__model-meta">
                 {{ row.models.length }} 个模型 · 起始 {{ row.default_model }}
                 · {{ row.source }}<template v-if="row.edited"> · 已改</template>
-                · key {{ row.key_set ? '已设置' : '未设置' }}
+                · key {{ row.key_optional ? '不需要' : row.key_set ? '已设置' : '未设置' }}
               </span>
               <span class="settings__model-ops">
                 <button
@@ -199,6 +199,16 @@
             不写进任何配置文件，也不会回显到页面上。
           </p>
 
+          <label class="settings__row settings__row--inline">
+            <input v-model="rowNoKey" type="checkbox" />
+            <span class="hud-label">这个端点不需要 API Key（本地模型 / 内网服务）</span>
+          </label>
+          <p class="settings__why">
+            现在这一行是「{{ editingRow?.key_optional ? '免 Key' : '要 Key' }}」。勾上就不发
+            Authorization 头，本机 Ollama、LM Studio、llama.cpp 自带的 server 都是这样；
+            环境里存着钥匙的话照样会用。不勾的话没钥匙会被客户端在发请求之前直接拒掉。
+          </p>
+
           <details class="settings__add">
             <summary class="hud-label">
               ＋ 添加服务商（一次可以加几家）
@@ -210,21 +220,42 @@
               下面这四格说的是一家**新的**服务商（一个新地址、一把新钥匙）。
               已经在这张表里的服务商，点它的名字进去改地址、改起始模型、加它的其它模型。
             </p>
+            <div class="settings__presets">
+              <span class="hud-label">本地模型一键填</span>
+              <button
+                v-for="preset in LOCAL_PRESETS"
+                :key="preset.url"
+                class="hud-btn"
+                type="button"
+                :title="`${preset.url} —— 还要填你本机那个模型的名字`"
+                @click="usePreset(preset)"
+              >
+                {{ preset.label }}
+              </button>
+            </div>
             <label class="settings__row">
               <span class="hud-label">名字（小写字母数字 - _）</span>
               <input v-model.trim="draft.name" type="text" spellcheck="false" placeholder="如 deepseek-v4" />
             </label>
             <label class="settings__row">
               <span class="hud-label">调用地址</span>
-              <input v-model.trim="draft.base_url" type="text" spellcheck="false" placeholder="https://api.example.com/v1" />
+              <input v-model.trim="draft.base_url" type="text" spellcheck="false" placeholder="https://api.example.com/v1 或 http://localhost:11434/v1" />
             </label>
             <label class="settings__row">
               <span class="hud-label">起始模型</span>
               <input v-model.trim="draft.model" type="text" spellcheck="false" placeholder="deepseek-chat" />
             </label>
             <p class="settings__why">先是这一个；加好这个服务商后，在上面那一行里继续加它别的模型。</p>
-            <label class="settings__row">
-              <span class="hud-label">API Key（可选，存进 {{ draftKeyEnv }}）</span>
+            <label class="settings__row settings__row--inline">
+              <input v-model="draft.key_optional" type="checkbox" />
+              <span class="hud-label">这个端点不需要 API Key（本地模型 / 内网服务）</span>
+            </label>
+            <p v-if="draft.key_optional" class="settings__why">
+              勾上就不发 Authorization 头。Ollama、LM Studio、llama.cpp 自带的 server 都是这样；
+              不勾的话没钥匙会被客户端在发请求之前直接拒掉。
+            </p>
+            <label v-else class="settings__row">
+              <span class="hud-label">API Key（存进 {{ draftKeyEnv }}）</span>
               <input v-model="draft.api_key" type="password" autocomplete="off" spellcheck="false" />
             </label>
             <div class="settings__add-ops">
@@ -246,7 +277,9 @@
               <li v-for="(row, index) in pendingProviders" :key="row.name">
                 <b class="hud-num">{{ row.name }}</b>
                 <span class="settings__queue-url">{{ row.base_url }} · {{ row.model }}</span>
-                <span v-if="row.api_key" class="hud-label">带 Key</span>
+                <span class="hud-label">
+                  {{ row.key_optional ? '免 Key' : row.api_key ? '带 Key' : '' }}
+                </span>
                 <button class="hud-btn" type="button" @click="unqueueProvider(index)">去掉</button>
               </li>
             </ul>
@@ -516,9 +549,29 @@ interface ProviderDraft {
   base_url: string
   model: string
   api_key: string
+  key_optional: boolean
 }
 
-const BLANK_PROVIDER_DRAFT: ProviderDraft = { name: '', base_url: '', model: '', api_key: '' }
+/**
+ * The three local servers people actually run, by their default port.
+ *
+ * Only the address and the no-key flag are filled in: the model name is whatever the
+ * operator happened to `pull` or load, and guessing one would produce a row that looks
+ * configured and answers "model not found" on the first question.
+ */
+const LOCAL_PRESETS = [
+  { label: 'Ollama', name: 'ollama', url: 'http://localhost:11434/v1' },
+  { label: 'LM Studio', name: 'lmstudio', url: 'http://localhost:1234/v1' },
+  { label: 'llama.cpp', name: 'llama-cpp', url: 'http://localhost:8080/v1' },
+] as const
+
+const BLANK_PROVIDER_DRAFT: ProviderDraft = {
+  name: '',
+  base_url: '',
+  model: '',
+  api_key: '',
+  key_optional: false,
+}
 
 const draft = ref<ProviderDraft>({ ...BLANK_PROVIDER_DRAFT })
 /** Providers typed into the add block but not yet saved. The queue exists because the
@@ -537,6 +590,8 @@ const draftProblem = computed(() => {
   if (!/^https?:\/\//.test(row.base_url)) return '地址必须以 http:// 或 https:// 开头'
   if (!row.model) return '还要填起始模型'
   if (row.model.includes(' ') || row.model.length > 150) return '模型名不能含空格且不超过 150 字符'
+  if (!row.key_optional && !row.api_key.trim())
+    return '没填 API Key：本地模型请勾「这个端点不需要 API Key」，别的服务商要填'
   if (models.value.some((m) => m.name === row.name)) return `已经有叫 ${row.name} 的行，点它的名字进去改`
   if (pendingProviders.value.some((m) => m.name === row.name)) return `${row.name} 已经在待添加里了`
   return ''
@@ -555,6 +610,18 @@ function queueProvider(): void {
 
 function unqueueProvider(index: number): void {
   pendingProviders.value.splice(index, 1)
+}
+
+/** Fills what is the same for everybody running that server, and leaves the model name
+ *  alone because that one is genuinely theirs to type. */
+function usePreset(preset: (typeof LOCAL_PRESETS)[number]): void {
+  draft.value = {
+    ...draft.value,
+    name: draft.value.name || preset.name,
+    base_url: preset.url,
+    api_key: '',
+    key_optional: true,
+  }
 }
 const newModel = ref('')
 const newLabel = ref('')
@@ -675,6 +742,20 @@ const problemList = computed(() =>
 const keyPlaceholder = computed(() =>
   editingRow.value?.key_set ? '已设置，输入新值可替换' : '粘贴你的 API Key',
 )
+/**
+ * The row editor's 免 Key checkbox.
+ *
+ * ``null`` means "nobody touched it", which is what lets the save skip the field -- the
+ * same convention as 调用地址 leaving blank means 不覆盖. Writing ``false`` on every save
+ * would silently take the flag away from rows whose ``config.yaml`` says keyless.
+ */
+const rowKeyOptional = ref<boolean | null>(null)
+const rowNoKey = computed({
+  get: () => rowKeyOptional.value ?? Boolean(editingRow.value?.key_optional),
+  set: (value: boolean) => {
+    rowKeyOptional.value = value
+  },
+})
 const draftKeyEnv = computed(() =>
   draft.value.name ? `${draft.value.name.toUpperCase().replace(/-/g, '_')}_API_KEY` : '—',
 )
@@ -697,6 +778,7 @@ async function load() {
     const snapshot = await fetchSettings()
     original.value = snapshot
     editing.value = snapshot.provider
+    rowKeyOptional.value = null
     form.value = {
       base_url: '',
       model: '',
@@ -725,6 +807,7 @@ function editRow(name: string): void {
   if (form.value) {
     form.value.base_url = ''
     form.value.model = ''
+    rowKeyOptional.value = null
   }
   apiKey.value = ''
   newModel.value = ''
@@ -875,6 +958,7 @@ const FIELD_LABELS: Record<string, string> = {
   alerts_speak_critical: '严重告警用语音提醒',
   base_url: '调用地址',
   model: '起始模型',
+  key_optional: '免 Key 标记',
   api_key: 'API Key',
   add_model: '新增服务商',
   remove_model: '删掉服务商',
@@ -907,6 +991,13 @@ async function save() {
   }
   if (form.value.base_url) patch.base_url = form.value.base_url
   if (form.value.model) patch.model = form.value.model
+  // Only a checkbox the operator actually moved goes out, for the same reason 调用地址
+  // sends nothing when left blank: re-sending ``false`` on every save would take the
+  // 免 Key flag away from rows whose config.yaml already says the endpoint needs no key.
+  const noKey = rowKeyOptional.value
+  if (noKey !== null && noKey !== Boolean(editingRow.value?.key_optional)) {
+    patch.key_optional = noKey
+  }
   if (apiKey.value.trim()) {
     patch.api_key = apiKey.value
     patch.key_for = editing.value
@@ -940,6 +1031,7 @@ async function save() {
     }
     form.value.base_url = ''
     form.value.model = ''
+    rowKeyOptional.value = null
     emit('saved', result)
   } catch (err) {
     problems.value = { 保存: err instanceof Error ? err.message : String(err) }
@@ -1227,6 +1319,18 @@ watch(
   align-items: center;
   gap: 8px;
   margin-top: 8px;
+}
+
+/* The presets go above the fields rather than below them: a person who came here to
+   point the app at a local model should not have to read four labels first to find it. */
+.settings__presets {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 0 8px;
+  font-size: 11px;
+  color: var(--hud-dim);
 }
 
 .settings__queue {

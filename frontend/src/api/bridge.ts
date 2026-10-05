@@ -506,6 +506,8 @@ export interface ModelRow {
   default_model: string
   key_env: string
   key_set: boolean
+  /** True = 这个端点不需要钥匙（本地模型 / 内网服务）。缺省等于需要。 */
+  key_optional?: boolean
   source: string
   edited: boolean
   current: boolean
@@ -651,6 +653,8 @@ export interface ProviderChoice {
   /** False means the environment variable named by ``key_variable`` is empty. */
   key_set: boolean
   key_variable: string
+  /** True = this endpoint answers without a credential (local server). Absent = needs one. */
+  key_optional?: boolean
   current: boolean
 }
 
@@ -2061,6 +2065,16 @@ const mockProviders: ProviderChoice[] = [
     key_variable: 'WKAPI_API_KEY',
     current: false,
   },
+  {
+    name: 'ollama',
+    base_url: 'http://localhost:11434/v1',
+    models: [{ id: 'qwen2.5:7b-instruct', label: '本机 Qwen' }],
+    default_model: 'qwen2.5:7b-instruct',
+    key_set: false,
+    key_variable: 'OLLAMA_API_KEY',
+    key_optional: true,
+    current: false,
+  },
 ]
 
 function mockTuning(key: string): { thinking: string; turns: number } {
@@ -2241,6 +2255,22 @@ function applyMockSettings(patch: Record<string, unknown>): SettingsSnapshot {
       applied[key] = value
       continue
     }
+    if (key === 'key_optional') {
+      // Row-scoped, like 调用地址: it edits the row named by ``target`` and nothing else,
+      // and an unknown row is refused the way ``SettingsService`` refuses it.
+      const target = String(patch.target ?? next.provider)
+      const row = next.models.find((item) => item.name === target)
+      if (!row) {
+        problems[key] = `未配置的模型：${target}`
+        continue
+      }
+      const flag = Boolean(value)
+      row.key_optional = flag
+      const booked = mockProviders.find((item) => item.name === target)
+      if (booked) booked.key_optional = flag
+      applied[key] = flag
+      continue
+    }
     if (key === 'base_url' && !/^https?:\/\/.+/.test(String(value))) {
       problems[key] = '地址必须以 http:// 或 https:// 开头'
       continue
@@ -2370,6 +2400,7 @@ function mockAddProviders(next: SettingsSnapshot, value: unknown): string {
     }
     if (known.has(name)) return `已经有叫 ${name} 的模型；要改它就在那一行上改`
     known.add(name)
+    const noKey = Boolean(row.key_optional)
     fresh.push({
       name,
       base_url: url,
@@ -2377,7 +2408,8 @@ function mockAddProviders(next: SettingsSnapshot, value: unknown): string {
       models: [{ id: model, label: model }],
       default_model: model,
       key_env: `${name.toUpperCase().replace(/-/g, '_')}_API_KEY`,
-      key_set: Boolean(String(row.api_key ?? '').trim()),
+      key_set: !noKey && Boolean(String(row.api_key ?? '').trim()),
+      key_optional: noKey,
       source: '界面添加',
       edited: false,
       current: false,
@@ -2393,6 +2425,7 @@ function mockAddProviders(next: SettingsSnapshot, value: unknown): string {
       default_model: row.default_model,
       key_set: row.key_set,
       key_variable: row.key_env,
+      key_optional: row.key_optional,
       current: false,
     })
   }

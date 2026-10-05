@@ -71,6 +71,7 @@ def make_client(
     cost_input_per_1m: float = 0.0,
     cost_output_per_1m: float = 0.0,
     on_usage: Callable[[UsageEvent], None] | None = None,
+    key_optional: bool = False,
 ) -> OpenAiCompatClient:
     settings = OpenAiCompatSettings(
         provider_name="testai",
@@ -82,6 +83,7 @@ def make_client(
         retry_backoff_seconds=0.5,
         cost_input_per_1m=cost_input_per_1m,
         cost_output_per_1m=cost_output_per_1m,
+        key_optional=key_optional,
     )
     recorded = sleeps if sleeps is not None else []
     return OpenAiCompatClient(
@@ -198,6 +200,43 @@ class TestComplete:
         client = make_client(transport, environ={})
         with pytest.raises(LlmAuthError, match="TEST_API_KEY"):
             client.complete([ChatMessage.user("hi")])
+        assert transport.json_calls == []
+
+    def test_a_keyless_endpoint_is_called_without_an_authorization_header(self) -> None:
+        """Ollama / LM Studio / llama.cpp answer the OpenAI protocol with no credential.
+
+        Before this flag existed the client raised ``LlmAuthError`` before opening a
+        socket, so a machine with a perfectly good local model could not be connected
+        at all -- and the settings panel had been calling that field 「可选」 the whole time.
+        """
+        transport = FakeTransport()
+        transport.json_replies.append(ok_response("本地正常"))
+
+        response = make_client(transport, environ={}, key_optional=True).complete(
+            [ChatMessage.user("hi")]
+        )
+
+        assert response.content == "本地正常"
+        headers = transport.json_calls[0]["headers"]
+        assert isinstance(headers, dict)
+        assert "Authorization" not in headers, "没有钥匙就别发一个空的 Bearer"
+
+    def test_a_keyless_endpoint_still_sends_the_key_when_somebody_sets_one(self) -> None:
+        """LM Studio can be configured to require a password; the flag must not blind us."""
+        transport = FakeTransport()
+        transport.json_replies.append(ok_response())
+
+        make_client(transport, environ=ENV, key_optional=True).complete([ChatMessage.user("hi")])
+
+        headers = transport.json_calls[0]["headers"]
+        assert isinstance(headers, dict)
+        assert headers.get("Authorization") == "Bearer sk-unit-test"
+
+    def test_keyless_is_per_provider_and_off_by_default(self) -> None:
+        """A flag on one row must not quietly unlock the cloud provider next to it."""
+        transport = FakeTransport()
+        with pytest.raises(LlmAuthError):
+            make_client(transport, environ={}).complete([ChatMessage.user("hi")])
         assert transport.json_calls == []
 
     def test_retries_429_with_exponential_backoff_then_succeeds(self) -> None:

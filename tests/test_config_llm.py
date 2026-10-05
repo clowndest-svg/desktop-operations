@@ -65,6 +65,37 @@ class TestLlmSection:
         with pytest.raises(ConfigurationError, match=r"llm.providers.test.api_key"):
             LlmSection.from_mapping(data)
 
+    def test_key_optional_defaults_to_off_for_every_older_file(self) -> None:
+        """Rows written before this flag existed must keep demanding a key."""
+        provider = LlmSection.from_mapping(_section()).providers["test"]
+        assert provider.key_optional is False
+
+    def test_a_local_endpoint_can_declare_it_needs_no_key(self) -> None:
+        data = _section()
+        providers = data["providers"]
+        assert isinstance(providers, dict)
+        provider = providers["test"]
+        assert isinstance(provider, dict)
+        provider["base_url"] = "http://localhost:11434/v1"
+        provider["key_optional"] = True
+
+        parsed = LlmSection.from_mapping(data).providers["test"]
+
+        assert parsed.key_optional is True
+        # Plain http on a loopback port is a normal local server, not a typo to fix.
+        assert parsed.base_url == "http://localhost:11434/v1"
+
+    def test_key_optional_must_actually_be_a_boolean(self) -> None:
+        """ "false" as a string would be truthy, which is the opposite of what it says."""
+        data = _section()
+        providers = data["providers"]
+        assert isinstance(providers, dict)
+        provider = providers["test"]
+        assert isinstance(provider, dict)
+        provider["key_optional"] = "false"
+        with pytest.raises(ConfigurationError, match=r"llm.providers.test.key_optional"):
+            LlmSection.from_mapping(data)
+
     def test_the_old_single_model_field_says_how_to_rename_it(self) -> None:
         """One field became a list, so an old file is a hard failure -- and the
         message is the migration. Accepting both spellings would leave every reader

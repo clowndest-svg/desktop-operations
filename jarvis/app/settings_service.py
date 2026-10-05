@@ -267,6 +267,7 @@ class SettingsService:
                     "default_model": row.default_model,
                     "key_env": row.api_key_env,
                     "key_set": bool(self._environ.get(row.api_key_env, "").strip()),
+                    "key_optional": row.key_optional,
                     "source": "配置文件" if name in configured else "界面添加",
                     "edited": name in overrides,
                     "current": name == provider_name,
@@ -346,6 +347,7 @@ class SettingsService:
                     "default_model": row.default_model,
                     "key_set": bool(self._environ.get(row.api_key_env, "").strip()),
                     "key_variable": row.api_key_env,
+                    "key_optional": row.key_optional,
                     "current": name == provider_name,
                 }
                 for name, row in sorted(section.providers.items())
@@ -656,6 +658,8 @@ class SettingsService:
             return self._set_row_field(
                 "model", value, _valid_model, "模型名不能含空格且不超过 150 字符"
             )
+        if key == "key_optional":
+            return self._set_row_key_optional(value)
         if key == "add_model":
             return self._add_model(value)
         if key == "remove_model":
@@ -774,6 +778,24 @@ class SettingsService:
         self._prefs.set(LLM_OVERRIDES, overrides)
         return None
 
+    def _set_row_key_optional(self, value: Any) -> str | None:
+        """Say whether one row's endpoint needs a key at all.
+
+        The direction that matters is switching it **on**: a row that arrived from
+        ``config.yaml`` with a key variable nobody on this machine has set is otherwise
+        unusable as a local endpoint, because the client refuses the request before it
+        opens a socket. Switching it off costs nothing -- a key that is present is still
+        sent.
+        """
+        target = self._pending_target or self._effective_section().default_provider
+        if target not in self._effective_section().providers:
+            return f"未配置的模型：{target!r}"
+        overrides = self._overrides()
+        overrides.setdefault(target, {})["key_optional"] = bool(value)
+        if not self._prefs.set(LLM_OVERRIDES, overrides):
+            return "偏好文件拒绝了这次写入，这一行的免 Key 标记没有保存"
+        return None
+
     def _add_model(self, value: Any) -> str | None:
         """Add model rows that do not exist in config.yaml.
 
@@ -811,7 +833,16 @@ class SettingsService:
                 return f"已经有叫 {name!r} 的模型；要改它就在那一行上改"
             known.add(name)
             pending.append(
-                {"name": name, "base_url": base_url, "model": model, "key_env": key_env_for(name)}
+                {
+                    "name": name,
+                    "base_url": base_url,
+                    "model": model,
+                    "key_env": key_env_for(name),
+                    # A local server (Ollama / LM Studio / llama.cpp) has no credential,
+                    # and the panel now says so explicitly instead of leaving the field
+                    # blank and letting the client refuse at request time.
+                    "key_optional": bool(item.get("key_optional")),
+                }
             )
         if not self._prefs.set(LLM_EXTRAS, extras + pending):
             # Said out loud because the alternative is the bug this line was written for:
@@ -961,6 +992,7 @@ class SettingsService:
                     "models": _serialise_models(specs),
                     "default_model": _default_of(specs, entry.get("default_model")),
                     "key_env": str(entry.get("key_env") or key_env_for(name)),
+                    "key_optional": bool(entry.get("key_optional", False)),
                 }
             )
         return kept
@@ -991,6 +1023,8 @@ class SettingsService:
             if specs and all(_valid_model(spec.id) for spec in specs):
                 row["models"] = _serialise_models(specs)
                 row["default_model"] = _default_of(specs, fields.get("default_model"))
+            if isinstance(fields.get("key_optional"), bool):
+                row["key_optional"] = fields["key_optional"]
             if row:
                 out[str(name)] = row
         return out
@@ -1027,6 +1061,7 @@ class SettingsService:
                 models=extra_specs,
                 default_model=_default_of(extra_specs, extra.get("default_model")),
                 api_key_env=extra["key_env"],
+                key_optional=bool(extra.get("key_optional", False)),
                 cost_input_per_1m=0.0,
                 cost_output_per_1m=0.0,
             )
@@ -1039,6 +1074,7 @@ class SettingsService:
                 existing,
                 base_url=row.get("base_url", existing.base_url),
                 models=specs,
+                key_optional=row.get("key_optional", existing.key_optional),
                 default_model=_default_of(specs, row.get("default_model", existing.default_model)),
             )
         saved = self._prefs.text(LLM_PROVIDER)
