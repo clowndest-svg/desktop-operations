@@ -50,6 +50,29 @@
         </button>
       </section>
 
+      <div v-if="cloneRows.length" class="vp__batch">
+        <button class="hud-btn" type="button" :disabled="removing !== ''" @click="toggleAllVoices">
+          {{ allPicked ? '取消全选' : '全选录的音色' }}
+        </button>
+        <button
+          class="hud-btn vp__try"
+          type="button"
+          :disabled="removing !== '' || picked.length === 0"
+          @click="confirmManyVoices = true"
+        >
+          删除所选{{ picked.length ? '（' + picked.length + '）' : '' }}
+        </button>
+      </div>
+      <p v-if="confirmManyVoices" class="vp__why vp__why--bad">
+        删掉勾上的 {{ picked.length }} 个音色？录音文件一起删，不能恢复。
+        <button class="hud-btn danger" type="button" :disabled="removing !== ''" @click="removeManyVoices">
+          确认删除
+        </button>
+        <button class="hud-btn" type="button" :disabled="removing !== ''" @click="confirmManyVoices = false">
+          取消
+        </button>
+      </p>
+
       <p v-if="error" class="vp__error">{{ error }}</p>
       <p v-else-if="loading" class="vp__wait">读取音色列表…</p>
       <p v-else-if="choices.length === 0" class="vp__wait">这个引擎没有可选音色。</p>
@@ -65,6 +88,13 @@
           >
             {{ choice.id === current ? '● 在用' : '○ 选用' }}
           </button>
+          <label v-if="choice.kind === 'clone'" class="vp__pickbox" title="勾上，一起删">
+            <input
+              type="checkbox"
+              :checked="picked.includes(choice.id)"
+              @change="toggleVoice(choice.id)"
+            />
+          </label>
           <span class="vp__label">{{ choice.label }}</span>
           <button
             class="hud-btn vp__try"
@@ -210,6 +240,7 @@ import {
   pickVoice,
   previewVoice,
   removeVoiceClone,
+  removeVoiceClones,
   saveVoiceSample,
   setVoiceStyle,
   startVoiceSample,
@@ -270,6 +301,46 @@ function nextReadLine(): void {
 }
 const saving = ref(false)
 const removing = ref('')
+/** Checkbox column for deleting several recorded voices at once. */
+const picked = ref<string[]>([])
+const confirmManyVoices = ref(false)
+
+const cloneRows = computed(() => choices.value.filter((row) => row.kind === 'clone'))
+const allPicked = computed(() => cloneRows.value.length > 0 && picked.value.length === cloneRows.value.length)
+
+function toggleVoice(id: string): void {
+  picked.value = picked.value.includes(id)
+    ? picked.value.filter((entry) => entry !== id)
+    : [...picked.value, id]
+}
+
+function toggleAllVoices(): void {
+  picked.value = allPicked.value ? [] : cloneRows.value.map((row) => row.id)
+}
+
+async function removeManyVoices(): Promise<void> {
+  confirmManyVoices.value = false
+  const ids = [...picked.value]
+  if (ids.length === 0) return
+  removing.value = 'many'
+  try {
+    const answer = await removeVoiceClones(ids)
+    if (answer.error) {
+      note.value = answer.error
+      noteBad.value = true
+    } else {
+      note.value = '已删掉 ' + (answer.removed?.length ?? ids.length) + ' 个音色（包括它们的录音文件）'
+      noteBad.value = false
+    }
+    picked.value = picked.value.filter((id) => !ids.includes(id))
+    await load()
+  } catch (err) {
+    note.value = err instanceof Error ? err.message : String(err)
+    noteBad.value = true
+  } finally {
+    removing.value = ''
+  }
+}
 let poll: ReturnType<typeof setInterval> | undefined
 
 /** 3000 -> "3 秒". The rules arrive in milliseconds; the sentence is read aloud. */
@@ -696,6 +767,16 @@ watch(
 .vp__readline .hud-btn {
   margin-left: 8px;
   vertical-align: 2px;
+}
+
+.vp__batch {
+  display: flex;
+  gap: 8px;
+  margin: 4px 0 6px;
+}
+
+.vp__pickbox {
+  margin-right: 8px;
 }
 
 /* --- 录一段我的声音 --- */

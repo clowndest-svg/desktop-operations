@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -379,6 +379,68 @@ class TestStoredConversations:
         assert [entry["id"] for entry in transcript.list_sessions()] != [gone]
         assert gone not in [entry["id"] for entry in transcript.list_sessions()]
         assert listing["current"] != gone
+
+
+class TestBatchDeletingConversations:
+    """The history panel's checkbox column: one pass, one answer, no silent skips."""
+
+    @staticmethod
+    def _stored(client: FakeLlmClient, tmp_path: Any) -> tuple[ChatService, TranscriptService]:
+        store = SqliteStore(tmp_path / "chat.db")
+        store.start()
+        transcript = TranscriptService(store)
+        transcript.start()
+        service = ChatService(lambda: client, transcript=transcript)
+        service.start()
+        return service, transcript
+
+    @staticmethod
+    def _three(service: ChatService) -> list[str]:
+        for question in ("第一句", "第二句", "第三句"):
+            service.new_session()
+            service.ask(question)
+        rows = cast("list[dict[str, Any]]", service.sessions()["sessions"])
+        return [entry["id"] for entry in rows]
+
+    def test_two_of_three_go_and_the_absent_one_is_named(self, tmp_path: Any) -> None:
+        service, transcript = self._stored(FakeLlmClient("答"), tmp_path)
+        ids = self._three(service)
+
+        answer = service.delete_sessions([ids[0], ids[1], "nope"])
+
+        assert answer["deleted"] == [ids[0], ids[1]]
+        assert answer["missing"] == ["nope"]
+        left = [entry["id"] for entry in transcript.list_sessions()]
+        assert left == [ids[2]]
+
+    def test_duplicates_in_the_selection_delete_once(self, tmp_path: Any) -> None:
+        service, transcript = self._stored(FakeLlmClient("答"), tmp_path)
+        ids = self._three(service)
+
+        answer = service.delete_sessions([ids[0], ids[0]])
+
+        assert answer["deleted"] == [ids[0]]
+        assert len(transcript.list_sessions()) == 2
+
+    def test_deleting_the_open_one_among_many_opens_one_fresh_session(self, tmp_path: Any) -> None:
+        service, transcript = self._stored(FakeLlmClient("答"), tmp_path)
+        ids = self._three(service)
+        active = service.sessions()["current"]
+
+        answer = service.delete_sessions([ids[0], active])
+
+        assert answer["current"] != active
+        # One fresh session, not one per deleted id.
+        assert len(transcript.list_sessions()) == len(ids) - 2 + 1
+
+    def test_an_empty_selection_changes_nothing_and_says_why(self, tmp_path: Any) -> None:
+        service, transcript = self._stored(FakeLlmClient("答"), tmp_path)
+        ids = self._three(service)
+
+        answer = service.delete_sessions([])
+
+        assert answer["error"]
+        assert len(transcript.list_sessions()) == len(ids)
 
 
 class TestAttachments:

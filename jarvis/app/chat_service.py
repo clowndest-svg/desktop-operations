@@ -1119,6 +1119,41 @@ class ChatService:
             chat.title = str(title)
         return self.sessions()
 
+    def delete_sessions(self, session_ids: object) -> dict[str, object]:
+        """Delete several stored conversations in one pass.
+
+        Not a loop over :meth:`delete_session` on the caller's side: deleting the
+        active conversation opens a fresh one, and doing that once per id inside a
+        loop would open N-1 sessions nobody asked for. One pass, one decision about
+        the active id, and the ids that were not there come back named -- a batch
+        that silently skips half its list is how "I deleted three and two came back"
+        stops being reportable.
+        """
+        transcript = self._transcript
+        if transcript is None:
+            return self.sessions()
+        ids = (
+            [str(item) for item in session_ids if str(item or "").strip()]
+            if isinstance(session_ids, (list, tuple))
+            else []
+        )
+        if not ids:
+            return {**self.sessions(), "error": "没说删哪几个对话"}
+        deleted: list[str] = []
+        missing: list[str] = []
+        for target in dict.fromkeys(ids):
+            if transcript.delete(target):
+                deleted.append(target)
+            else:
+                missing.append(target)
+        with self._guard:
+            for target in deleted:
+                self._conversations.pop(target, None)
+            was_active = self._active in deleted
+        if was_active:
+            return {**self.new_session(), "deleted": deleted, "missing": missing}
+        return {**self.sessions(), "deleted": deleted, "missing": missing}
+
     def delete_session(self, session_id: str) -> dict[str, object]:
         """Delete one stored conversation. Deleting the open one opens a new one.
 

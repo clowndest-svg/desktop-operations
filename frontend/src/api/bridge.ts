@@ -996,6 +996,18 @@ export interface SessionInfo {
   turns: number
 }
 
+/** What a batch delete did: which ids went, which were not there to begin with. */
+export interface BatchSessionDelete extends SessionList {
+  deleted?: string[]
+  missing?: string[]
+}
+
+export interface VoiceBatchRemove {
+  error: string
+  voices: VoiceChoice[]
+  removed?: string[]
+}
+
 export interface SessionList {
   error: string
   current: string
@@ -1071,6 +1083,7 @@ interface PywebviewApi {
   voice_sample_save(name: string, prompt_text: string, upload: boolean): Promise<SampleStatus>
   /** Forget a recorded voice: deletes one of the operator's own files. */
   voice_clone_remove(voice_id: string): Promise<{ error: string; voices: VoiceChoice[] }>
+  voice_clone_remove_many(voiceIds: string[]): Promise<VoiceBatchRemove>
   computer_levels(): Promise<ComputerLevels>
   computer_set_tier(tier: number): Promise<ComputerLevels>
   computer_set_typing(allowed: boolean): Promise<ComputerLevels>
@@ -1119,6 +1132,7 @@ interface PywebviewApi {
   chat_switch(sessionId: string): Promise<SessionList>
   chat_rename(sessionId: string, title: string): Promise<SessionList>
   chat_delete(sessionId: string): Promise<SessionList>
+  chat_delete_many(sessionIds: string[]): Promise<BatchSessionDelete>
   chat_messages(sessionId: string): Promise<SessionMessages>
   voice_status(): Promise<VoiceStatus>
   voice_enable(): Promise<VoiceStatus>
@@ -1288,6 +1302,16 @@ const mockVoiceChoices: VoiceChoice[] = [
  * has no microphone here anyway, since the real recording happens in Python.
  */
 const mockSample = { phase: 'idle' as string, startedAt: 0, ms: 0 }
+/** A session list that behaves like the real one: deletes delete, renames rename. */
+const mockSessionStore: { rows: SessionInfo[]; current: string; seq: number } = {
+  rows: [
+    { id: 'mock-a', title: '现在几点了', turns: 1, updated_at: '2026-10-05T13:34:10' },
+    { id: 'mock-b', title: '今天星期几', turns: 1, updated_at: '2026-10-02T13:30:39' },
+    { id: 'mock-c', title: '打开记事本', turns: 1, updated_at: '2026-10-02T13:15:39' },
+  ],
+  current: 'mock-a',
+  seq: 0,
+}
 /** Same three numbers the Python sampler reports, so a browser walk sees the same rules. */
 const MOCK_SAMPLE_TARGET_MS = 15000
 const MOCK_SAMPLE_MIN_MS = 2000
@@ -1761,11 +1785,24 @@ const mock: PywebviewApi = {
     return { ...((await this.voice_sample_status()) as SampleStatus), ok: true, error: '' }
   },
   async voice_clone_remove(voice_id: string) {
-    const id = String(voice_id || '')
-    const at = mockVoiceChoices.findIndex((row) => row.id === id && row.kind === 'clone')
-    if (at < 0) return { error: '没有这个音色：' + id, voices: mockVoiceChoices.filter((row) => row.kind === 'clone') }
-    mockVoiceChoices.splice(at, 1)
-    return { error: '', voices: mockVoiceChoices.filter((row) => row.kind === 'clone') }
+    return this.voice_clone_remove_many([String(voice_id || '')])
+  },
+  async voice_clone_remove_many(voiceIds: string[]) {
+    const clones = () => mockVoiceChoices.filter((row) => row.kind === 'clone')
+    const removed: string[] = []
+    const failed: string[] = []
+    for (const raw of voiceIds || []) {
+      const id = String(raw || '')
+      const at = mockVoiceChoices.findIndex((row) => row.id === id && row.kind === 'clone')
+      if (at < 0) {
+        failed.push(id)
+        continue
+      }
+      mockVoiceChoices.splice(at, 1)
+      removed.push(id)
+    }
+    const error = failed.length ? failed.map((id) => id + '：没有这个音色').join('；') : ''
+    return { error, voices: clones(), removed }
   },
   async voice_sample_discard() {
     mockSample.phase = 'idle'
@@ -1799,19 +1836,52 @@ const mock: PywebviewApi = {
     }
   },
   async chat_sessions() {
-    return { error: '', current: 'mock', sessions: [] }
+    return { error: '', current: mockSessionStore.current, sessions: [...mockSessionStore.rows] }
   },
   async chat_new_session() {
-    return { error: '', current: 'mock', sessions: [] }
+    const id = 'mock-new-' + (mockSessionStore.seq += 1)
+    mockSessionStore.rows.unshift({ id, title: '新对话', turns: 0, updated_at: '刚刚' })
+    mockSessionStore.current = id
+    return { error: '', current: id, sessions: [...mockSessionStore.rows] }
   },
-  async chat_switch() {
-    return { error: '', current: 'mock', sessions: [] }
+  async chat_switch(sessionId: string) {
+    const id = String(sessionId || '')
+    if (!mockSessionStore.rows.some((row) => row.id === id)) {
+      return { error: '没有这个对话', current: mockSessionStore.current, sessions: [...mockSessionStore.rows] }
+    }
+    mockSessionStore.current = id
+    return { error: '', current: id, sessions: [...mockSessionStore.rows] }
   },
-  async chat_rename() {
-    return { error: '', current: 'mock', sessions: [] }
+  async chat_rename(sessionId: string, title: string) {
+    const row = mockSessionStore.rows.find((item) => item.id === String(sessionId || ''))
+    if (!row) return { error: '没有这个对话', current: mockSessionStore.current, sessions: [...mockSessionStore.rows] }
+    row.title = String(title || '').trim() || row.title
+    return { error: '', current: mockSessionStore.current, sessions: [...mockSessionStore.rows] }
   },
-  async chat_delete() {
-    return { error: '', current: 'mock', sessions: [] }
+  async chat_delete(sessionId: string) {
+    return this.chat_delete_many([String(sessionId || '')])
+  },
+  async chat_delete_many(sessionIds: string[]) {
+    const wanted = (sessionIds || []).map((id) => String(id || '')).filter(Boolean)
+    const deleted: string[] = []
+    const missing: string[] = []
+    for (const id of wanted) {
+      const at = mockSessionStore.rows.findIndex((row) => row.id === id)
+      if (at < 0) {
+        missing.push(id)
+        continue
+      }
+      mockSessionStore.rows.splice(at, 1)
+      deleted.push(id)
+    }
+    if (deleted.includes(mockSessionStore.current)) {
+      const id = 'mock-new-' + (mockSessionStore.seq += 1)
+      mockSessionStore.rows.unshift({ id, title: '新对话', turns: 0, updated_at: '刚刚' })
+      mockSessionStore.current = id
+    }
+    const base = { error: '', current: mockSessionStore.current, sessions: [...mockSessionStore.rows] }
+    if (!wanted.length) return { ...base, error: '没说删哪几个对话' }
+    return { ...base, deleted, missing }
   },
   async chat_messages() {
     return { error: '', current: 'mock', messages: [] }
@@ -2901,6 +2971,10 @@ export function removeVoiceClone(voiceId: string): Promise<{ error: string; voic
   return bridge().then((target) => target.voice_clone_remove(voiceId))
 }
 
+export function removeVoiceClones(voiceIds: string[]): Promise<VoiceBatchRemove> {
+  return bridge().then((target) => target.voice_clone_remove_many(voiceIds))
+}
+
 export function discardVoiceSample(): Promise<SampleStatus> {
   return bridge().then((target) => target.voice_sample_discard())
 }
@@ -3140,6 +3214,11 @@ export function renameSession(sessionId: string, title: string): Promise<Session
 
 export function deleteSession(sessionId: string): Promise<SessionList> {
   return bridge().then((target) => target.chat_delete(sessionId))
+}
+
+/** Several conversations at once; the answer names the ids that were not there. */
+export function deleteSessions(sessionIds: string[]): Promise<BatchSessionDelete> {
+  return bridge().then((target) => target.chat_delete_many(sessionIds))
 }
 
 /** Every stored turn of one conversation, oldest first. */

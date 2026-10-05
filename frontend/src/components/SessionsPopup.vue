@@ -6,6 +6,23 @@
       <header class="ss__head">
         <h2 class="hud-title">对话历史 · SESSIONS</h2>
         <div class="ss__actions">
+          <button
+            class="hud-btn"
+            type="button"
+            :disabled="working || sessions.length === 0"
+            :title="allSelected ? '把勾全部去掉' : '勾上每一场对话'"
+            @click="toggleAll"
+          >
+            {{ allSelected ? '取消全选' : '全选' }}
+          </button>
+          <button
+            class="hud-btn ss__del"
+            type="button"
+            :disabled="working || selected.length === 0"
+            @click="askRemoveMany"
+          >
+            删除所选{{ selected.length ? '（' + selected.length + '）' : '' }}
+          </button>
           <button class="hud-btn" type="button" :disabled="working" @click="create">新对话</button>
           <button class="hud-btn" type="button" @click="emit('close')">关闭</button>
         </div>
@@ -18,6 +35,13 @@
 
       <ul v-else class="ss__list">
         <li v-for="session in sessions" :key="session.id" class="ss__row" :class="{ 'ss__row--on': session.id === current }">
+          <label class="ss__pick" :title="selected.includes(session.id) ? '取消勾选' : '勾上，一起删'">
+            <input
+              type="checkbox"
+              :checked="selected.includes(session.id)"
+              @change="toggle(session.id)"
+            />
+          </label>
           <div class="ss__body">
             <strong :title="session.title">{{ session.title }}</strong>
             <em>{{ session.turns }} 轮 · {{ session.updated_at }}</em>
@@ -47,8 +71,21 @@
         </span>
       </p>
 
+      <p v-if="confirmMany" class="ss__confirm">
+        删掉选中的 {{ selected.length }} 场对话？{{ confirmManyTitles }}每一句都会没，不能恢复。
+        <span class="ss__confirm-ops">
+          <button class="hud-btn danger" type="button" :disabled="working" @click="removeMany">
+            确认删除
+          </button>
+          <button class="hud-btn" type="button" :disabled="working" @click="confirmMany = false">
+            取消
+          </button>
+        </span>
+      </p>
+
       <p class="ss__note">
         对话存在本机 SQLite 里（与 token 账本同一个库），不上传。「清空」只是开一场新对话，旧的仍在这里。
+        勾上几场一起删走的，是上面「删除所选」那一格 —— 和单条删除一样要再确认一次。
       </p>
     </section>
   </div>
@@ -62,9 +99,10 @@
  * kept in the page, so what this list shows is what is on disk -- which is the
  * whole point of having moved history out of a JavaScript array.
  */
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import {
   deleteSession,
+  deleteSessions,
   fetchSessions,
   newSession,
   renameSession,
@@ -81,6 +119,58 @@ const error = ref('')
 const working = ref(false)
 const confirming = ref('')
 const confirmingTitle = ref('')
+/** The checkbox column: what a batch delete will take. Empty almost always. */
+const selected = ref<string[]>([])
+const confirmMany = ref(false)
+
+const allSelected = computed(
+  () => sessions.value.length > 0 && selected.value.length === sessions.value.length,
+)
+const confirmManyTitles = computed(() => {
+  const titles = selected.value
+    .map((id) => sessions.value.find((entry) => entry.id === id)?.title ?? id)
+    .slice(0, 3)
+  const more = selected.value.length > titles.length ? ' 等' : ''
+  return titles.length ? '「' + titles.join('」「') + '」' + more : ''
+})
+
+function toggle(id: string): void {
+  selected.value = selected.value.includes(id)
+    ? selected.value.filter((entry) => entry !== id)
+    : [...selected.value, id]
+}
+
+function toggleAll(): void {
+  selected.value = allSelected.value ? [] : sessions.value.map((entry) => entry.id)
+}
+
+function askRemoveMany(): void {
+  if (selected.value.length === 0) return
+  confirmMany.value = true
+}
+
+async function removeMany(): Promise<void> {
+  confirmMany.value = false
+  const ids = [...selected.value]
+  if (ids.length === 0) return
+  working.value = true
+  try {
+    const list = await deleteSessions(ids)
+    sessions.value = list.sessions
+    current.value = list.current
+    // A batch that came back with ids it could not find says so here, not silently:
+    // "I ticked five and three went" has to be readable on screen.
+    error.value = list.missing?.length
+      ? (list.error || '') + ' 没找到的：' + list.missing.join('、')
+      : list.error
+    selected.value = selected.value.filter((id) => !ids.includes(id))
+    emit('switched')
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    working.value = false
+  }
+}
 
 async function load(): Promise<void> {
   error.value = ''
@@ -89,6 +179,7 @@ async function load(): Promise<void> {
     sessions.value = list.sessions
     current.value = list.current
     error.value = list.error
+    selected.value = selected.value.filter((id) => list.sessions.some((row) => row.id === id))
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
   }
@@ -170,6 +261,10 @@ watch(
 </script>
 
 <style scoped>
+.ss__pick {
+  margin-right: 10px;
+}
+
 .ss {
   position: fixed;
   inset: 0;

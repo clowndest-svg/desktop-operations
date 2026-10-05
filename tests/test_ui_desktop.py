@@ -3145,3 +3145,89 @@ class TestTheAlertCentreOnTheBridge:
         from jarvis.__main__ import _job_failure_reporter
 
         assert _job_failure_reporter(None) is None
+
+
+class _StubChat:
+    def __init__(self) -> None:
+        self.calls: list[object] = []
+
+    def delete_sessions(self, ids: Any) -> dict[str, object]:
+        self.calls.append(ids)
+        return {
+            "error": "",
+            "current": "c",
+            "sessions": [],
+            "deleted": list(ids or []),
+            "missing": [],
+        }
+
+
+class _StubLibrary:
+    def __init__(self, known: list[str], cloud: dict[str, str] | None = None) -> None:
+        self.known = list(known)
+        self.cloud = cloud or {}
+        self.removed: list[str] = []
+
+    def cloud_id(self, voice: str) -> str:
+        return self.cloud.get(voice, "")
+
+    def remove(self, voice: str) -> bool:
+        if voice not in self.known:
+            return False
+        self.known.remove(voice)
+        self.removed.append(voice)
+        return True
+
+
+class TestBatchDeletesOnTheBridge:
+    """The panel's two checkbox columns end in these two bridge methods."""
+
+    def test_chat_delete_many_passes_the_selection_straight_through(self, tmp_path: Any) -> None:
+        chat = _StubChat()
+        bridge = _bridge(tmp_path, chat=cast("ChatService", chat))
+
+        answer = bridge.chat_delete_many(["a", "b"])
+
+        assert chat.calls == [["a", "b"]]
+        assert answer["deleted"] == ["a", "b"]
+
+    def test_chat_delete_many_tolerates_a_bare_string(self, tmp_path: Any) -> None:
+        chat = _StubChat()
+        bridge = _bridge(tmp_path, chat=cast("ChatService", chat))
+
+        bridge.chat_delete_many("solo")
+
+        assert chat.calls == [["solo"]]
+
+    def test_voice_batch_removes_each_id_and_names_the_stale_ones(self, tmp_path: Any) -> None:
+        library = _StubLibrary(["clone:a", "clone:b"])
+        bridge = _bridge(tmp_path, voice_library=library)
+
+        answer = bridge.voice_clone_remove_many(["clone:a", "clone:b", "clone:gone"])
+
+        assert library.removed == ["clone:a", "clone:b"]
+        assert answer["removed"] == ["clone:a", "clone:b"]
+        assert "clone:gone" in str(answer["error"])
+
+    def test_a_voice_with_a_cloud_counterpart_takes_it_down_too(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        library = _StubLibrary(["clone:a"], cloud={"clone:a": "cv-1"})
+        bridge = _bridge(tmp_path, voice_library=library)
+        forgot: list[str] = []
+        monkeypatch.setattr(bridge, "_forget_cloud_voice", forgot.append)
+
+        bridge.voice_clone_remove_many(["clone:a"])
+
+        assert forgot == ["cv-1"], "本地行删了而厂商那边还留着，是最坏的一种残留"
+
+    def test_an_empty_voice_selection_says_so_instead_of_deleting_nothing_quietly(
+        self, tmp_path: Any
+    ) -> None:
+        library = _StubLibrary(["clone:a"])
+        bridge = _bridge(tmp_path, voice_library=library)
+
+        answer = bridge.voice_clone_remove_many([])
+
+        assert answer["error"]
+        assert library.removed == []

@@ -1363,14 +1363,58 @@ class HudBridge:
         voice = str(voice_id or "")
         if not voice:
             return {**self.voice_clone_list(), "error": "没说删哪一个"}
-        cloud_voice = self._voice_library.cloud_id(voice)
-        if not self._voice_library.remove(voice):
-            return {**self.voice_clone_list(), "error": f"没有这个音色：{voice}"}
-        if cloud_voice:
-            self._forget_cloud_voice(cloud_voice)
+        ok, why = self._remove_one_voice(voice)
+        if not ok:
+            return {**self.voice_clone_list(), "error": why}
         return {"error": "", **self.voice_clone_list()}
 
+    def _remove_one_voice(self, voice: str) -> tuple[bool, str]:
+        """Delete one recorded voice row plus its vendor-side counterpart.
+
+        The cloud half goes first while the local row can still name it: once the
+        local entry is gone there is nothing left to look the vendor id up by.
+        """
+        library = self._voice_library
+        if library is None:
+            return False, "这个进程没有音色库"
+        cloud_voice = library.cloud_id(voice)
+        if not library.remove(voice):
+            return False, f"没有这个音色：{voice}"
+        if cloud_voice:
+            self._forget_cloud_voice(cloud_voice)
+        return True, ""
+
     # -- recording a sample of *this* machine's operator ----------------------
+
+    def voice_clone_remove_many(self, voice_ids: object = None) -> dict[str, object]:
+        """Forget several recorded voices at once, cloud counterparts included.
+
+        Every id goes through the same door as the single remove, so a batch cannot
+        end with a vendor-side clone whose local entry is gone. Failures are collected
+        per id instead of aborting the rest: one stale row must not rescue the other four.
+        """
+        if self._voice_library is None:
+            return {"error": "这个进程没有音色库", "voices": [], "cloning": {}}
+        ids = (
+            [str(item) for item in voice_ids if str(item or "").strip()]
+            if isinstance(voice_ids, (list, tuple))
+            else []
+        )
+        if not ids:
+            return {**self.voice_clone_list(), "error": "没说删哪几个音色"}
+        removed: list[str] = []
+        failed: dict[str, str] = {}
+        for voice in dict.fromkeys(ids):
+            ok, why = self._remove_one_voice(voice)
+            if ok:
+                removed.append(voice)
+            else:
+                failed[voice] = why
+        answer: dict[str, object] = {"error": "", **self.voice_clone_list()}
+        answer["removed"] = removed
+        if failed:
+            answer["error"] = "；".join(f"{key}：{value}" for key, value in failed.items())
+        return answer
 
     def voice_sample_start(self) -> dict[str, object]:
         """Begin holding the microphone to capture one sample for a cloned voice.
@@ -1516,6 +1560,19 @@ class HudBridge:
         if self._chat is None:
             return {"error": "对话服务不可用", "current": "", "sessions": []}
         return self._chat.delete_session(session_id)
+
+    def chat_delete_many(self, session_ids: object = None) -> dict[str, object]:
+        """Delete several stored conversations at once.
+
+        Only this and ``chat_delete`` discard anything, and neither is on the model's
+        tool table. Takes the panel's checkbox list; a bare string is tolerated so a
+        differently-shaped bridge argument fails on content, not on type.
+        """
+        if self._chat is None:
+            return {"error": "对话服务不可用", "current": "", "sessions": []}
+        if isinstance(session_ids, str):
+            session_ids = [session_ids]
+        return self._chat.delete_sessions(session_ids)
 
     def chat_messages(self, session_id: str) -> dict[str, object]:
         """Every stored turn of one conversation, oldest first."""
