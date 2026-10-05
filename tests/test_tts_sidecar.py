@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import importlib.util
 import json
+import os
 import sys
 import textwrap
 from collections.abc import Iterator
@@ -558,3 +559,64 @@ class TestWorkerSourceOrdering:
 
         assert "--no-preload" in source
         assert "args.no_preload" in source
+
+
+class TestWorkerHygiene:
+    """The worker is torch plus CosyVoice: gigabytes resident and every core hungry."""
+
+    def test_the_child_environment_caps_the_thread_count(self, tmp_path: Path) -> None:
+        env = sidecar_module._child_env(tmp_path, base={})
+        assert int(env["OMP_NUM_THREADS"]) <= 4
+        assert int(env["MKL_NUM_THREADS"]) <= 4
+
+    def test_an_idle_worker_is_reaped_and_a_busy_one_is_not(self, tmp_path: Path) -> None:
+        import time as _time
+
+        from jarvis.tts.sidecar import WORKER_IDLE_SECONDS, _workers, reap_idle_workers
+
+        worker_cls = sidecar_module._Worker
+
+        old = worker_cls(
+            python=Path(sys.executable),
+            script=tmp_path / "w.py",
+            env={},
+            workdir=tmp_path,
+            lock=tmp_path / "lock",
+        )
+        fresh = worker_cls(
+            python=Path(sys.executable),
+            script=tmp_path / "w.py",
+            env={},
+            workdir=tmp_path,
+            lock=tmp_path / "lock2",
+        )
+        now = _time.monotonic()
+        old._last_use = now - WORKER_IDLE_SECONDS - 1
+        _workers["reap-old"] = old
+        _workers["reap-fresh"] = fresh
+        try:
+            assert reap_idle_workers(now) == 1
+            assert "reap-old" not in _workers
+            assert "reap-fresh" in _workers
+        finally:
+            _workers.pop("reap-old", None)
+            _workers.pop("reap-fresh", None)
+
+    def test_a_request_that_hits_the_deadline_kills_the_worker(self, tmp_path: Path) -> None:
+        """A synthesis that outlives its deadline must not keep burning CPU for nobody."""
+        script = tmp_path / "sleeper.py"
+        script.write_text("import time" + chr(10) + "time.sleep(30)" + chr(10), encoding="utf-8")
+        worker = sidecar_module._Worker(
+            python=Path(sys.executable),
+            script=script,
+            env=dict(os.environ),
+            workdir=tmp_path,
+            lock=tmp_path / "lock3",
+        )
+        try:
+            with pytest.raises(TtsError) as caught:
+                worker.run({"op": "synthesize"}, 0.6, None)
+            assert bool(caught.value.details.get("timed_out"))
+            assert not worker.alive, "超时之后 worker 还活着就等于让它白烧 CPU"
+        finally:
+            worker.shutdown()

@@ -10,6 +10,7 @@ state most operators first open it in.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -291,3 +292,45 @@ class TestTheStyleSliders:
 
         assert picker.effective_speed() == pytest.approx(1.5)
         assert picker.effective_volume() == pytest.approx(0.0)
+
+
+class TestEngineRouting:
+    """One rule for which engine speaks a recorded voice, shared by every caller."""
+
+    def test_a_stock_voice_keeps_the_loaded_engine(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+
+        picker, _ = _picker(tmp_path)
+        called: list[str] = []
+
+        def build(voice: str) -> tuple[object, str]:
+            called.append(voice)
+            return object(), ""
+
+        monkeypatch.setattr(picker, "_engine_for_voice", build)
+        assert picker.engine_for_voice("zh-CN-XiaoxiaoNeural") is None
+        assert called == [], "普通音色不该去问克隆那条路"
+
+    def test_a_clone_is_routed_once_and_then_cached(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        picker, _ = _picker(tmp_path)
+        sentinel = object()
+        calls: list[str] = []
+
+        def build(voice: str) -> tuple[object, str]:
+            calls.append(voice)
+            return sentinel, ""
+
+        monkeypatch.setattr(picker, "_engine_for_voice", build)
+        assert picker.engine_for_voice("clone:104c7ef77bf5") is sentinel
+        assert picker.engine_for_voice("clone:104c7ef77bf5") is sentinel
+        assert calls == ["clone:104c7ef77bf5"], "第二句还要重建引擎的话，每句话都得等 45 秒加载"
+
+    def test_a_clone_no_engine_can_speak_is_said_so_not_swallowed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        picker, _ = _picker(tmp_path)
+        monkeypatch.setattr(picker, "_engine_for_voice", lambda voice: (None, "离线语音不可用"))
+        assert picker.engine_for_voice("clone:104c7ef77bf5") is None

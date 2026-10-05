@@ -103,8 +103,15 @@
           这台机器上做不出复刻音色：{{ rules.reason || '条件不满足' }}
         </p>
         <template v-else>
+          <p class="vp__why">录音时请念下面这一句 —— 不用自己编，录完也不用填：</p>
+          <p class="vp__readline">
+            「{{ readLine }}」
+            <button class="hud-btn" type="button" title="换一句念" @click="nextReadLine">
+              换一句
+            </button>
+          </p>
           <p class="vp__why">
-            对着麦克风念一句话，{{ seconds(rules.min_ms) }}–{{ seconds(rules.max_ms) }} 秒，
+            对着麦克风念它，{{ seconds(rules.min_ms) }}–{{ seconds(rules.max_ms) }} 秒，
             {{ seconds(rules.comfortable_ms) }} 秒上下最稳。存下来之后它就出现在上面那张表里。
           </p>
 
@@ -143,17 +150,9 @@
               <span class="hud-label">给这个音色起个名</span>
               <input v-model.trim="name" type="text" maxlength="24" placeholder="如：我的声音" />
             </label>
-            <label class="vp__field">
-              <span class="hud-label">你刚才念的是哪一句</span>
-              <input
-                v-model.trim="prompt"
-                type="text"
-                maxlength="200"
-                placeholder="逐字照抄你念的话"
-              />
-            </label>
             <p class="vp__why">
-              这句不是备注：复刻是拿这段音频和它对齐的，写错了出来的声音就不像你了。
+              对齐用的就是上面那句「{{ readLine }}」—— 复刻拿录音和这句话对齐，
+              所以念的时候别加词别改口。
             </p>
             <label class="vp__upload">
               <input v-model="uploadCloud" type="checkbox" />
@@ -254,7 +253,21 @@ const targetMs = ref(0)
 const uploadCloud = ref(false)
 const sampleError = ref('')
 const name = ref('')
-const prompt = ref('')
+/**
+ * The sentences a recording may read. Fixed on purpose: asking people to type what
+ * they just said produced wrong transcripts, and a wrong transcript is not a note --
+ * the clone aligns the audio against it, so the voice came out not-quite-theirs.
+ */
+const READ_LINES = [
+  '今天天气不错，我们一起去公园走走吧。',
+  '我把那本书放在桌子上了，你看见了吗？',
+  '晚上想吃点热的，汤面或者粥都行。',
+]
+const readLineIndex = ref(0)
+const readLine = computed(() => READ_LINES[readLineIndex.value % READ_LINES.length])
+function nextReadLine(): void {
+  readLineIndex.value = (readLineIndex.value + 1) % READ_LINES.length
+}
 const saving = ref(false)
 const removing = ref('')
 let poll: ReturnType<typeof setInterval> | undefined
@@ -326,7 +339,6 @@ async function stop(): Promise<void> {
 async function discard(): Promise<void> {
   stopPolling()
   name.value = ''
-  prompt.value = ''
   uploadCloud.value = false
   sampleError.value = ''
   try {
@@ -341,7 +353,7 @@ async function save(): Promise<void> {
   sampleError.value = ''
   const wantsCloud = uploadCloud.value
   try {
-    const state = await saveVoiceSample(name.value, prompt.value, wantsCloud)
+    const state = await saveVoiceSample(name.value, readLine.value, wantsCloud)
     if (!state.ok) {
       applyState(state)
       if (!state.error) sampleError.value = '没能存下这段录音'
@@ -349,8 +361,7 @@ async function save(): Promise<void> {
     }
     applyState(state)
     name.value = ''
-    prompt.value = ''
-    uploadCloud.value = false
+      uploadCloud.value = false
     if (state.uploaded) {
       note.value = '已存成音色，并传到云端 —— 下一句朗读开始用你的声音'
       noteBad.value = false
@@ -443,10 +454,23 @@ async function pick(voice: string): Promise<void> {
   }
 }
 
+const PREVIEW_WATCHDOG_MS = 75_000
+
 async function preview(voice: string): Promise<void> {
   if (voice === '') return
   previewing.value = voice
   note.value = ''
+  // The bridge call has its own ceiling on the Python side, but a bridge that never
+  // answers would pin this button at 合成中 forever -- which is exactly what the
+  // 2026-10-05 screenshot showed. The watchdog gives the operator their button back
+  // and says so, instead of letting them wait out a fifteen-minute timeout.
+  const watchdog = window.setTimeout(() => {
+    if (previewing.value === voice) {
+      previewing.value = ''
+      noteBad.value = true
+      note.value = '试听 75 秒没回音，先不等了；后台若还在算，稍后再点一次试听'
+    }
+  }, PREVIEW_WATCHDOG_MS)
   try {
     const result = await previewVoice(voice)
     if (!result.ok) {
@@ -457,6 +481,7 @@ async function preview(voice: string): Promise<void> {
     note.value = err instanceof Error ? err.message : String(err)
     noteBad.value = true
   } finally {
+    window.clearTimeout(watchdog)
     previewing.value = ''
   }
 }
@@ -660,6 +685,17 @@ watch(
   font-size: 10px;
   line-height: 1.6;
   color: var(--hud-dim);
+}
+
+.vp__readline {
+  margin: 6px 0 2px;
+  font-size: 15px;
+  color: var(--hud-text, #dcefff);
+}
+
+.vp__readline .hud-btn {
+  margin-left: 8px;
+  vertical-align: 2px;
 }
 
 /* --- 录一段我的声音 --- */

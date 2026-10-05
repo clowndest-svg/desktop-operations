@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Final
 
 from jarvis.app.preferences import TTS_SPEED, TTS_VOICE, TTS_VOLUME, Preferences
 from jarvis.app.voice_library import (
+    CLONE_PREFIX,
     COMFORT_MS,
     MAX_MS,
     MAX_VOICES,
@@ -88,6 +89,15 @@ starts failing -- the set churns on Microsoft's side, not on ours.
 _CLOUD_ENGINE = "edge_tts"
 
 
+SYNTH_TIMEOUT_SECONDS = 120.0
+"""One synthesis request's ceiling.
+
+The sidecar used to inherit a 900 s default: a stuck clone synthesis then pinned a
+4 GB worker at full CPU for a quarter of an hour while the button said 合成中.
+Two minutes is longer than any real sentence and short enough to notice.
+"""
+
+
 class VoicePicker:
     """The voice picker's backend. Owns no engine of its own except for previews."""
 
@@ -117,6 +127,7 @@ class VoicePicker:
         self._prefs = prefs
         self._emit = emit
         self._library = library
+        self._engine_cache: dict[str, SpeechSynthesizer] = {}
         self._preview_lock = threading.Lock()
 
     @staticmethod
@@ -425,13 +436,45 @@ class VoicePicker:
             # `jarvis.tts.sidecar` for why that is not an optimisation.
             from jarvis.tts.sidecar import CosyVoiceSidecar
 
-            return CosyVoiceSidecar(section.model, reference=resolve), ""
+            return (
+                CosyVoiceSidecar(
+                    section.model,
+                    reference=resolve,
+                    timeout=SYNTH_TIMEOUT_SECONDS,
+                ),
+                "",
+            )
         if section.engine != _CLOUD_ENGINE:
             return (
                 None,
                 f"{section.engine} 的试听要先加载离线模型，这里不试；切到 {_CLOUD_ENGINE} 再听",
             )
         return EdgeTtsEngine(section), ""
+
+    def engine_for_voice(self, voice_id: object) -> SpeechSynthesizer | None:
+        """The engine that has to speak this voice, or ``None`` when the current one can.
+
+        One rule for every caller -- preview, read-aloud, the phone -- because a recorded
+        voice is spoken by the sidecar or by the vendor and never by edge-tts: handing
+        edge-tts a ``clone:`` id dies inside its voice-name validation with a ValueError,
+        which on the read-aloud path reads to the operator as "she answered but stayed
+        silent" and on the picker as a button stuck at 合成中.
+
+        Engines are cached per voice: the sidecar's worker takes ~45 s to load weights,
+        and a reply path that rebuilt it per sentence would spend every answer waiting.
+        """
+        voice = str(voice_id or "").strip()
+        if not voice or not voice.startswith(CLONE_PREFIX):
+            return None
+        cached = self._engine_cache.get(voice)
+        if cached is not None:
+            return cached
+        engine, error = self._engine_for_voice(voice)
+        if engine is None:
+            logger.warning("没有引擎能说 %s：%s", voice, error)
+            return None
+        self._engine_cache[voice] = engine
+        return engine
 
     def _stream_preview(
         self, engine: SpeechSynthesizer, voice: str, text: str | None = None

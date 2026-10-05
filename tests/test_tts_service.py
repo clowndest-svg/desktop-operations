@@ -206,3 +206,38 @@ class TestSpeakableBoundary:
         service.stop()
         assert chunks == []
         assert engine.texts == []
+
+
+class TestVoiceRouting:
+    """The read-aloud path must speak a cloned voice with the engine that can."""
+
+    def test_a_clone_voice_is_handed_to_the_routed_engine(self) -> None:
+        default = FakeTtsEngine()
+        routed = FakeTtsEngine()
+        service = TtsService(
+            lambda: settings(enabled=True),
+            engine_factory=lambda s: default,
+            voice_router=lambda voice: routed if voice.startswith("clone:") else None,
+        )
+        service.start()
+
+        audio = service.synthesize_to_bytes("你好", voice="clone:104c7ef77bf5")
+
+        assert routed.texts == ["你好"], "克隆音色被喂给了默认引擎（edge-tts 会直接 ValueError）"
+        assert default.texts == []
+        assert audio[0] != b""
+
+    def test_a_stock_voice_never_leaves_the_loaded_engine(self) -> None:
+        default = FakeTtsEngine()
+        routed = FakeTtsEngine()
+        service = TtsService(
+            lambda: settings(enabled=True),
+            engine_factory=lambda s: default,
+            voice_router=lambda voice: routed if voice.startswith("clone:") else None,
+        )
+        service.start()
+
+        service.synthesize_to_bytes("你好", voice="zh-CN-XiaoxiaoNeural")
+
+        assert default.texts == ["你好"]
+        assert routed.texts == []

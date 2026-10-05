@@ -65,6 +65,7 @@ from jarvis.tools.disk_cleaner import DiskCleaner
 from jarvis.tools.monitor import SystemMonitor
 from jarvis.tools.process_control import ProcessController
 from jarvis.tts import TtsService, TtsSettings
+from jarvis.tts.types import SpeechSynthesizer
 from jarvis.vad import VadService, VadSettings
 from jarvis.vector import VectorService
 from jarvis.vision import VisionService
@@ -626,6 +627,7 @@ def _voice_stack_builder(
     graph_factory: Callable[[], ChatGraph] | None = None,
     greeter: WakeGreeter | None = None,
     keywords_provider: Callable[[], Sequence[str]] | None = None,
+    voice_router: Callable[[str], SpeechSynthesizer | None] | None = None,
 ) -> LoopBuilder:
     """Return the callable that loads the voice models when the page asks.
 
@@ -656,7 +658,10 @@ def _voice_stack_builder(
             on_event(event)
 
         asr = AsrService(lambda: AsrSettings(section=dataclasses.replace(config.asr, enabled=True)))
-        tts = TtsService(lambda: TtsSettings(section=dataclasses.replace(config.tts, enabled=True)))
+        tts = TtsService(
+            lambda: TtsSettings(section=dataclasses.replace(config.tts, enabled=True)),
+            voice_router=voice_router,
+        )
         orchestration = OrchestrationService(
             lambda: OrchestrationSettings(
                 section=dataclasses.replace(config.orchestration, enabled=True),
@@ -928,6 +933,9 @@ def _run_desktop(args: argparse.Namespace) -> int:
             # sentence instead of the next restart.
             speed_provider=voice_picker.effective_speed,
             volume_provider=voice_picker.effective_volume,
+            # One rule for "which engine speaks this voice": the picker owns it, and
+            # the read-aloud path must agree with 试听 or a cloned voice goes mute.
+            voice_router=voice_picker.engine_for_voice,
             # Out loud and typed go through the *same* agent from here on, which is why
             # there is no ``transcript_sink`` any more: ChatService.ask records both
             # halves of the turn itself, so a sink would store every spoken sentence

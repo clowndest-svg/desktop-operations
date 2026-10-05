@@ -256,6 +256,12 @@ def _child_env(home: Path, base: dict[str, str] | None = None) -> dict[str, str]
     if existing:
         parts.append(existing)
     env["PYTHONPATH"] = os.pathsep.join(parts)
+    # torch defaults to one thread per core: on a 12-core laptop one clone synthesis
+    # showed up as 167% CPU and the rest of the machine starved. Four threads still
+    # saturate the model's parallelism without eating the desktop.
+    threads = str(min(4, os.cpu_count() or 4))
+    env.setdefault("OMP_NUM_THREADS", threads)
+    env.setdefault("MKL_NUM_THREADS", threads)
     models = home / "models"
     for name, subdir in _CACHE_ENV:
         env.setdefault(name, str(models / subdir))
@@ -364,6 +370,7 @@ class _Worker:
         self._workdir = workdir
         self._file_lock = _FileLock(lock)
         self._process: subprocess.Popen[str] | None = None
+        self._last_use = time.monotonic()
         self._lines: deque[str] = deque()
         self._lines_ready = threading.Event()
         self._reader_done = threading.Event()
@@ -372,6 +379,10 @@ class _Worker:
         self._next_id = 1
 
     # -- process -----------------------------------------------------------
+
+    def idle_for(self, now: float) -> float:
+        """Seconds since this worker last took a request."""
+        return now - self._last_use
 
     @property
     def alive(self) -> bool:
@@ -517,6 +528,7 @@ class _Worker:
         """
         with self._lock:
             self._spawn()
+            self._last_use = time.monotonic()
             if not self._file_lock.acquire(timeout=timeout):
                 raise TtsError(
                     "另一个小夜正在用离线语音，等了很久还没轮到",
@@ -527,6 +539,15 @@ class _Worker:
                 self._next_id += 1
                 self._write({**payload, "id": request_id})
                 return self._pump(request_id, timeout, on_chunk)
+            except TtsError as exc:
+                if bool(exc.details.get("timed_out")):
+                    # The worker is still chewing on the abandoned request at full CPU.
+                    # Killing it is the only honest cancel: the protocol's cancel is
+                    # checked between chunks, and a request that hit the deadline is
+                    # by definition not producing any.
+                    logger.warning("voice worker exceeded %.0fs; restarting it", timeout)
+                    self._stop()
+                raise
             finally:
                 self._file_lock.release()
 
@@ -540,12 +561,17 @@ class _Worker:
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TtsError(
-                    "离线语音这次太慢了，超过了等待上限",
-                    details={"diagnostics": list(self._diagnostics)[-5:]},
-                )
+                remaining = 0.0
             line = self._take_line(remaining)
             if line is None:
+                # ``_take_line`` answers None for "it exited" *and* for "the deadline
+                # passed"; telling them apart is the difference between a useful message
+                # and a lie -- a worker that is alive and silent is slow, not dead.
+                if self.alive:
+                    raise TtsError(
+                        "离线语音这次太慢了，超过了等待上限",
+                        details={"diagnostics": list(self._diagnostics)[-5:], "timed_out": True},
+                    )
                 raise TtsError(
                     "离线语音进程退出了",
                     details={"diagnostics": list(self._diagnostics)[-8:]},
@@ -582,6 +608,57 @@ _pool_lock = threading.Lock()
 _workers: dict[str, _Worker] = {}
 
 
+WORKER_IDLE_SECONDS: Final[float] = 600.0
+"""How long an idle voice worker stays alive before it is shut down.
+
+Ten minutes: long enough that a session of 试听 calls reuses one loaded model, short
+enough that walking away gives the gigabytes back. The worker is torch plus CosyVoice;
+on a 16 GB machine it is the single largest resident block this app owns.
+"""
+
+_REAP_INTERVAL: Final[float] = 60.0
+_reaper_started = False
+
+
+def reap_idle_workers(now: float | None = None) -> int:
+    """Shut down pooled workers nobody has asked anything of lately.
+
+    Returns how many were reaped. Takes the clock as an argument so tests can age a
+    worker without sleeping; the reaper thread passes nothing and gets real time.
+    """
+    moment = time.monotonic() if now is None else now
+    with _pool_lock:
+        stale = [
+            key for key, worker in _workers.items() if worker.idle_for(moment) > WORKER_IDLE_SECONDS
+        ]
+        for key in stale:
+            del _workers[key]
+    for _key in stale:
+        logger.info(
+            "voice worker idle for >%.0fs; shutting it down to give the memory back",
+            WORKER_IDLE_SECONDS,
+        )
+    return len(stale)
+
+
+def _start_reaper() -> None:
+    global _reaper_started
+    if _reaper_started:
+        return
+    _reaper_started = True
+
+    def loop() -> None:
+        while True:
+            time.sleep(_REAP_INTERVAL)
+            try:
+                reap_idle_workers()
+            except Exception:  # a reaper that dies must not take the pool with it
+                logger.exception("the idle-worker reaper failed")
+
+    thread = threading.Thread(target=loop, name="voice-worker-reaper", daemon=True)
+    thread.start()
+
+
 def _pooled_worker(home: Path, python: Path, script: Path) -> _Worker:
     """The worker for this data root, started on first use and kept afterwards."""
     key = str(home)
@@ -598,6 +675,7 @@ def _pooled_worker(home: Path, python: Path, script: Path) -> _Worker:
                 lock=home / "cache" / "voice-sidecar.lock",
             )
             _workers[key] = worker
+        _start_reaper()
         return worker
 
 

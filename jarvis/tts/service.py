@@ -77,10 +77,27 @@ class TtsService:
         settings_provider: Callable[[], TtsSettings],
         *,
         engine_factory: EngineFactory = default_engine_factory,
+        voice_router: Callable[[str], SpeechSynthesizer | None] | None = None,
     ) -> None:
         self._settings_provider = settings_provider
         self._engine_factory = engine_factory
+        self._voice_router = voice_router
         self._engine: SpeechSynthesizer | None = None
+
+    def _engine_for(self, voice: str | None) -> SpeechSynthesizer:
+        """The engine for one utterance, asking the router when the voice needs it.
+
+        Injected rather than computed here: which engine speaks a recorded voice is
+        decided by the voice library (an ``app``-layer object), and this layer is not
+        allowed to import it. The router returns ``None`` for every voice the current
+        engine already speaks, so stock voices keep the one loaded engine.
+        """
+        engine = self._require_engine()
+        if voice and self._voice_router is not None:
+            routed = self._voice_router(voice)
+            if routed is not None:
+                return routed
+        return engine
 
     @property
     def running(self) -> bool:
@@ -139,7 +156,7 @@ class TtsService:
         punctuation belongs. A reply that was only ever going to be silence
         (emoji, a code block) yields nothing rather than a breath.
         """
-        engine = self._require_engine()
+        engine = self._engine_for(voice)
         spoken = speakable(text)
         if not spoken:
             logger.debug("nothing speakable in a %d-character reply; staying silent", len(text))
