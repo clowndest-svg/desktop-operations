@@ -175,7 +175,7 @@
             <span class="hud-label">起始模型（该服务商默认用哪个）</span>
             <input v-model.trim="form.model" type="text" spellcheck="false" :placeholder="editingRow?.default_model" />
           </label>
-          <p class="settings__why">对话区第一次选到这个服务商时用它；留空 = 用第一个。</p>
+          <p class="settings__why">对话区第一次选到这个服务商时用它；留空 = 不改这一行（和调用地址同一个道理）。</p>
 
           <div class="settings__row">
             <span class="hud-label">API Key（{{ editingRow?.key_env || '未配置' }}）</span>
@@ -197,6 +197,24 @@
             状态 {{ editingRow?.key_set ? '已设置' : '未设置' }}。
             密钥只写进环境变量（本进程立刻生效 + Windows 用户环境以便重启后仍在），
             不写进任何配置文件，也不会回显到页面上。
+          </p>
+
+          <label class="settings__row">
+            <span class="hud-label">这一家的超时（秒）</span>
+            <input
+              v-model="rowTimeoutText"
+              class="settings__minput"
+              type="number"
+              min="5"
+              max="600"
+              step="1"
+              spellcheck="false"
+              :placeholder="String(editingRow?.timeout_seconds ?? globalTimeout)"
+            />
+          </label>
+          <p class="settings__why">
+            留空 = 跟全局的 {{ globalTimeout }} 秒。本地大模型第一次问要把权重读进显存，
+            撞超时的表现是"问一句转很久然后报错"；这一格调大只影响这一家，云端那几家不受牵连。
           </p>
 
           <label class="settings__row settings__row--inline">
@@ -244,6 +262,44 @@
             <label class="settings__row">
               <span class="hud-label">起始模型</span>
               <input v-model.trim="draft.model" type="text" spellcheck="false" placeholder="deepseek-chat" />
+            </label>
+            <div class="settings__add-ops">
+              <button
+                class="hud-btn"
+                type="button"
+                :disabled="!/^https?:\/\//.test(draft.base_url) || listingModels"
+                :title="listingModels ? '在问它要清单' : '对它发一次 GET /models，把它自己列的模型名拿回来'"
+                @click="fetchEndpointModels"
+              >
+                {{ listingModels ? '问它要清单…' : '看看它有哪些模型' }}
+              </button>
+              <span v-if="endpointModelsError" class="settings__why settings__why--bad">
+                {{ endpointModelsError }}
+              </span>
+            </div>
+            <div v-if="endpointModels.length" class="settings__presets">
+              <span class="hud-label">它列出来的模型（点一下填进起始模型）</span>
+              <button
+                v-for="id in endpointModels"
+                :key="id"
+                class="hud-btn"
+                type="button"
+                @click="draft.model = id"
+              >
+                {{ id }}
+              </button>
+            </div>
+            <label class="settings__row">
+              <span class="hud-label">这家超时（秒，空 = 跟全局 {{ globalTimeout }}）</span>
+              <input
+                v-model.trim="draft.timeout_seconds"
+                class="settings__minput"
+                type="number"
+                min="5"
+                max="600"
+                step="1"
+                spellcheck="false"
+              />
             </label>
             <p class="settings__why">先是这一个；加好这个服务商后，在上面那一行里继续加它别的模型。</p>
             <label class="settings__row settings__row--inline">
@@ -300,11 +356,31 @@
           </label>
           <p class="settings__why">关掉后只有语音问句会得到语音回答，文字回合只出字。</p>
 
+          <div class="settings__row">
+            <span class="hud-label">云端复刻 Key（{{ cloudVoiceKeyVariable }}）</span>
+            <div class="settings__keyline">
+              <input
+                v-model="cloudVoiceKey"
+                type="password"
+                autocomplete="off"
+                spellcheck="false"
+                :placeholder="cloudVoiceKeySet ? '已设置，输入新值可替换' : '粘贴厂商给的 Key'"
+              />
+              <button class="hud-btn" type="button" :disabled="!cloudVoiceKey.trim()" @click="saveCloudVoiceKey">
+                存这把
+              </button>
+            </div>
+          </div>
+          <p class="settings__why">
+            状态 {{ cloudVoiceKeySet ? '已设置' : '未设置' }}。只有勾了「传到厂商做云端复刻」
+            才会用到它；不勾就一次都不会发出去。和别家的钥匙一样只进环境变量。
+          </p>
+
           <label class="settings__row">
             <span class="hud-label">思考状态 Loader</span>
             <select v-model="form.thinking_loader" class="hud-field">
-              <option v-for="kind in loaderChoices" :key="kind" :value="kind">
-                {{ loaderLabels[kind] ?? kind }}
+              <option v-for="option in loaderOptions" :key="option.id" :value="option.id">
+                {{ option.label }}
               </option>
             </select>
           </label>
@@ -471,6 +547,7 @@
         </fieldset>
 
         <p v-if="savedNote" class="settings__saved">{{ savedNote }}</p>
+        <p v-if="saveWarning" class="settings__why settings__why--bad">{{ saveWarning }}</p>
         <ul v-if="problemList.length" class="settings__problems">
           <li v-for="line in problemList" :key="line">{{ line }}</li>
         </ul>
@@ -504,6 +581,7 @@ import {
   addProviderModel,
   fetchSettings,
   fetchVoices,
+  listEndpointModels,
   llmTest,
   removeProviderModel,
   saveSettings,
@@ -550,6 +628,8 @@ interface ProviderDraft {
   model: string
   api_key: string
   key_optional: boolean
+  /** Blank string = follow the section-wide timeout; the shell parses it. */
+  timeout_seconds: string
 }
 
 /**
@@ -559,10 +639,13 @@ interface ProviderDraft {
  * operator happened to `pull` or load, and guessing one would produce a row that looks
  * configured and answers "model not found" on the first question.
  */
+/** 180s for the local three: a 7B model loading weights off a spinning disk blows
+ *  straight through the section-wide 60s on the very first question, and a save that
+ *  rolls the row back because of that reads as "your local model is broken". */
 const LOCAL_PRESETS = [
-  { label: 'Ollama', name: 'ollama', url: 'http://localhost:11434/v1' },
-  { label: 'LM Studio', name: 'lmstudio', url: 'http://localhost:1234/v1' },
-  { label: 'llama.cpp', name: 'llama-cpp', url: 'http://localhost:8080/v1' },
+  { label: 'Ollama', name: 'ollama', url: 'http://localhost:11434/v1', timeout: '180' },
+  { label: 'LM Studio', name: 'lmstudio', url: 'http://localhost:1234/v1', timeout: '180' },
+  { label: 'llama.cpp', name: 'llama-cpp', url: 'http://localhost:8080/v1', timeout: '180' },
 ] as const
 
 const BLANK_PROVIDER_DRAFT: ProviderDraft = {
@@ -571,6 +654,7 @@ const BLANK_PROVIDER_DRAFT: ProviderDraft = {
   model: '',
   api_key: '',
   key_optional: false,
+  timeout_seconds: '',
 }
 
 const draft = ref<ProviderDraft>({ ...BLANK_PROVIDER_DRAFT })
@@ -592,6 +676,11 @@ const draftProblem = computed(() => {
   if (row.model.includes(' ') || row.model.length > 150) return '模型名不能含空格且不超过 150 字符'
   if (!row.key_optional && !row.api_key.trim())
     return '没填 API Key：本地模型请勾「这个端点不需要 API Key」，别的服务商要填'
+  if (row.timeout_seconds) {
+    const seconds = Number(row.timeout_seconds)
+    if (!Number.isFinite(seconds) || seconds < 5 || seconds > 600)
+      return '超时秒数要在 5-600 之间，或者留空跟全局'
+  }
   if (models.value.some((m) => m.name === row.name)) return `已经有叫 ${row.name} 的行，点它的名字进去改`
   if (pendingProviders.value.some((m) => m.name === row.name)) return `${row.name} 已经在待添加里了`
   return ''
@@ -621,6 +710,7 @@ function usePreset(preset: (typeof LOCAL_PRESETS)[number]): void {
     base_url: preset.url,
     api_key: '',
     key_optional: true,
+    timeout_seconds: preset.timeout,
   }
 }
 const newModel = ref('')
@@ -750,6 +840,8 @@ const keyPlaceholder = computed(() =>
  * would silently take the flag away from rows whose ``config.yaml`` says keyless.
  */
 const rowKeyOptional = ref<boolean | null>(null)
+/** The row editor's own timeout; null means untouched, '' means back to the global one. */
+const rowTimeoutText = ref<string | null>(null)
 const rowNoKey = computed({
   get: () => rowKeyOptional.value ?? Boolean(editingRow.value?.key_optional),
   set: (value: boolean) => {
@@ -759,6 +851,61 @@ const rowNoKey = computed({
 const draftKeyEnv = computed(() =>
   draft.value.name ? `${draft.value.name.toUpperCase().replace(/-/g, '_')}_API_KEY` : '—',
 )
+/** The section-wide timeout the rows fall back to, read from the shell like every bound. */
+const globalTimeout = computed(() => original.value?.llm_timeout_seconds ?? 60)
+/**
+ * Loader menu straight from the shell. The ids used to be duplicated here as a label
+ * table, which is exactly how a fifth backend loader would have rendered as a raw id.
+ */
+const loaderOptions = computed<{ id: string; label: string }[]>(() => {
+  const shipped = original.value?.thinking_loader_options
+  if (shipped?.length) return shipped
+  return loaderChoices.value.map((id) => ({ id, label: loaderLabels[id] ?? id }))
+})
+const cloudVoiceKeyVariable = computed(() => original.value?.cloud_voice_key_variable ?? '—')
+const cloudVoiceKeySet = computed(() => Boolean(original.value?.cloud_voice_key_set))
+const cloudVoiceKey = ref('')
+const saveWarning = ref('')
+/** What GET /models came back with for the address in the add block. */
+const endpointModels = ref<string[]>([])
+const endpointModelsError = ref('')
+const listingModels = ref(false)
+
+/** Ask the typed address which models it serves, so 起始模型 is a pick, not a copy job. */
+async function fetchEndpointModels(): Promise<void> {
+  listingModels.value = true
+  endpointModels.value = []
+  endpointModelsError.value = ''
+  try {
+    const answer = await listEndpointModels(draft.value.base_url)
+    endpointModels.value = answer.models
+    endpointModelsError.value = answer.ok ? '' : answer.error
+  } catch (err) {
+    endpointModelsError.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    listingModels.value = false
+  }
+}
+
+async function saveCloudVoiceKey(): Promise<void> {
+  const value = cloudVoiceKey.value
+  if (!value.trim()) return
+  saving.value = true
+  try {
+    const result = await saveSettings({ api_key: value, key_for: 'voice_cloud' })
+    original.value = result
+    cloudVoiceKey.value = ''
+    saveWarning.value =
+      result.applied?.api_key === 'set_for_this_run_only'
+        ? '钥匙只写进了本进程：写注册表那一步失败了，重启小夜后要重填'
+        : ''
+    savedNote.value = result.applied?.api_key ? '云端复刻 Key 已保存' : '没有保存上'
+  } catch (err) {
+    problems.value = { '云端复刻 Key': err instanceof Error ? err.message : String(err) }
+  } finally {
+    saving.value = false
+  }
+}
 
 async function loadVoices(): Promise<void> {
   try {
@@ -779,6 +926,7 @@ async function load() {
     original.value = snapshot
     editing.value = snapshot.provider
     rowKeyOptional.value = null
+    rowTimeoutText.value = null
     form.value = {
       base_url: '',
       model: '',
@@ -810,6 +958,7 @@ function editRow(name: string): void {
     rowKeyOptional.value = null
   }
   apiKey.value = ''
+  rowTimeoutText.value = null
   newModel.value = ''
   newLabel.value = ''
   modelNote.value = ''
@@ -998,6 +1147,11 @@ async function save() {
   if (noKey !== null && noKey !== Boolean(editingRow.value?.key_optional)) {
     patch.key_optional = noKey
   }
+  if (rowTimeoutText.value !== null && rowTimeoutText.value !== '') {
+    patch.timeout_seconds = rowTimeoutText.value
+  } else if (rowTimeoutText.value === '' && editingRow.value?.timeout_seconds != null) {
+    patch.timeout_seconds = ''
+  }
   if (apiKey.value.trim()) {
     patch.api_key = apiKey.value
     patch.key_for = editing.value
@@ -1020,10 +1174,22 @@ async function save() {
     original.value = result
     if (form.value) Object.assign(form.value, engineFormValues(result))
     problems.value = result.problems ?? {}
+    // A top-level refusal (settings unavailable, patch not a mapping) used to arrive as
+    // an empty problems map and read as 「没有字段被改动」 -- the worst possible wording
+    // for "nothing you asked for happened".
+    if (result.error) problems.value = { ...problems.value, 保存: result.error }
     const done = Object.keys(result.applied ?? {}).length
     savedNote.value = done
       ? `已保存并立即生效：${Object.keys(result.applied ?? {}).map(fieldLabel).join('、')}`
       : '没有字段被改动'
+    // The gate can save a row it never tested (no probe wired), and a key can land in
+    // this process only when the registry write fails. Both used to be invisible behind
+    // 「已保存并立即生效」, the one sentence the operator trusts.
+    saveWarning.value = result.warning
+      ? result.warning
+      : result.applied?.api_key === 'set_for_this_run_only'
+        ? '钥匙只写进了本进程：写注册表那一步失败了，重启小夜后要重填'
+        : ''
     if (result.applied?.api_key) apiKey.value = ''
     if (result.applied?.add_model) {
       pendingProviders.value = []
@@ -1032,6 +1198,7 @@ async function save() {
     form.value.base_url = ''
     form.value.model = ''
     rowKeyOptional.value = null
+    rowTimeoutText.value = null
     emit('saved', result)
   } catch (err) {
     problems.value = { 保存: err instanceof Error ? err.message : String(err) }

@@ -115,6 +115,26 @@ THINKING_LEVEL_ORDER: tuple[str, ...] = ("off", "low", "medium", "high")
 DEFAULT_THINKING_LEVEL = "medium"
 
 HISTORY_TURNS_BOUNDS = (0, 50)
+LOADER_LABELS: dict[str, str] = {
+    "dots": "三个点（默认）",
+    "matrix": "矩阵雨",
+    "ring": "圆环",
+    "bars": "竖条",
+}
+"""What the settings panel calls each thinking-loader kind.
+
+Shipped in the snapshot next to the id list so the two can never disagree: the window
+used to keep its own copy of this table, and a fifth kind added on the Python side
+would have shown up in the menu as its bare id.
+"""
+
+TIMEOUT_BOUNDS = (5.0, 600.0)
+"""Per-provider request timeout bounds, in seconds.
+
+Five is under any real answer and over a mistyped zero; six hundred is long enough for
+a big local model to load weights off a slow disk and short enough that a hung endpoint
+still ends. The section-wide ``llm.timeout_seconds`` keeps its own (>= 1) rule.
+"""
 """Exchanges replayed into each request. Zero means "answer from this turn alone".
 
 The ceiling is what a page left open all day would otherwise grow to: context costs on
@@ -257,6 +277,7 @@ class SettingsService:
         overrides = self._overrides()
         return {
             "error": "",
+            "llm_timeout_seconds": section.timeout_seconds,
             "providers": sorted(section.providers),
             "models": [
                 {
@@ -268,6 +289,7 @@ class SettingsService:
                     "key_env": row.api_key_env,
                     "key_set": bool(self._environ.get(row.api_key_env, "").strip()),
                     "key_optional": row.key_optional,
+                    "timeout_seconds": row.timeout_seconds,
                     "source": "配置文件" if name in configured else "界面添加",
                     "edited": name in overrides,
                     "current": name == provider_name,
@@ -297,6 +319,13 @@ class SettingsService:
             "wake_greeting_max": MAX_GREETING_CHARS,
             "thinking_loader": self.thinking_loader(),
             "thinking_loader_choices": list(THINKING_LOADERS),
+            # The labels travel with the ids on purpose: a loader kind the window has
+            # never heard of must render as a *labelled* choice, not as a raw id the
+            # operator cannot tell from a bug.
+            "thinking_loader_options": [
+                {"id": kind, "label": LOADER_LABELS.get(kind, f"其它：{kind}")}
+                for kind in THINKING_LOADERS
+            ],
             "alerts": self._alerts.settings() if self._alerts is not None else {},
             **(self._wake_words.settings() if self._wake_words is not None else {}),
         }
@@ -348,6 +377,7 @@ class SettingsService:
                     "key_set": bool(self._environ.get(row.api_key_env, "").strip()),
                     "key_variable": row.api_key_env,
                     "key_optional": row.key_optional,
+                    "timeout_seconds": row.timeout_seconds,
                     "current": name == provider_name,
                 }
                 for name, row in sorted(section.providers.items())
@@ -660,6 +690,8 @@ class SettingsService:
             )
         if key == "key_optional":
             return self._set_row_key_optional(value)
+        if key == "timeout_seconds":
+            return self._set_row_timeout(value)
         if key == "add_model":
             return self._add_model(value)
         if key == "remove_model":
@@ -778,6 +810,32 @@ class SettingsService:
         self._prefs.set(LLM_OVERRIDES, overrides)
         return None
 
+    def _set_row_timeout(self, value: Any) -> str | None:
+        """One row's own request timeout; ``None``/blank means "follow the global one".
+
+        Stored as ``None`` on purpose rather than deleted: the override table is the
+        only place a window edit lives, and "the operator looked at this and chose the
+        global value" has to survive a restart the same way any other edit does.
+        """
+        target = self._pending_target or self._effective_section().default_provider
+        if target not in self._effective_section().providers:
+            return f"未配置的模型：{target!r}"
+        timeout: float | None = None
+        text = str(value or "").strip()
+        if text:
+            try:
+                timeout = float(text)
+            except ValueError:
+                return "超时秒数得是个数字"
+            low, high = TIMEOUT_BOUNDS
+            if not low <= timeout <= high:
+                return f"超时秒数要在 {low:g}–{high:g} 之间"
+        overrides = self._overrides()
+        overrides.setdefault(target, {})["timeout_seconds"] = timeout
+        if not self._prefs.set(LLM_OVERRIDES, overrides):
+            return "偏好文件拒绝了这次写入，这一行的超时没有保存"
+        return None
+
     def _set_row_key_optional(self, value: Any) -> str | None:
         """Say whether one row's endpoint needs a key at all.
 
@@ -832,12 +890,16 @@ class SettingsService:
             if name in known:
                 return f"已经有叫 {name!r} 的模型；要改它就在那一行上改"
             known.add(name)
+            timeout, why = _draft_timeout(item.get("timeout_seconds"))
+            if why:
+                return f"{name}：{why}"
             pending.append(
                 {
                     "name": name,
                     "base_url": base_url,
                     "model": model,
                     "key_env": key_env_for(name),
+                    "timeout_seconds": timeout,
                     # A local server (Ollama / LM Studio / llama.cpp) has no credential,
                     # and the panel now says so explicitly instead of leaving the field
                     # blank and letting the client refuse at request time.
@@ -993,6 +1055,7 @@ class SettingsService:
                     "default_model": _default_of(specs, entry.get("default_model")),
                     "key_env": str(entry.get("key_env") or key_env_for(name)),
                     "key_optional": bool(entry.get("key_optional", False)),
+                    "timeout_seconds": entry.get("timeout_seconds"),
                 }
             )
         return kept
@@ -1025,6 +1088,16 @@ class SettingsService:
                 row["default_model"] = _default_of(specs, fields.get("default_model"))
             if isinstance(fields.get("key_optional"), bool):
                 row["key_optional"] = fields["key_optional"]
+            if "timeout_seconds" in fields:
+                timeout = fields["timeout_seconds"]
+                if timeout is None:
+                    row["timeout_seconds"] = None
+                elif (
+                    isinstance(timeout, (int, float))
+                    and not isinstance(timeout, bool)
+                    and TIMEOUT_BOUNDS[0] <= float(timeout) <= TIMEOUT_BOUNDS[1]
+                ):
+                    row["timeout_seconds"] = float(timeout)
             if row:
                 out[str(name)] = row
         return out
@@ -1062,6 +1135,7 @@ class SettingsService:
                 default_model=_default_of(extra_specs, extra.get("default_model")),
                 api_key_env=extra["key_env"],
                 key_optional=bool(extra.get("key_optional", False)),
+                timeout_seconds=extra.get("timeout_seconds"),
                 cost_input_per_1m=0.0,
                 cost_output_per_1m=0.0,
             )
@@ -1075,6 +1149,7 @@ class SettingsService:
                 base_url=row.get("base_url", existing.base_url),
                 models=specs,
                 key_optional=row.get("key_optional", existing.key_optional),
+                timeout_seconds=row.get("timeout_seconds", existing.timeout_seconds),
                 default_model=_default_of(specs, row.get("default_model", existing.default_model)),
             )
         saved = self._prefs.text(LLM_PROVIDER)
@@ -1186,6 +1261,26 @@ def _valid_url(text: str) -> bool:
     return len(text) <= MAX_BASE_URL_CHARS and (
         text.startswith("http://") or text.startswith("https://")
     )
+
+
+def _draft_timeout(value: Any) -> tuple[float | None, str]:
+    """One add-patch row's own timeout: ``(seconds or None, refusal reason)``.
+
+    Blank means "follow the global one", which is a legal answer, not a missing field --
+    but a number outside :data:`TIMEOUT_BOUNDS` is a typo and must be refused where it is
+    typed, not silently rounded into something the operator did not ask for.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None, ""
+    try:
+        timeout = float(text)
+    except ValueError:
+        return None, "超时秒数得是个数字"
+    low, high = TIMEOUT_BOUNDS
+    if not low <= timeout <= high:
+        return None, f"超时秒数要在 {low:g}–{high:g} 之间"
+    return timeout, ""
 
 
 def _valid_model(text: str) -> bool:

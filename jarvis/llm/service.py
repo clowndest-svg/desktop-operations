@@ -176,7 +176,7 @@ class LlmService:
             base_url=provider.base_url,
             model=spec.id,
             api_key_env=provider.api_key_env,
-            timeout_seconds=section.timeout_seconds,
+            timeout_seconds=provider.timeout_seconds or section.timeout_seconds,
             max_retries=section.max_retries,
             retry_backoff_seconds=section.retry_backoff_seconds,
             cost_input_per_1m=provider.cost_input_per_1m,

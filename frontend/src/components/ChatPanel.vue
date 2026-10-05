@@ -375,7 +375,25 @@
           two things a long conversation makes worth reading without opening 用量.
         -->
         <footer v-if="expanded" class="chat__foot">
-          <span class="hud-label">当前模型 {{ currentLabel || '—' }}</span>
+          <!--
+            Per-conversation, not global: three tabs on three models is the whole point
+            of the tab strip, and the backend has stored this since the multi-conversation
+            round -- only the door was missing.
+          -->
+          <select
+            v-if="conversationModelChoices.length > 1"
+            class="hud-field chat__knob"
+            :value="activeTabModelKey"
+            :disabled="switching"
+            title="这一会话用哪家哪个模型；别的会话不受影响"
+            @change="pinConversationModel"
+          >
+            <option v-for="pair in conversationModelChoices" :key="pair.key" :value="pair.key">
+              {{ pair.label }}
+            </option>
+          </select>
+          <span v-else class="hud-label">当前模型 {{ currentLabel || '—' }}</span>
+          <span v-if="pinNote" class="hud-label">{{ pinNote }}</span>
           <span class="hud-label">
             {{ THINKING_LABELS[thinking] ?? thinking }} · {{ turns }} 轮上下文
           </span>
@@ -401,6 +419,7 @@ import {
   newConversation,
   newSession,
   openConversation,
+  pickConversationModel,
   pickModel,
   saveTuning,
   switchSession,
@@ -888,6 +907,38 @@ const tabs = computed<ConversationCard[]>(() => voice.conversations)
 const activeTab = computed<ConversationCard | undefined>(() =>
   tabs.value.find((card) => card.active),
 )
+/** Every provider/model pair this window knows, as pickable rows for one conversation. */
+const conversationModelChoices = computed(() =>
+  providers.value.flatMap((entry) =>
+    entry.models.map((spec) => ({
+      key: `${entry.name} ${spec.id}`,
+      label: `${entry.name} · ${spec.label}`,
+      provider: entry.name,
+      model: spec.id,
+    })),
+  ),
+)
+const activeTabModelKey = computed(() => {
+  const tab = activeTab.value
+  if (!tab) return ''
+  const hit = conversationModelChoices.value.find(
+    (pair) => pair.provider === tab.provider && pair.model === tab.model,
+  )
+  return hit ? hit.key : `${tab.provider} ${tab.model}`
+})
+const pinNote = ref('')
+
+/** Point just this tab at another model; the others keep theirs. */
+async function pinConversationModel(event: Event): Promise<void> {
+  const tab = activeTab.value
+  if (!tab) return
+  const key = (event.target as HTMLSelectElement).value
+  const pair = conversationModelChoices.value.find((item) => item.key === key)
+  if (!pair) return
+  pinNote.value = ''
+  const answer = await pickConversationModel(tab.id, pair.provider, pair.model)
+  if (!answer.ok) pinNote.value = answer.error || '没换成'
+}
 /** The active tab's in-flight turn, which is the only one 停止 can point at. */
 const runningTask = computed(() => (activeTab.value?.status === 'running' ? activeTab.value.task_id : ''))
 

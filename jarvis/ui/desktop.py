@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from jarvis.app import voice_cloud
 from jarvis.app.collaboration import MODE_BOSS, MODE_TABLE, MODE_VOTE
+from jarvis.app.endpoint_catalog import list_endpoint_models
 from jarvis.app.mobile_pairing import PairingVault
 from jarvis.app.model_probe import ModelProber
 from jarvis.app.preferences import PET_ENABLED, WINDOW_RECT
@@ -1759,6 +1760,34 @@ class HudBridge:
             return
         state.set_thinking_loader(kind)
         state.set_speaks_typed(self._settings.speaks_typed())
+
+    def list_endpoint_models(
+        self, base_url: object = "", provider: object = ""
+    ) -> dict[str, object]:
+        """Ask an endpoint which models it serves, so 起始模型 stops being a copy job.
+
+        The panel sends an address it just typed (or the row being edited). When a
+        provider name comes with it and that row actually has a key in the environment,
+        the key goes along: a gateway that wants a credential for ``/models`` wants the
+        same one it wants for chat, and saying "它要钥匙才肯列模型" is the honest answer
+        otherwise.
+        """
+        url = str(base_url or "").strip()
+        if not url.startswith(("http://", "https://")):
+            return {"ok": False, "models": [], "error": "地址必须以 http:// 或 https:// 开头"}
+        key = ""
+        name = str(provider or "").strip()
+        settings = self._settings
+        if name and settings is not None:
+            row = next(
+                (item for item in settings.snapshot()["models"] if item["name"] == name), None
+            )
+            if row is not None and row.get("key_set"):
+                key = os.environ.get(str(row.get("key_env") or ""), "")
+        ids, why = list_endpoint_models(url, timeout_seconds=10.0, api_key=key)
+        if why:
+            return {"ok": False, "models": [], "error": why}
+        return {"ok": True, "models": ids[:200], "error": ""}
 
     def _gate_new_provider(
         self, patch: dict[str, object], answer: dict[str, object]

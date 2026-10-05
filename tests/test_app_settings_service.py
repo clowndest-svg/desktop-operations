@@ -1768,3 +1768,109 @@ class TestTurningARowKeyless:
 
         assert "key_optional" in outcome["problems"]
         assert not prefs.get(LLM_OVERRIDES)
+
+
+class TestPerProviderTimeout:
+    """The row's own timeout, from the add block and from the row editor."""
+
+    def test_an_added_row_keeps_its_timeout_and_reaches_the_client(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        service, fake_llm, _ = _service(prefs, env)
+
+        outcome = service.apply(
+            {
+                "add_model": {
+                    "name": "ollama",
+                    "base_url": "http://localhost:11434/v1",
+                    "model": "qwen2.5",
+                    "key_optional": True,
+                    "timeout_seconds": "180",
+                }
+            }
+        )
+
+        assert outcome["problems"] == {}
+        row = next(entry for entry in outcome["models"] if entry["name"] == "ollama")
+        assert row["timeout_seconds"] == 180.0
+        assert fake_llm.override is not None
+        assert fake_llm.override.providers["ollama"].timeout_seconds == 180.0
+
+    def test_the_timeout_survives_a_restart(self, prefs: Preferences, env: dict[str, str]) -> None:
+        service, _, _ = _service(prefs, env)
+        service.apply(
+            {
+                "add_model": {
+                    "name": "ollama",
+                    "base_url": "http://localhost:11434/v1",
+                    "model": "qwen2.5",
+                    "timeout_seconds": 180,
+                }
+            }
+        )
+
+        restarted, _, _ = _service(Preferences(prefs.path), env)
+
+        row = next(entry for entry in restarted.snapshot()["models"] if entry["name"] == "ollama")
+        assert row["timeout_seconds"] == 180.0
+
+    def test_a_timeout_outside_the_bounds_is_refused_where_it_is_typed(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        service, _, _ = _service(prefs, env)
+
+        outcome = service.apply(
+            {
+                "add_model": {
+                    "name": "ollama",
+                    "base_url": "http://localhost:11434/v1",
+                    "model": "qwen2.5",
+                    "timeout_seconds": "9000",
+                }
+            }
+        )
+
+        assert "add_model" in outcome["problems"]
+        assert "5" in outcome["problems"]["add_model"]
+
+    def test_the_row_editor_can_set_and_clear_it(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        service, fake_llm, _ = _service(prefs, env)
+
+        set_it = service.apply({"target": "alpha", "timeout_seconds": "240"})
+        row = next(entry for entry in set_it["models"] if entry["name"] == "alpha")
+        assert row["timeout_seconds"] == 240.0
+        assert fake_llm.override is not None
+        assert fake_llm.override.providers["alpha"].timeout_seconds == 240.0
+
+        cleared = service.apply({"target": "alpha", "timeout_seconds": ""})
+        row = next(entry for entry in cleared["models"] if entry["name"] == "alpha")
+        assert row["timeout_seconds"] is None, "清空要真的回到全局，不是留着旧值"
+
+    def test_the_row_editor_refuses_an_out_of_bounds_number_too(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        """The add block and the row editor are two doors onto one rule.
+
+        Testing only the add block left the editor's bounds check unwatched -- a
+        mutation that deleted it stayed green.
+        """
+        service, _, _ = _service(prefs, env)
+
+        outcome = service.apply({"target": "alpha", "timeout_seconds": "9000"})
+
+        assert "timeout_seconds" in outcome["problems"]
+        row = next(entry for entry in outcome["models"] if entry["name"] == "alpha")
+        assert row["timeout_seconds"] is None
+
+    def test_the_snapshot_ships_the_global_and_the_loader_labels(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        service, _, _ = _service(prefs, env)
+
+        snapshot = service.snapshot()
+        assert snapshot["llm_timeout_seconds"] == 30.0
+        options = snapshot["thinking_loader_options"]
+        assert {option["id"] for option in options} == set(snapshot["thinking_loader_choices"])
+        assert all(option["label"] for option in options)

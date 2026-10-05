@@ -94,6 +94,32 @@ def optional_bool(data: Mapping[str, object], key: str, prefix: str, default: bo
     return value
 
 
+def optional_float(
+    data: Mapping[str, object],
+    key: str,
+    prefix: str,
+    default: float | None,
+    *,
+    minimum: float | None = None,
+) -> float | None:
+    """A number a row may simply not mention; ``None`` means "no opinion here".
+
+    Unlike :func:`require_float` the *absence* is a legal answer, because a row that
+    does not say anything must fall back to whatever the section-wide default is --
+    and "fall back" has to be distinguishable from an explicit ``0``.
+    """
+    value = data.get(key, default)
+    key_path = f"{prefix}.{key}"
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise _key_error(key_path, "expected a number", value)
+    number = float(value)
+    if minimum is not None and number < minimum:
+        raise _key_error(key_path, f"must be at least {minimum}", value)
+    return number
+
+
 def require_int(
     data: Mapping[str, object],
     key: str,
@@ -358,6 +384,14 @@ class ProviderSection:
     cost_output_per_1m: float
     """USD per 1M completion tokens for cost accounting (0 = don't report)."""
 
+    timeout_seconds: float | None = None
+    """Per-request timeout for **this** provider, or ``None`` to follow ``llm.timeout_seconds``.
+
+    A local model loading weights from disk on first use can need minutes, while a cloud
+    endpoint that hangs for a minute is broken. One global number cannot say both, so a
+    row may carry its own; the client and the connectivity gate both honour it.
+    """
+
     key_optional: bool = False
     """Whether this endpoint answers without an API key.
 
@@ -377,6 +411,7 @@ class ProviderSection:
             "cost_input_per_1m",
             "cost_output_per_1m",
             "key_optional",
+            "timeout_seconds",
         }
     )
 
@@ -450,10 +485,16 @@ class ProviderSection:
             base_url=require_str(data, "base_url", prefix).rstrip("/"),
             models=models,
             default_model=default_model,
-            api_key_env=require_str(data, "api_key_env", prefix),
-            cost_input_per_1m=require_float(data, "cost_input_per_1m", prefix, minimum=0),
-            cost_output_per_1m=require_float(data, "cost_output_per_1m", prefix, minimum=0),
+            api_key_env=(
+                str(data.get("api_key_env") or "").strip()
+                or f"{name.upper().replace('-', '_')}_API_KEY"
+            ),
+            cost_input_per_1m=optional_float(data, "cost_input_per_1m", prefix, 0.0, minimum=0)
+            or 0.0,
+            cost_output_per_1m=optional_float(data, "cost_output_per_1m", prefix, 0.0, minimum=0)
+            or 0.0,
             key_optional=optional_bool(data, "key_optional", prefix, False),
+            timeout_seconds=optional_float(data, "timeout_seconds", prefix, None, minimum=1),
         )
 
 

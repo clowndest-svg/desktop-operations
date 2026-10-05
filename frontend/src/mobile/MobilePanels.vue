@@ -85,7 +85,7 @@
           <strong>{{ row.name }}</strong>
           <span>
             {{ row.models.length }} 个模型 · 起始 {{ row.default_model
-            }}{{ row.key_set ? '' : '（没配 Key，问不了）' }}
+            }}{{ row.key_set ? '' : row.key_optional ? '（免 Key）' : '（没配 Key，问不了）' }}
           </span>
         </li>
       </ul>

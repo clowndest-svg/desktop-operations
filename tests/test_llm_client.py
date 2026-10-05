@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable, Iterator, Mapping
+from dataclasses import replace
 
 import pytest
 
@@ -41,7 +42,9 @@ class FakeTransport:
         payload: Mapping[str, object],
         timeout: float,
     ) -> Mapping[str, object]:
-        self.json_calls.append({"url": url, "headers": dict(headers), "payload": dict(payload)})
+        self.json_calls.append(
+            {"url": url, "headers": dict(headers), "payload": dict(payload), "timeout": timeout}
+        )
         reply = self.json_replies.pop(0)
         if isinstance(reply, Exception):
             raise reply
@@ -55,7 +58,9 @@ class FakeTransport:
         payload: Mapping[str, object],
         timeout: float,
     ) -> Iterator[str]:
-        self.sse_calls.append({"url": url, "headers": dict(headers), "payload": dict(payload)})
+        self.sse_calls.append(
+            {"url": url, "headers": dict(headers), "payload": dict(payload), "timeout": timeout}
+        )
         reply = self.sse_replies.pop(0)
         if isinstance(reply, Exception):
             raise reply
@@ -699,3 +704,47 @@ class TestCachedTokenParsing:
         )
         assert usage is not None
         assert usage.cached_tokens == 0
+
+
+class TestPerProviderTimeout:
+    """One row's own timeout has to reach the socket, not just the settings screen."""
+
+    def test_the_row_timeout_reaches_the_transport(self) -> None:
+        transport = FakeTransport()
+        transport.json_replies.append(ok_response())
+        client = make_client(transport)
+        client._settings = replace(client._settings, timeout_seconds=180.0)
+
+        client.complete([ChatMessage.user("hi")])
+
+        assert transport.json_calls[0]["timeout"] == 180.0
+
+    def test_the_service_hands_out_the_row_timeout_not_the_global_one(self) -> None:
+        from jarvis.config.schema import LlmSection, ModelSpec, ProviderSection
+        from jarvis.llm.openai_compat import OpenAiCompatClient
+        from jarvis.llm.service import LlmService
+
+        section = LlmSection(
+            default_provider="slow",
+            timeout_seconds=60.0,
+            max_retries=1,
+            retry_backoff_seconds=0.0,
+            providers={
+                "slow": ProviderSection(
+                    name="slow",
+                    base_url="http://localhost:11434/v1",
+                    models=(ModelSpec(id="qwen2.5:7b-instruct"),),
+                    default_model="qwen2.5:7b-instruct",
+                    api_key_env="SLOW_API_KEY",
+                    cost_input_per_1m=0.0,
+                    cost_output_per_1m=0.0,
+                    timeout_seconds=240.0,
+                )
+            },
+        )
+        service = LlmService(lambda: section)
+        service.start()
+
+        client = service.client_for("slow")
+        assert isinstance(client, OpenAiCompatClient)
+        assert client._settings.timeout_seconds == 240.0

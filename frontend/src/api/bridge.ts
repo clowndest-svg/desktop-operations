@@ -498,6 +498,13 @@ export interface DiskOutcome {
   error: string
 }
 
+/** What ``GET <base_url>/models`` came back with, or why it could not. */
+export interface EndpointModels {
+  ok: boolean
+  models: string[]
+  error: string
+}
+
 export interface ModelRow {
   name: string
   base_url: string
@@ -508,6 +515,8 @@ export interface ModelRow {
   key_set: boolean
   /** True = 这个端点不需要钥匙（本地模型 / 内网服务）。缺省等于需要。 */
   key_optional?: boolean
+  /** 这一家自己的超时秒数；null/缺省 = 跟全局 llm.timeout_seconds。 */
+  timeout_seconds?: number | null
   source: string
   edited: boolean
   current: boolean
@@ -558,6 +567,16 @@ export interface SettingsSnapshot {
   /** The animation shown to the left of 「思考中」: dots / matrix / ring / bars. */
   thinking_loader: string
   thinking_loader_choices: string[]
+  /** {id,label} pairs straight from the shell, so a fifth loader cannot render as a raw id. */
+  thinking_loader_options?: { id: string; label: string }[]
+  /** The section-wide request timeout the rows fall back to. */
+  llm_timeout_seconds?: number
+  /** The env var the cloud voice-cloning key lives in, and whether it is set. */
+  cloud_voice_key_variable?: string
+  cloud_voice_key_set?: boolean
+  /** The save gate did not run a connectivity test; the row is stored untested. */
+  warning?: string
+  ok?: boolean
   /** Absent from an older shell -- then the 告警 fieldset is not drawn at all. */
   alerts?: AlertSettings
   /** Settings the assistant changed itself and no person has re-saved since. */
@@ -655,6 +674,7 @@ export interface ProviderChoice {
   key_variable: string
   /** True = this endpoint answers without a credential (local server). Absent = needs one. */
   key_optional?: boolean
+  timeout_seconds?: number | null
   current: boolean
 }
 
@@ -1134,6 +1154,7 @@ interface PywebviewApi {
   state_snapshot(): Promise<UiSnapshot>
   settings_get(): Promise<SettingsSnapshot>
   settings_apply(patch: Record<string, unknown>): Promise<SettingsSnapshot>
+  list_endpoint_models(base_url: string, provider?: string): Promise<EndpointModels>
   usage_summary(days: number): Promise<UsageReport>
   chat_models(): Promise<ModelList>
   chat_pick(provider: string, model?: string): Promise<ModelList>
@@ -1541,6 +1562,22 @@ const mock: PywebviewApi = {
   },
   async settings_apply(patch) {
     return applyMockSettings(patch)
+  },
+  async list_endpoint_models(base_url, provider) {
+    // Same verdicts the real shell gives: a dead address says 连不上, a gateway that
+    // wants a credential says so, and only a talking endpoint hands back ids.
+    const url = String(base_url ?? '').trim()
+    if (!/^https?:\/\//.test(url)) return { ok: false, models: [], error: '地址必须以 http:// 或 https:// 开头' }
+    if (url.includes('11434')) {
+      return { ok: true, models: ['qwen2.5:7b-instruct', 'qwen2.5vl:7b', 'llava:7b'], error: '' }
+    }
+    if (url.includes('1234')) return { ok: true, models: ['loaded-model-q4'], error: '' }
+    if (url.includes('8080')) return { ok: true, models: ['gguf-model'], error: '' }
+    if (provider && mockProviders.some((row) => row.name === provider && row.key_set)) {
+      return { ok: true, models: mockProviders.find((row) => row.name === provider)!.models.map((m) => m.id), error: '' }
+    }
+    if (url.includes('wkapi')) return { ok: false, models: [], error: '这一家要钥匙才肯列模型；先把 Key 填上再拉' }
+    return { ok: false, models: [], error: `连不上 ${url}：拒绝连接` }
   },
   async usage_summary(days) {
     // 0 is the whole ledger and is not clamped; anything else keeps the one-month ceiling.
@@ -2148,6 +2185,8 @@ const mockSettings: SettingsSnapshot = {
   model: 'qwen3.8-flash',
   api_key_variable: 'QWENAI_API_KEY',
   api_key_set: false,
+  cloud_voice_key_variable: 'DASHSCOPE_API_KEY',
+  cloud_voice_key_set: false,
   overrides_active: [],
   voice_auto_arm: true,
   auto_speak_typed: true,
@@ -2169,6 +2208,13 @@ const mockSettings: SettingsSnapshot = {
   wake_keyword_max_chars: 12,
   thinking_loader: 'dots',
   thinking_loader_choices: ['dots', 'matrix', 'ring', 'bars'],
+  thinking_loader_options: [
+    { id: 'dots', label: '三个点（默认）' },
+    { id: 'matrix', label: '矩阵雨' },
+    { id: 'ring', label: '圆环' },
+    { id: 'bars', label: '竖条' },
+  ],
+  llm_timeout_seconds: 60,
   alerts: {
     rules: [
       {
@@ -2253,6 +2299,29 @@ function applyMockSettings(patch: Record<string, unknown>): SettingsSnapshot {
         continue
       }
       applied[key] = value
+      continue
+    }
+    if (key === 'timeout_seconds') {
+      const target = String(patch.target ?? next.provider)
+      const row = next.models.find((item) => item.name === target)
+      if (!row) {
+        problems[key] = `未配置的模型：${target}`
+        continue
+      }
+      const raw = String(value ?? '').trim()
+      if (raw) {
+        const seconds = Number(raw)
+        if (!Number.isFinite(seconds) || seconds < 5 || seconds > 600) {
+          problems[key] = '超时秒数要在 5–600 之间'
+          continue
+        }
+        row.timeout_seconds = seconds
+      } else {
+        row.timeout_seconds = null
+      }
+      const booked = mockProviders.find((item) => item.name === target)
+      if (booked) booked.timeout_seconds = row.timeout_seconds ?? null
+      applied[key] = row.timeout_seconds
       continue
     }
     if (key === 'key_optional') {
@@ -2410,6 +2479,7 @@ function mockAddProviders(next: SettingsSnapshot, value: unknown): string {
       key_env: `${name.toUpperCase().replace(/-/g, '_')}_API_KEY`,
       key_set: !noKey && Boolean(String(row.api_key ?? '').trim()),
       key_optional: noKey,
+      timeout_seconds: typeof row.timeout_seconds === 'number' ? row.timeout_seconds : null,
       source: '界面添加',
       edited: false,
       current: false,
@@ -3261,6 +3331,11 @@ export function fetchSettings(): Promise<SettingsSnapshot> {
 
 export function saveSettings(patch: Record<string, unknown>): Promise<SettingsSnapshot> {
   return bridge().then((target) => target.settings_apply(patch))
+}
+
+/** Ask an endpoint which models it serves, so 起始模型 is a pick instead of a copy job. */
+export function listEndpointModels(base_url: string, provider = ''): Promise<EndpointModels> {
+  return bridge().then((target) => target.list_endpoint_models(base_url, provider))
 }
 
 export function fetchUsage(days: number): Promise<UsageReport> {

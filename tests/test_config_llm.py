@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import Any
 
 import pytest
 
@@ -203,3 +204,41 @@ class TestLlmSection:
     def test_boolean_is_not_a_number(self) -> None:
         with pytest.raises(ConfigurationError, match=r"llm.retry_backoff_seconds"):
             LlmSection.from_mapping(_section(retry_backoff_seconds=True))
+
+
+class TestProviderRowDefaults:
+    """Hand-editing config.yaml used to need three keys nobody thinks to write."""
+
+    @staticmethod
+    def _parse(provider: dict[str, object]) -> Any:
+        from jarvis.config.schema import ProviderSection
+
+        return ProviderSection.from_mapping("local", dict(provider))
+
+    def test_a_row_without_cost_or_key_env_still_parses(self) -> None:
+        row = self._parse(
+            {
+                "base_url": "http://localhost:11434/v1",
+                "models": ["qwen2.5:7b-instruct"],
+            }
+        )
+        assert row.cost_input_per_1m == 0.0
+        assert row.cost_output_per_1m == 0.0
+        # The name the panel would have invented anyway, so the two doors agree.
+        assert row.api_key_env == "LOCAL_API_KEY"
+
+    def test_a_row_may_carry_its_own_timeout(self) -> None:
+        row = self._parse(
+            {
+                "base_url": "http://localhost:11434/v1",
+                "models": ["m"],
+                "timeout_seconds": 240,
+            }
+        )
+        assert row.timeout_seconds == 240.0
+
+    def test_a_timeout_under_a_second_is_refused(self) -> None:
+        from jarvis.core.exceptions import ConfigurationError
+
+        with pytest.raises(ConfigurationError, match=r"timeout_seconds"):
+            self._parse({"base_url": "http://x/v1", "models": ["m"], "timeout_seconds": 0.5})

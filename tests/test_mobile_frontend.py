@@ -166,6 +166,8 @@ class _RecordingSettings:
                     "default_model": "alpha-1",
                     "key_set": True,
                     "key_variable": "ALPHA_API_KEY",
+                    "key_optional": False,
+                    "timeout_seconds": None,
                     "current": True,
                 }
             ],

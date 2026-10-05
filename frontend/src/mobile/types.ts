@@ -130,6 +130,9 @@ export interface PcProviderChoice {
   default_model: string
   key_set: boolean
   key_variable: string
+  /** True = answers without a credential (local server); the phone must not call it unconfigured. */
+  key_optional?: boolean
+  timeout_seconds?: number | null
   current: boolean
 }
 
@@ -164,5 +167,5 @@ export const READ_KEYS: Record<string, string[]> = {
   chat_sessions: ['sessions', 'current', 'error', 'id', 'title', 'turns'],
   chat_messages: ['messages', 'current', 'error', 'role', 'content'],
   knowledge_state: ['documents', 'stats', 'error', 'doc_id', 'source', 'title', 'chunk_count'],
-  chat_models: ['error', 'providers', 'provider', 'model', 'models', 'key_set'],
+  chat_models: ['error', 'providers', 'provider', 'model', 'models', 'key_set', 'key_optional', 'timeout_seconds'],
 }
