@@ -205,7 +205,7 @@
         </button>
       </nav>
 
-      <div ref="listRef" class="chat__log">
+      <div ref="listRef" class="chat__log" @scroll.passive="onLogScroll">
         <p v-if="lines.length === 0" class="hud-label chat__empty">
           打一句话、或点「按一下说」直接开口。文字问答只需要 API Key；
           语音要在上方点「启用语音」，加载约 30 秒。
@@ -389,7 +389,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   chatCancel,
   chatSend,
@@ -919,11 +919,56 @@ const talkTitle = computed(() => {
   return voice.label
 })
 
-async function scrollToEnd(): Promise<void> {
-  await nextTick()
+/** Whether the transcript is being followed. Off the moment the operator scrolls up:
+ *  a log that yanks the view down while somebody is re-reading an earlier answer is
+ *  worse than one that does not follow at all. */
+const following = ref(true)
+
+function onLogScroll(): void {
+  const element = listRef.value
+  if (!element) return
+  // A few pixels of slack: the last row's own padding and a sub-pixel scroll offset
+  // should not read as "they went browsing".
+  const gap = element.scrollHeight - element.scrollTop - element.clientHeight
+  following.value = gap < 24
+}
+
+/** Pin to the newest row, but only if that is where the operator was already looking. */
+function followToEnd(): void {
+  if (!following.value) return
   const element = listRef.value
   if (element) element.scrollTop = element.scrollHeight
 }
+
+async function scrollToEnd(): Promise<void> {
+  await nextTick()
+  const element = listRef.value
+  if (element) {
+    element.scrollTop = element.scrollHeight
+    following.value = true
+  }
+}
+
+/**
+ * How much transcript is on screen, as a cheap string: stored rows, whether the
+ * 「思考中」 card is drawn, and the answer as it streams in.
+ *
+ * Watching this instead of the DOM keeps an observer out of the render loop, and it
+ * catches the case that made the panel feel broken: the question goes out, the thinking
+ * card appears *below* the fold, and nothing moved -- so it looks like she never started.
+ */
+const logExtent = computed(() => {
+  const thinking = Boolean(runningTask.value) || voice.turn === 'processing'
+  return [
+    lines.value.length,
+    thinking && !streamed.value?.text ? 1 : 0,
+    streamed.value?.text.length ?? 0,
+  ].join(':')
+})
+
+watch(logExtent, () => {
+  void nextTick(followToEnd)
+})
 
 async function talk(): Promise<void> {
   await voice.talk()

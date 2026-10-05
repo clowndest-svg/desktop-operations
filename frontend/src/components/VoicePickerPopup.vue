@@ -74,8 +74,111 @@
           >
             {{ previewing === choice.id ? '合成中…' : '试听' }}
           </button>
+          <button
+            v-if="choice.kind === 'clone'"
+            class="hud-btn vp__try"
+            type="button"
+            :disabled="removing !== ''"
+            title="删掉这段录音做出来的音色"
+            @click="remove(choice.id)"
+          >
+            {{ removing === choice.id ? '删除中…' : '删' }}
+          </button>
         </li>
       </ul>
+
+      <!--
+        Making a voice out of the operator's own speech.
+
+        The recording is held by Python, not by this page: on this machine the microphone
+        belongs to the process that answers the wake word, so a browser getUserMedia here
+        would either be refused or quietly steal audio from it. What crosses the bridge is
+        state and two short strings -- never the audio.
+      -->
+      <section class="vp__clone">
+        <h3 class="hud-label">录一段我的声音</h3>
+
+        <p v-if="!rules" class="vp__why">读取中…</p>
+        <p v-else-if="!rules.available" class="vp__why vp__why--bad">
+          这台机器上做不出复刻音色：{{ rules.reason || '条件不满足' }}
+        </p>
+        <template v-else>
+          <p class="vp__why">
+            对着麦克风念一句话，{{ seconds(rules.min_ms) }}–{{ seconds(rules.max_ms) }} 秒，
+            {{ seconds(rules.comfortable_ms) }} 秒上下最稳。存下来之后它就出现在上面那张表里。
+          </p>
+
+          <div class="vp__rec">
+            <button
+              v-if="phase !== 'recording'"
+              class="hud-btn hud-btn--primary"
+              type="button"
+              @click="start"
+            >
+              {{ phase === 'captured' ? '再录一段' : '开始录音' }}
+            </button>
+            <button v-else class="hud-btn" type="button" @click="stop">
+              停止 · 已录 {{ (ms / 1000).toFixed(1) }} 秒
+            </button>
+            <span
+              v-if="phase === 'recording'"
+              class="vp__level"
+              :title="'输入电平 ' + peak + ' / 32767'"
+              ><i :style="{ width: levelPercent + '%' }"></i
+            ></span>
+          </div>
+          <p v-if="phase === 'recording' && ms > 0 && peak === 0" class="vp__why vp__why--bad">
+            到现在还没收到声音 —— 检查一下输入设备，别白录一段。
+          </p>
+          <p
+            v-if="phase === 'recording' && targetMs > 0 && ms >= targetMs"
+            class="vp__why"
+            title="到点只是提示，不停下来：把你说到一半的那句掐掉比多说几秒贵得多"
+          >
+            够了，随时可以停。（不会自动掐你）
+          </p>
+
+          <template v-if="phase === 'captured'">
+            <label class="vp__field">
+              <span class="hud-label">给这个音色起个名</span>
+              <input v-model.trim="name" type="text" maxlength="24" placeholder="如：我的声音" />
+            </label>
+            <label class="vp__field">
+              <span class="hud-label">你刚才念的是哪一句</span>
+              <input
+                v-model.trim="prompt"
+                type="text"
+                maxlength="200"
+                placeholder="逐字照抄你念的话"
+              />
+            </label>
+            <p class="vp__why">
+              这句不是备注：复刻是拿这段音频和它对齐的，写错了出来的声音就不像你了。
+            </p>
+            <label class="vp__upload">
+              <input v-model="uploadCloud" type="checkbox" />
+              <span>把这段录音传到厂商做云端复刻</span>
+            </label>
+            <p class="vp__why">
+              不勾就只存在这台机器上 —— 本机跑得动离线复刻模型才说得出你的声音。
+              勾上才立刻能用，但这段录音会离开这台机器（要 DASHSCOPE_API_KEY）。
+            </p>
+            <div class="vp__rec-ops">
+              <button
+                class="hud-btn hud-btn--primary"
+                type="button"
+                :disabled="saving || !canSave"
+                :title="canSave ? '把这段录音存成一个音色' : '这段还不够长或太安静，存了也不会像你'"
+                @click="save"
+              >
+                {{ saving ? '存入中…' : '存成音色' }}
+              </button>
+              <button class="hud-btn" type="button" @click="discard">放弃这段</button>
+            </div>
+          </template>
+        </template>
+        <p v-if="sampleError" class="vp__note-line vp__note-line--bad">{{ sampleError }}</p>
+      </section>
 
       <p v-if="note" class="vp__note-line" :class="{ 'vp__note-line--bad': noteBad }">{{ note }}</p>
 
@@ -101,12 +204,20 @@
  * answers, so what you hear in the popup is what you will hear in conversation --
  * not a second, slightly different playback path.
  */
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import {
+  discardVoiceSample,
   fetchVoices,
   pickVoice,
   previewVoice,
+  removeVoiceClone,
+  saveVoiceSample,
   setVoiceStyle,
+  startVoiceSample,
+  stopVoiceSample,
+  voiceSampleStatus,
+  type CloningState,
+  type SampleStatus,
   type VoiceChoice,
 } from '@/api/bridge'
 
@@ -133,6 +244,153 @@ const volumeMax = ref(1)
 
 const busy = ref(false)
 
+// The recording half: what the shell allows, and where this take stands right now.
+const rules = ref<CloningState | null>(null)
+const phase = ref('idle')
+const ms = ref(0)
+const peak = ref(0)
+const canSave = ref(false)
+const targetMs = ref(0)
+const uploadCloud = ref(false)
+const sampleError = ref('')
+const name = ref('')
+const prompt = ref('')
+const saving = ref(false)
+const removing = ref('')
+let poll: ReturnType<typeof setInterval> | undefined
+
+/** 3000 -> "3 秒". The rules arrive in milliseconds; the sentence is read aloud. */
+function seconds(value: number): string {
+  return (value / 1000).toFixed(value % 1000 === 0 ? 0 : 1)
+}
+
+/** How much of the bar the level has filled. A number, not a colour, so it works
+ *  on any skin and does not depend on anybody noticing a subtle hue change. */
+const levelPercent = computed(() => {
+  if (!peak.value) return 0
+  return Math.max(4, Math.min(100, Math.round((peak.value / 6000) * 100)))
+})
+
+function stopPolling(): void {
+  if (poll !== undefined) {
+    window.clearInterval(poll)
+    poll = undefined
+  }
+}
+
+/** Copy one sampler state onto the page. Every verb answers with the whole state, so the
+ *  rules about what the buttons may do live in one place instead of five handlers. */
+function applyState(state: SampleStatus): void {
+  phase.value = state.phase
+  ms.value = state.ms
+  peak.value = state.peak
+  canSave.value = state.can_save === true
+  if (state.target_ms !== undefined) targetMs.value = state.target_ms
+  if (state.error) sampleError.value = state.error
+}
+
+async function refreshSample(): Promise<void> {
+  try {
+    const state = await voiceSampleStatus()
+    applyState(state)
+    if (state.phase !== 'recording') stopPolling()
+  } catch (err) {
+    stopPolling()
+    sampleError.value = err instanceof Error ? err.message : String(err)
+  }
+}
+
+async function start(): Promise<void> {
+  sampleError.value = ''
+  try {
+    const state = await startVoiceSample()
+    applyState(state)
+    if (state.phase === 'recording') {
+      stopPolling()
+      poll = window.setInterval(() => void refreshSample(), 200)
+    }
+  } catch (err) {
+    sampleError.value = err instanceof Error ? err.message : String(err)
+  }
+}
+
+async function stop(): Promise<void> {
+  stopPolling()
+  try {
+    applyState(await stopVoiceSample())
+  } catch (err) {
+    sampleError.value = err instanceof Error ? err.message : String(err)
+  }
+}
+
+async function discard(): Promise<void> {
+  stopPolling()
+  name.value = ''
+  prompt.value = ''
+  uploadCloud.value = false
+  sampleError.value = ''
+  try {
+    applyState(await discardVoiceSample())
+  } catch (err) {
+    sampleError.value = err instanceof Error ? err.message : String(err)
+  }
+}
+
+async function save(): Promise<void> {
+  saving.value = true
+  sampleError.value = ''
+  const wantsCloud = uploadCloud.value
+  try {
+    const state = await saveVoiceSample(name.value, prompt.value, wantsCloud)
+    if (!state.ok) {
+      applyState(state)
+      if (!state.error) sampleError.value = '没能存下这段录音'
+      return
+    }
+    applyState(state)
+    name.value = ''
+    prompt.value = ''
+    uploadCloud.value = false
+    if (state.uploaded) {
+      note.value = '已存成音色，并传到云端 —— 下一句朗读开始用你的声音'
+      noteBad.value = false
+    } else if (state.cloud_error) {
+      // The recording is safe on this machine; only the disclosure half failed.
+      note.value = '录音已经存在本机，云端那步没成：' + state.cloud_error
+      noteBad.value = true
+    } else {
+      note.value = '已经存成你的音色（只在这台机器上），在上面那张表里选它'
+      noteBad.value = false
+    }
+    await load()
+  } catch (err) {
+    sampleError.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    saving.value = false
+  }
+}
+
+async function remove(voice: string): Promise<void> {
+  if (!window.confirm('删掉这个用你的录音做出来的音色？音频文件会一起删。')) return
+  removing.value = voice
+  try {
+    const answer = await removeVoiceClone(voice)
+    if (answer.error) {
+      note.value = answer.error
+      noteBad.value = true
+    } else {
+      note.value = '已删掉那个音色（包括它的录音文件）'
+      noteBad.value = false
+    }
+    await load()
+  } catch (err) {
+    note.value = err instanceof Error ? err.message : String(err)
+    noteBad.value = true
+  } finally {
+    removing.value = ''
+  }
+}
+
 function absorb(list: {
   choices?: VoiceChoice[]
   current?: string
@@ -142,6 +400,7 @@ function absorb(list: {
   speed_max?: number
   volume_min?: number
   volume_max?: number
+  cloning?: CloningState
 }): void {
   if (list.choices) choices.value = list.choices
   if (list.current !== undefined) current.value = list.current
@@ -151,6 +410,7 @@ function absorb(list: {
   if (list.speed_max !== undefined) speedMax.value = list.speed_max
   if (list.volume_min !== undefined) volumeMin.value = list.volume_min
   if (list.volume_max !== undefined) volumeMax.value = list.volume_max
+  if (list.cloning) rules.value = list.cloning
 }
 
 async function load(): Promise<void> {
@@ -220,7 +480,17 @@ async function applyStyle(): Promise<void> {
 watch(
   () => props.open,
   (shown) => {
-    if (shown) void load()
+    if (shown) {
+      void load()
+      // A take in flight survives closing the dialog -- Python is still holding it -- so
+      // reopen by asking where it got to rather than pretending it never started.
+      void refreshSample()
+    } else {
+      // Polling a closed dialog would keep crossing the bridge for a page that is not
+      // looking, and a timer behind a hidden window is how this project has already been
+      // billed a phantom animation.
+      stopPolling()
+    }
   },
 )
 </script>
@@ -390,5 +660,92 @@ watch(
   font-size: 10px;
   line-height: 1.6;
   color: var(--hud-dim);
+}
+
+/* --- 录一段我的声音 --- */
+.vp__clone {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px dashed rgba(120, 205, 245, 0.22);
+}
+
+.vp__why {
+  margin: 6px 0;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: rgba(196, 226, 244, 0.72);
+}
+
+.vp__why--bad {
+  color: rgba(255, 138, 138, 0.95);
+}
+
+.vp__rec {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+/* The level is a bar, not a colour: it has to read the same on every skin. It is a track
+   the fill lives inside, because a bar whose own width is the percentage sat next to a
+   180px button and ran 66px past the edge of this box in the first browser walk. */
+.vp__level {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 6px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: rgba(77, 216, 255, 0.12);
+}
+
+.vp__level i {
+  display: block;
+  height: 100%;
+  min-width: 2px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, rgba(77, 216, 255, 0.85), rgba(77, 216, 255, 0.25));
+  transition: width 180ms linear;
+}
+
+.vp__rec > button {
+  flex: 0 0 auto;
+}
+
+.vp__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.vp__field input {
+  height: var(--hud-control-h);
+  padding: 0 10px;
+}
+
+.vp__rec-ops {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+/* The disclosure is a checkbox the operator has to look at, not a switch remembered from
+   the last recording: it is off every time, and the sentence next to it says what ticking
+   it sends away. */
+.vp__upload {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 11.5px;
+  color: rgba(196, 226, 244, 0.86);
+  cursor: pointer;
+}
+
+.vp__upload input {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--hud-cyan);
 }
 </style>

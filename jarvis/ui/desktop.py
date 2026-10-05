@@ -446,6 +446,7 @@ class HudBridge:
         voice_picker: VoicePicker | None = None,
         voice_library: VoiceLibrary | None = None,
         voice_call: VoiceCall | None = None,
+        voice_sample: Any | None = None,
         computer_access: ComputerAccess | None = None,
         command_access: CommandAccess | None = None,
         process: ProcessService | None = None,
@@ -474,6 +475,12 @@ class HudBridge:
         self._voice_picker = voice_picker
         self._voice_library = voice_library
         self._voice_call = voice_call
+        self._voice_sample = voice_sample
+        """Records a sample of this machine's operator, in the process that owns the mic.
+
+        ``None`` on a run with no microphone path: the page then gets「这个进程没有接录音」
+        instead of a record button that captures nothing.
+        """
         self._computer_access = computer_access
         self._command_access = command_access
         self._process = process
@@ -1362,6 +1369,65 @@ class HudBridge:
             self._forget_cloud_voice(cloud_voice)
         return {"error": "", **self.voice_clone_list()}
 
+    # -- recording a sample of *this* machine's operator ----------------------
+
+    def voice_sample_start(self) -> dict[str, object]:
+        """Begin holding the microphone to capture one sample for a cloned voice.
+
+        Returns at once: the page polls :meth:`voice_sample_status` for the elapsed
+        time and the level, because a bridge call that blocked for fifteen seconds
+        would freeze the window it came from -- and the operator would read that as
+        the recording having hung.
+        """
+        if self._voice_sample is None:
+            return {"ok": False, "error": "这个进程没有接录音", "phase": "idle"}
+        return dict(self._voice_sample.start())
+
+    def voice_sample_status(self) -> dict[str, object]:
+        """Where the take stands. Cheap enough for the page to poll while it counts."""
+        if self._voice_sample is None:
+            return {"phase": "idle", "error": "这个进程没有接录音"}
+        return dict(self._voice_sample.status())
+
+    def voice_sample_stop(self) -> dict[str, object]:
+        """Close the device and keep the take for review."""
+        if self._voice_sample is None:
+            return {"ok": False, "error": "这个进程没有接录音"}
+        return dict(self._voice_sample.stop())
+
+    def voice_sample_discard(self) -> dict[str, object]:
+        """Throw the take away without storing it."""
+        if self._voice_sample is None:
+            return {"ok": False, "error": "这个进程没有接录音"}
+        return dict(self._voice_sample.discard())
+
+    def voice_sample_save(
+        self, name: object = None, prompt_text: object = None, upload: object = False
+    ) -> dict[str, object]:
+        """Store the held take as a voice. The audio does not cross the bridge.
+
+        The sentence is asked for, not transcribed: the enrolment matches the clip
+        against the words spoken in it, and a guessed transcript makes a worse voice
+        than no voice. Same rule the phone's recording screen follows.
+
+        ``upload`` is the operator's per-recording decision to send the clip to the
+        vendor for a cloud clone -- the only path that can answer in their timbre on
+        a machine that cannot load the offline model. It is read with the same
+        "did JSON mean yes" rule as the phone's own upload switch, because a page
+        that sends ``"true"`` and a backend that accepts only ``True`` produces a
+        voice that is quietly local-only, with nothing on screen to point at this
+        line.
+        """
+        if self._voice_sample is None:
+            return {"ok": False, "error": "这个进程没有接录音"}
+        result = dict(
+            self._voice_sample.save(name=name, prompt_text=prompt_text, upload=_truthy(upload))
+        )
+        if result.get("ok"):
+            # The new voice has to appear in the list without a second round-trip.
+            result["voices"] = self.voice_clone_list().get("voices", [])
+        return result
+
     def call_readiness(self) -> dict[str, object]:
         """Whether a spoken turn can happen at all, asked *before* one is tried."""
         if self._voice_call is None:
@@ -1702,30 +1768,52 @@ class HudBridge:
         Only the ``add_model`` field triggers it. Everything else in a settings patch has
         already been checked where it was written, and re-probing on every save would make
         保存 take as long as the endpoint does.
+
+        A **list** is the panel's queue -- several providers added in one save. Each row is
+        probed and rolled back on its own: refusing the whole batch because one endpoint was
+        down would throw away the rows that answered perfectly, and keeping all of them
+        because one answered would keep the dead one.
         """
         draft = patch.get("add_model")
         settings = self._settings
-        if not isinstance(draft, dict) or settings is None:
+        if settings is None or not isinstance(draft, (dict, list)) or not draft:
             return answer
         problems = answer.get("problems")
         if isinstance(problems, Mapping) and "add_model" in problems:
             return answer
-        name = str(draft.get("name") or "")
-        model = str(draft.get("model") or "")
+        if isinstance(draft, list):
+            rows = [item for item in draft if isinstance(item, dict)]
+        else:
+            rows = [draft]
+        verdict: dict[str, object] = answer
+        refused: dict[str, str] = {}
+        for item in rows:
+            name = str(item.get("name") or "")
+            model = str(item.get("model") or "")
 
-        def rollback() -> dict[str, object]:
-            return settings.apply({"remove_model": name})
+            def rollback(target: str = name) -> dict[str, object]:
+                return settings.apply({"remove_model": target})
 
-        verdict = self._gate(answer, name, model, rollback)
-        refused = verdict.get("problems")
-        carried = dict(refused) if isinstance(refused, Mapping) else {}
-        if not bool(verdict.get("ok", True)):
-            carried["add_model"] = str(verdict.get("error") or "连不上")
-            applied = verdict.get("applied")
-            surviving = dict(applied) if isinstance(applied, Mapping) else {}
-            surviving.pop("add_model", None)
-            verdict = {**verdict, "applied": surviving, "problems": carried}
-        return verdict
+            verdict = self._gate(verdict, name, model, rollback)
+            if not bool(verdict.get("ok", True)):
+                refused[name] = str(verdict.get("error") or "连不上")
+        if not refused:
+            return verdict
+        carried: dict[str, object] = {}
+        existing = verdict.get("problems")
+        if isinstance(existing, Mapping):
+            carried.update({str(key): str(value) for key, value in existing.items()})
+        # One row probed needs no label; several do -- including when only one of them
+        # failed, or the operator is left reading "连不上" about a queue of three.
+        carried["add_model"] = (
+            next(iter(refused.values()))
+            if len(rows) == 1
+            else "；".join(f"{key} {value}" for key, value in refused.items())
+        )
+        applied = verdict.get("applied")
+        surviving = dict(applied) if isinstance(applied, Mapping) else {}
+        surviving.pop("add_model", None)
+        return {**verdict, "applied": surviving, "problems": carried}
 
     def _gate(
         self,
@@ -2805,6 +2893,7 @@ def run(
     voice_picker: VoicePicker | None = None,
     voice_library: VoiceLibrary | None = None,
     voice_call: VoiceCall | None = None,
+    voice_sample: Any | None = None,
     computer_access: ComputerAccess | None = None,
     command_access: CommandAccess | None = None,
     process: ProcessService | None = None,
@@ -2994,6 +3083,7 @@ def run(
         voice_picker=voice_picker,
         voice_library=voice_library,
         voice_call=voice_call,
+        voice_sample=voice_sample,
         computer_access=computer_access,
         command_access=command_access,
         process=process,

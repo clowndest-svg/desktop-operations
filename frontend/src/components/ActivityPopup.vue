@@ -161,7 +161,9 @@ watch(
 
 .act__row {
   display: grid;
-  grid-template-columns: 74px 130px 52px 56px 1fr;
+  /* ``1fr`` alone cannot shrink below its content, so on a narrow window the four fixed
+     columns took the row and the detail text walked out of the dialog. */
+  grid-template-columns: 74px 130px 52px 56px minmax(0, 1fr);
   align-items: baseline;
   gap: 10px;
   padding: 4px 10px;

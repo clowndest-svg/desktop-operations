@@ -76,6 +76,7 @@ let observer: ResizeObserver | undefined
 let mediaQuery: MediaQueryList | undefined
 let clockStart = 0
 let lastFrame = 0
+let lastSit = 0
 let calm = false
 
 const driver = new FaceDriver()
@@ -107,8 +108,16 @@ function frame(): void {
   const delta = Math.min(0.25, elapsed - lastFrame)
   lastFrame = elapsed
   const sample = levels()
-  figure.setPose(driver.update({ levels: sample, mood: moodNow(), elapsed, delta, calm }))
+  const pose = driver.update({ levels: sample, mood: moodNow(), elapsed, delta, calm })
+  figure.setPose(pose)
   figure.advance(elapsed, delta, calm)
+  // 坐下换的是取景（她矮了一截，相机得跟着往下走），而这台相机只在 ``resize`` 里被摆过。
+  // 宠物窗早就跟着缓动补了这一手，HUD 没补 —— 于是思考那半秒她是直直往下走出画面的，
+  // 面板的 overflow:hidden 把下半截切掉。跟着跑：坐下那半秒重排十几次，之后一分钱不花。
+  if (Math.abs(pose.sit - lastSit) > 0.01) {
+    lastSit = pose.sit
+    resize()
+  }
   view.render(stage, eye)
 }
 

@@ -36,10 +36,12 @@ from jarvis.app.voice_call import VoiceCall
 from jarvis.app.voice_graph import ChatGraph
 from jarvis.app.voice_library import VoiceLibrary
 from jarvis.app.voice_picker import VoicePicker
+from jarvis.app.voice_sample import VoiceSampler
 from jarvis.app.voice_service import LoopBuilder, VoiceService
 from jarvis.app.wake_greeting import WakeGreeter
 from jarvis.app.wake_keywords import WakeWords
 from jarvis.asr import AsrService, AsrSettings
+from jarvis.audio.source import SounddeviceSource
 from jarvis.browser import BrowserService
 from jarvis.computer import ComputerService
 from jarvis.config import AppPaths, ConfigService
@@ -830,6 +832,16 @@ def _run_desktop(args: argparse.Namespace) -> int:
         library=voice_library,
     )
     app.register(voice_picker)
+    # Recording a sample of the operator's own voice, on this machine, in this process:
+    # the microphone already belongs to Python here, so the clip never crosses the bridge
+    # the way the phone's does. Asked first whether 聆听 is holding the device, because
+    # two captures on one input is the failure that shows up as "she stopped hearing me"
+    # rather than as an error.
+    voice_sample = VoiceSampler(
+        source_factory=SounddeviceSource,
+        library=voice_library,
+        mic_busy=lambda: voice.capturing,
+    )
     capabilities = _register_capabilities(
         app,
         config_service,
@@ -989,6 +1001,7 @@ def _run_desktop(args: argparse.Namespace) -> int:
             voice_picker=voice_picker,
             voice_library=voice_library,
             voice_call=voice_call,
+            voice_sample=voice_sample,
             computer_access=computer_access,
             command_access=command_access,
             process=process_service,

@@ -775,28 +775,56 @@ class SettingsService:
         return None
 
     def _add_model(self, value: Any) -> str | None:
-        """Add a model row that does not exist in config.yaml."""
-        if not isinstance(value, dict):
-            return "新增模型需要一个 {name, base_url, model} 对象"
-        name = str(value.get("name") or "").strip()
-        base_url = str(value.get("base_url") or "").strip()
-        model = str(value.get("model") or "").strip()
-        if not _valid_name(name):
-            return "模型名字只能是小写字母、数字、- 和 _，1-32 位"
-        if not _valid_url(base_url):
-            return "地址必须以 http:// 或 https:// 开头"
-        if not _valid_model(model):
-            return "模型名不能含空格且不超过 150 字符"
-        if name in self._effective_section().providers:
-            return f"已经有叫 {name!r} 的模型；要改它就在那一行上改"
+        """Add model rows that do not exist in config.yaml.
+
+        One row or a list of them: the panel lets an operator queue several providers
+        before pressing 保存, because adding one at a time meant opening the dialog,
+        filling four fields, saving, and reopening it -- six clicks per provider. The
+        batch goes out in **one** write on purpose: three separate writes means the
+        second one's failure leaves the first two stored while the screen reports a
+        single save.
+        """
+        rows = value if isinstance(value, list) else [value]
+        if not rows:
+            return "没有要添加的服务商"
         extras = self._extras()
-        extras.append(
-            {"name": name, "base_url": base_url, "model": model, "key_env": key_env_for(name)}
-        )
-        self._prefs.set(LLM_EXTRAS, extras)
-        key = str(value.get("api_key") or "").strip()
-        if key:
-            self._store_api_key(key, name)
+        # The effective list is not enough here: it filters the rows the operator hid,
+        # and adding a second row under a hidden name would then pass this check only to
+        # be shadowed by the file's row the moment somebody brings it back.
+        known = {str(entry["name"]) for entry in extras}
+        known |= set(self._safe_section().providers)
+        known |= set(self._hidden())
+        pending: list[dict[str, Any]] = []
+        for item in rows:
+            if not isinstance(item, dict):
+                return "新增模型需要一个 {name, base_url, model} 对象"
+            name = str(item.get("name") or "").strip()
+            base_url = str(item.get("base_url") or "").strip()
+            model = str(item.get("model") or "").strip()
+            if not _valid_name(name):
+                return "模型名字只能是小写字母、数字、- 和 _，1-32 位"
+            if not _valid_url(base_url):
+                return f"{name}：地址必须以 http:// 或 https:// 开头"
+            if not _valid_model(model):
+                return f"{name}：模型名不能含空格且不超过 150 字符"
+            if name in known:
+                return f"已经有叫 {name!r} 的模型；要改它就在那一行上改"
+            known.add(name)
+            pending.append(
+                {"name": name, "base_url": base_url, "model": model, "key_env": key_env_for(name)}
+            )
+        if not self._prefs.set(LLM_EXTRAS, extras + pending):
+            # Said out loud because the alternative is the bug this line was written for:
+            # the write was refused, yet the panel had already been told 已保存.
+            names = "、".join(str(entry["name"]) for entry in pending)
+            return f"偏好文件拒绝了这次写入，{names} 没有加上"
+        dropped: list[str] = []
+        for item, entry in zip(rows, pending, strict=True):
+            key = str(item.get("api_key") or "").strip()
+            if key and self._store_api_key(key, str(entry["name"])) is None:
+                dropped.append(str(entry["name"]))
+        if dropped:
+            return "服务商加上了，但这几家的 Key 没能写进环境变量：" + "、".join(dropped)
         return None
 
     def _remove_model(self, value: Any) -> str | None:
@@ -806,7 +834,8 @@ class SettingsService:
         extras = [entry for entry in before if entry["name"] != name]
         if len(extras) == len(before):
             return f"{name!r} 不是界面添加的模型；配置文件里的行请去 config.yaml 删"
-        self._prefs.set(LLM_EXTRAS, extras)
+        if not self._prefs.set(LLM_EXTRAS, extras):
+            return f"偏好文件拒绝了这次写入，{name} 还留着"
         overrides = self._overrides()
         overrides.pop(name, None)
         self._prefs.set(LLM_OVERRIDES, overrides)
@@ -903,6 +932,13 @@ class SettingsService:
         Re-validated at read time rather than trusted: preferences.json is a file
         the operator can open in Notepad, and a hand-edited row with a broken URL
         must degrade to "absent", not to a client pointed at nonsense.
+
+        The rows come back in the shape they are *stored* in -- ``models`` as a list of
+        ``{id, label}`` mappings, not ``ModelSpec`` objects -- for the same reason
+        :meth:`_overrides` does: every caller here reads this table, appends or drops a
+        row, and writes the whole thing back. A row carrying dataclasses cannot be
+        serialised, so ``Preferences.set`` refuses it *before* touching anything, and
+        the add is a silent no-op while the screen reports 「已保存并立即生效」.
         """
         raw = self._prefs.get(LLM_EXTRAS)
         if not isinstance(raw, list):
@@ -922,7 +958,7 @@ class SettingsService:
                 {
                     "name": name,
                     "base_url": base_url,
-                    "models": specs,
+                    "models": _serialise_models(specs),
                     "default_model": _default_of(specs, entry.get("default_model")),
                     "key_env": str(entry.get("key_env") or key_env_for(name)),
                 }
@@ -978,11 +1014,18 @@ class SettingsService:
                     extra["name"],
                 )
                 continue
+            extra_specs = _stored_models(extra)
+            if not extra_specs:
+                # ``_extras`` already validated this row, so reaching here means the
+                # stored shape changed underneath us. Dropping the row beats handing
+                # the client a provider with no model to ask for.
+                logger.warning("界面添加的模型 %r 没有可用的模型名，本次忽略", extra["name"])
+                continue
             providers[extra["name"]] = ProviderSection(
                 name=extra["name"],
                 base_url=extra["base_url"],
-                models=extra["models"],
-                default_model=extra["default_model"],
+                models=extra_specs,
+                default_model=_default_of(extra_specs, extra.get("default_model")),
                 api_key_env=extra["key_env"],
                 cost_input_per_1m=0.0,
                 cost_output_per_1m=0.0,

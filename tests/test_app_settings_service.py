@@ -569,6 +569,177 @@ class TestModelList:
 
         assert outcome["problems"]["add_model"]
 
+    def test_a_second_window_row_survives_the_first_one(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        """The row already stored must not poison the write of the next one.
+
+        ``_extras`` used to hand ``ModelSpec`` objects back, and ``Preferences.set``
+        refuses a value it cannot serialise *before* touching anything -- so the second
+        add of a session was a total no-op while the panel reported 「已保存并立即生效」.
+        Every existing test added exactly one row, so none of them ever saw it.
+        """
+        service, _, _ = _service(prefs, env)
+        service.apply(
+            {"add_model": {"name": "gamma", "base_url": "https://g.example/v1", "model": "g-1"}}
+        )
+
+        outcome = service.apply(
+            {"add_model": {"name": "delta", "base_url": "https://d.example/v1", "model": "d-1"}}
+        )
+
+        assert outcome["problems"] == {}
+        assert {"gamma", "delta"} <= {entry["name"] for entry in outcome["models"]}
+        # And it is on disk, not just in this process: "I had to reopen 小夜 to see it"
+        # is only fixed if a fresh reader finds both rows.
+        restarted, _, _ = _service(Preferences(prefs.path), env)
+        assert {"gamma", "delta"} <= {entry["name"] for entry in restarted.snapshot()["models"]}
+
+    def test_several_providers_add_in_one_save(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        """The queue the panel builds: three rows, one write, all of them live."""
+        service, fake_llm, _ = _service(prefs, env)
+
+        outcome = service.apply(
+            {
+                "add_model": [
+                    {"name": "one", "base_url": "https://1.example/v1", "model": "m-1"},
+                    {"name": "two", "base_url": "https://2.example/v1", "model": "m-2"},
+                    {"name": "three", "base_url": "https://3.example/v1", "model": "m-3"},
+                ]
+            }
+        )
+
+        assert outcome["problems"] == {}
+        names = {entry["name"] for entry in outcome["models"]}
+        assert {"one", "two", "three"} <= names
+        assert fake_llm.override is not None
+        assert {"one", "two", "three"} <= set(fake_llm.override.providers)
+
+    def test_a_duplicate_inside_the_batch_writes_nothing(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        """All or nothing: two stored and one lost under one 「已保存」 is the worst shape."""
+        service, _, _ = _service(prefs, env)
+
+        outcome = service.apply(
+            {
+                "add_model": [
+                    {"name": "one", "base_url": "https://1.example/v1", "model": "m-1"},
+                    {"name": "one", "base_url": "https://2.example/v1", "model": "m-2"},
+                ]
+            }
+        )
+
+        assert outcome["problems"]["add_model"]
+        assert "one" not in {entry["name"] for entry in service.snapshot()["models"]}
+
+    def test_a_refused_write_is_said_rather_than_reported_as_saved(
+        self,
+        prefs: Preferences,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The verdict of the write is the only thing standing between this line and a lie."""
+        service, _, _ = _service(prefs, env)
+        monkeypatch.setattr(prefs, "set", lambda *args, **kwargs: False)
+
+        outcome = service.apply(
+            {"add_model": {"name": "gamma", "base_url": "https://g.example/v1", "model": "g-1"}}
+        )
+
+        assert "add_model" in outcome["problems"]
+        assert "add_model" not in outcome["applied"]
+        assert "gamma" not in {entry["name"] for entry in service.snapshot()["models"]}
+
+    def test_the_key_of_an_added_provider_reaches_its_own_variable(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        service, _, _ = _service(prefs, env)
+
+        service.apply(
+            {
+                "add_model": {
+                    "name": "gamma",
+                    "base_url": "https://g.example/v1",
+                    "model": "g-1",
+                    "api_key": SECRET,
+                }
+            }
+        )
+
+        assert env["GAMMA_API_KEY"] == SECRET
+        row = next(entry for entry in service.snapshot()["models"] if entry["name"] == "gamma")
+        assert row["key_set"] is True
+
+    def test_a_refused_delete_is_said_rather_than_reported_as_saved(
+        self,
+        prefs: Preferences,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        service, _, _ = _service(prefs, env)
+        service.apply(
+            {"add_model": {"name": "gamma", "base_url": "https://g.example/v1", "model": "g-1"}}
+        )
+        monkeypatch.setattr(prefs, "set", lambda *args, **kwargs: False)
+
+        outcome = service.apply({"remove_model": "gamma"})
+
+        assert "remove_model" in outcome["problems"]
+        assert "gamma" in {entry["name"] for entry in service.snapshot()["models"]}
+
+    def test_a_key_that_found_no_variable_says_so(
+        self,
+        prefs: Preferences,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The row went in; the Key did not. Silence here is a lost credential."""
+        service, _, _ = _service(prefs, env)
+        monkeypatch.setattr(service, "_store_api_key", lambda value, target=None: None)
+
+        outcome = service.apply(
+            {
+                "add_model": {
+                    "name": "gamma",
+                    "base_url": "https://g.example/v1",
+                    "model": "g-1",
+                    "api_key": SECRET,
+                }
+            }
+        )
+
+        assert "gamma" in {entry["name"] for entry in outcome["models"]}
+        assert "Key" in outcome["problems"]["add_model"]
+
+    def test_removing_one_of_several_rows_persists(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        """The sibling of the add bug: deleting one row rewrites the whole list."""
+        service, _, _ = _service(prefs, env)
+        service.apply(
+            {
+                "add_model": [
+                    {"name": "one", "base_url": "https://1.example/v1", "model": "m-1"},
+                    {"name": "two", "base_url": "https://2.example/v1", "model": "m-2"},
+                ]
+            }
+        )
+
+        outcome = service.apply({"remove_model": "one"})
+
+        assert outcome["problems"] == {}
+        names = {entry["name"] for entry in outcome["models"]}
+        assert names == {"alpha", "beta", "two"}
+        restarted, _, _ = _service(Preferences(prefs.path), env)
+        assert {entry["name"] for entry in restarted.snapshot()["models"]} == {
+            "alpha",
+            "beta",
+            "two",
+        }
+
     def test_the_old_global_overrides_fold_into_their_provider_on_start(
         self, prefs: Preferences, env: dict[str, str]
     ) -> None:

@@ -70,6 +70,14 @@ def _caps(tmp_path: Path) -> ModelCaps:
     return ModelCaps(Preferences(tmp_path / "prefs.json"))
 
 
+def _verdict(answer: dict[str, object]) -> tuple[dict[str, object], dict[str, object]]:
+    """``(problems, applied)`` out of a settings answer, narrowed once."""
+    problems = answer["problems"]
+    applied = answer["applied"]
+    assert isinstance(problems, dict) and isinstance(applied, dict)
+    return problems, applied
+
+
 class TestThePictureItself:
     def test_the_probe_picture_is_a_real_red_png(self) -> None:
         """The claim under every vision answer: this is a red square a model can see.
@@ -266,6 +274,90 @@ class TestThePanelDoors:
         verdict = bridge.llm_test("nope", "m")
         assert verdict["ok"] is False
         assert "unknown LLM provider" in str(verdict["detail"])
+
+    def test_a_bulk_add_probes_each_row_and_keeps_the_ones_that_answer(self, tmp_path: Any) -> None:
+        """The panel can queue several providers; the gate has to walk the queue.
+
+        Skipping the list would quietly drop the connectivity rule for exactly the path
+        where it matters most -- three endpoints typed in one sitting, one of them a typo.
+        """
+        from tests.test_ui_desktop import _bridge
+
+        removed: list[str] = []
+
+        class Settings:
+            def apply(self, patch: dict[str, Any], **_: Any) -> dict[str, object]:
+                if "remove_model" in patch:
+                    removed.append(str(patch["remove_model"]))
+                return {"ok": True, "applied": dict(patch), "problems": {}, "models": []}
+
+            def thinking_loader(self) -> str:
+                return "dots"
+
+            def speaks_typed(self) -> bool:
+                return False
+
+        def client_for(provider: str, model: str) -> ProbedClient:
+            return ProbedClient(text="") if provider == "deadai" else ProbedClient()
+
+        bridge = _bridge(
+            tmp_path,
+            settings=Settings(),
+            model_probe=ModelProber(client_for, _caps(tmp_path)),
+        )
+
+        answer = bridge.settings_apply(
+            {
+                "add_model": [
+                    {"name": "goodai", "base_url": "https://g.example/v1", "model": "m-1"},
+                    {"name": "deadai", "base_url": "https://d.example/v1", "model": "m-2"},
+                ]
+            }
+        )
+
+        assert removed == ["deadai"], "只有连不上的那行该被拿回去"
+        problems, applied = _verdict(answer)
+        assert "deadai" in str(problems["add_model"])
+        # The row that answered must not be in the complaint: naming both means the
+        # operator goes and re-types the one that was fine.
+        assert "goodai" not in str(problems["add_model"])
+        assert "add_model" not in applied, "一批里有一行没成，就不能说整批存好了"
+
+    def test_a_bulk_add_where_everything_answers_keeps_every_row(self, tmp_path: Any) -> None:
+        from tests.test_ui_desktop import _bridge
+
+        calls: list[Any] = []
+
+        class Settings:
+            def apply(self, patch: dict[str, Any], **_: Any) -> dict[str, object]:
+                calls.append(patch)
+                return {"ok": True, "applied": dict(patch), "problems": {}, "models": []}
+
+            def thinking_loader(self) -> str:
+                return "dots"
+
+            def speaks_typed(self) -> bool:
+                return False
+
+        bridge = _bridge(
+            tmp_path,
+            settings=Settings(),
+            model_probe=ModelProber(lambda p, m: ProbedClient(), _caps(tmp_path)),
+        )
+
+        answer = bridge.settings_apply(
+            {
+                "add_model": [
+                    {"name": "oneai", "base_url": "https://1.example/v1", "model": "m"},
+                    {"name": "twoai", "base_url": "https://2.example/v1", "model": "m"},
+                ]
+            }
+        )
+
+        assert [patch for patch in calls if "remove_model" in patch] == []
+        problems, applied = _verdict(answer)
+        assert problems == {}
+        assert "add_model" in applied
 
     def test_no_probe_wired_says_so_instead_of_passing_quietly(self, tmp_path: Any) -> None:
         """A build without the door must not look like a build where everything passed."""

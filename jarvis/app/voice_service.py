@@ -199,6 +199,19 @@ class VoiceService:
             )
         return VoiceStatus(phase=phase, detail=detail, keyword=self._keyword_text())
 
+    @property
+    def capturing(self) -> bool:
+        """Whether the microphone is open *right now*, as opposed to merely available.
+
+        Asked by the voice-sample recorder before it opens a stream of its own: two
+        captures on one device is not "both work", it is the wake word quietly going deaf
+        while the operator is recording a sample. ``listening`` is the loop's own truth,
+        which is why this does not read the phase -- a muted 聆听 keeps the service
+        RUNNING while no thread is holding the device.
+        """
+        loop = self._loop
+        return bool(loop is not None and loop.listening)
+
     def _keyword_text(self) -> str:
         provider = self._keywords_provider
         if provider is None:

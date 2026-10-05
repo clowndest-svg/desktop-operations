@@ -200,9 +200,14 @@
           </p>
 
           <details class="settings__add">
-            <summary class="hud-label">＋ 添加一个服务商</summary>
+            <summary class="hud-label">
+              ＋ 添加服务商（一次可以加几家）
+              <b v-if="pendingProviders.length" class="hud-num settings__queue-count">
+                待添加 {{ pendingProviders.length }}
+              </b>
+            </summary>
             <p class="settings__why">
-              下面这三格说的是一家**新的**服务商（一个新地址、一把新钥匙）。
+              下面这四格说的是一家**新的**服务商（一个新地址、一把新钥匙）。
               已经在这张表里的服务商，点它的名字进去改地址、改起始模型、加它的其它模型。
             </p>
             <label class="settings__row">
@@ -222,7 +227,35 @@
               <span class="hud-label">API Key（可选，存进 {{ draftKeyEnv }}）</span>
               <input v-model="draft.api_key" type="password" autocomplete="off" spellcheck="false" />
             </label>
-            <p class="settings__why">添加随「保存」一起生效；名字不能和已有行重复。</p>
+            <div class="settings__add-ops">
+              <button
+                class="hud-btn"
+                type="button"
+                :disabled="!draftReady"
+                :title="draftProblem || '填好名字、地址和起始模型就能加进来'"
+                @click="queueProvider"
+              >
+                加进待添加
+              </button>
+              <span v-if="draftTouched && draftProblem" class="settings__why settings__why--bad">
+                {{ draftProblem }}
+              </span>
+            </div>
+
+            <ul v-if="pendingProviders.length" class="settings__queue">
+              <li v-for="(row, index) in pendingProviders" :key="row.name">
+                <b class="hud-num">{{ row.name }}</b>
+                <span class="settings__queue-url">{{ row.base_url }} · {{ row.model }}</span>
+                <span v-if="row.api_key" class="hud-label">带 Key</span>
+                <button class="hud-btn" type="button" @click="unqueueProvider(index)">去掉</button>
+              </li>
+            </ul>
+            <p class="settings__why">
+              <template v-if="pendingProviders.length">
+                待添加 {{ pendingProviders.length }} 家，随「保存」一起生效；没点「加进待添加」的那一格也算进去。
+              </template>
+              <template v-else>添加随「保存」一起生效；名字不能和已有行重复。</template>
+            </p>
           </details>
         </fieldset>
 
@@ -476,7 +509,53 @@ const saving = ref(false)
 const loadError = ref('')
 const problems = ref<Record<string, string>>({})
 const savedNote = ref('')
-const draft = ref({ name: '', base_url: '', model: '', api_key: '' })
+/** One row of the add-provider block. The shape is the patch's shape, so a queued row
+ *  needs no translating on the way to the shell. */
+interface ProviderDraft {
+  name: string
+  base_url: string
+  model: string
+  api_key: string
+}
+
+const BLANK_PROVIDER_DRAFT: ProviderDraft = { name: '', base_url: '', model: '', api_key: '' }
+
+const draft = ref<ProviderDraft>({ ...BLANK_PROVIDER_DRAFT })
+/** Providers typed into the add block but not yet saved. The queue exists because the
+ *  alternative was six clicks per provider -- fill, save, reopen the dialog. They go out
+ *  with the save in **one** write, so a refusal covers all of them at once instead of
+ *  leaving two stored and one lost with a single 「已保存」 over the lot. */
+const pendingProviders = ref<ProviderDraft[]>([])
+
+/** The three rules the save enforces, checked here so 「加进待添加」 is not a button that
+ *  looks dead. Names are matched against the rows on screen *and* against the queue:
+ *  two pending rows with one name come back as one row, silently. */
+const draftProblem = computed(() => {
+  const row = draft.value
+  if (!row.name) return '先填名字'
+  if (!/^[a-z0-9_-]{1,32}$/.test(row.name)) return '名字只能是小写字母、数字、- 和 _，1-32 位'
+  if (!/^https?:\/\//.test(row.base_url)) return '地址必须以 http:// 或 https:// 开头'
+  if (!row.model) return '还要填起始模型'
+  if (row.model.includes(' ') || row.model.length > 150) return '模型名不能含空格且不超过 150 字符'
+  if (models.value.some((m) => m.name === row.name)) return `已经有叫 ${row.name} 的行，点它的名字进去改`
+  if (pendingProviders.value.some((m) => m.name === row.name)) return `${row.name} 已经在待添加里了`
+  return ''
+})
+const draftReady = computed(() => draftProblem.value === '')
+/** An untouched form should not open with a red complaint. */
+const draftTouched = computed(() =>
+  Boolean(draft.value.name || draft.value.base_url || draft.value.model),
+)
+
+function queueProvider(): void {
+  if (!draftReady.value) return
+  pendingProviders.value.push({ ...draft.value })
+  draft.value = { ...BLANK_PROVIDER_DRAFT }
+}
+
+function unqueueProvider(index: number): void {
+  pendingProviders.value.splice(index, 1)
+}
 const newModel = ref('')
 const newLabel = ref('')
 const modelNote = ref('')
@@ -591,7 +670,7 @@ function tag(key: string): string {
 }
 
 const problemList = computed(() =>
-  Object.entries(problems.value).map(([key, why]) => `${key}：${why}`),
+  Object.entries(problems.value).map(([key, why]) => `${fieldLabel(key)}：${why}`),
 )
 const keyPlaceholder = computed(() =>
   editingRow.value?.key_set ? '已设置，输入新值可替换' : '粘贴你的 API Key',
@@ -780,6 +859,34 @@ async function send(patch: Record<string, unknown>, note: string): Promise<void>
   }
 }
 
+/** 保存之后那句回读。键名是英文的，人不该为了看懂"刚才到底存了什么"去读代码；
+ *  认不出的键照原样印出来，那比编一个中文名字更诚实。 */
+const FIELD_LABELS: Record<string, string> = {
+  auto_speak_typed: '打字也念出来',
+  wake_greeting: '唤醒问候语',
+  wake_keywords: '唤醒词',
+  thinking_loader: '思考动画',
+  telemetry_interval_ms: '遥测间隔',
+  thinking_enabled: '深度思考',
+  thinking_budget: '思考预算',
+  history_turns: '上下文轮数',
+  alerts_rules: '告警规则',
+  alerts_cooldown_minutes: '重复提醒间隔',
+  alerts_speak_critical: '严重告警用语音提醒',
+  base_url: '调用地址',
+  model: '起始模型',
+  api_key: 'API Key',
+  add_model: '新增服务商',
+  remove_model: '删掉服务商',
+  provider: '当前服务商',
+  hide_provider: '藏起来',
+  show_provider: '找回',
+}
+
+function fieldLabel(key: string): string {
+  return FIELD_LABELS[key] ?? key
+}
+
 async function save() {
   if (!form.value || saving.value) return
   const patch: Record<string, unknown> = {
@@ -804,7 +911,14 @@ async function save() {
     patch.api_key = apiKey.value
     patch.key_for = editing.value
   }
-  if (draft.value.name && (draft.value.base_url || draft.value.model)) {
+  // The row still being typed goes with the queue when it is complete: an operator who
+  // filled four fields and pressed 保存 instead of 加进待添加 must not lose it. When it is
+  // not complete it stays on screen, and only the queued rows go out.
+  const queued = pendingProviders.value.map((row) => ({ ...row }))
+  const draftComplete = draftReady.value
+  if (queued.length) {
+    patch.add_model = draftComplete ? [...queued, { ...draft.value }] : queued
+  } else if (draft.value.name && (draft.value.base_url || draft.value.model)) {
     patch.add_model = { ...draft.value }
   }
   saving.value = true
@@ -816,9 +930,14 @@ async function save() {
     if (form.value) Object.assign(form.value, engineFormValues(result))
     problems.value = result.problems ?? {}
     const done = Object.keys(result.applied ?? {}).length
-    savedNote.value = done ? `已保存并立即生效：${Object.keys(result.applied ?? {}).join('、')}` : '没有字段被改动'
+    savedNote.value = done
+      ? `已保存并立即生效：${Object.keys(result.applied ?? {}).map(fieldLabel).join('、')}`
+      : '没有字段被改动'
     if (result.applied?.api_key) apiKey.value = ''
-    if (result.applied?.add_model) draft.value = { name: '', base_url: '', model: '', api_key: '' }
+    if (result.applied?.add_model) {
+      pendingProviders.value = []
+      if (draftComplete || queued.length === 0) draft.value = { ...BLANK_PROVIDER_DRAFT }
+    }
     form.value.base_url = ''
     form.value.model = ''
     emit('saved', result)
@@ -1093,6 +1212,53 @@ watch(
   color: var(--hud-dim);
   font-size: 11px;
   line-height: 1.5;
+}
+
+/* The reason 「加进待添加」 is not clickable, next to the button rather than in a toast:
+   a disabled control with no stated reason reads as a broken feature. */
+.settings__why--bad {
+  color: var(--hud-red);
+  align-self: center;
+}
+
+.settings__add-ops {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.settings__queue {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.settings__queue li {
+  display: grid;
+  grid-template-columns: minmax(0, 96px) minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+}
+
+/* The address is the long part, so it is the one allowed to truncate -- the name and the
+   去掉 button are what the operator needs to hit. */
+.settings__queue-url {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--hud-dim);
+}
+
+.settings__queue-count {
+  margin-left: 6px;
+  color: var(--hud-amber);
 }
 
 .settings__state {

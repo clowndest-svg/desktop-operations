@@ -299,6 +299,10 @@ async function setShell(tier: number): Promise<void> {
   max-height: 80vh;
   display: flex;
   flex-direction: column;
+  /* Without this the box had nowhere to put the overflow, so the one child that *could*
+     shrink -- the ledger, which has its own scroll -- collapsed to a sliver and the last
+     row was cut in half. The box scrolls; nothing inside it is squeezed to make room. */
+  overflow-y: auto;
   padding: 16px 20px 14px;
   border: 1px solid var(--hud-line);
   border-top: 1px solid rgba(77, 216, 255, 0.45);
@@ -332,7 +336,7 @@ async function setShell(tier: number): Promise<void> {
 
 .ca__row {
   display: grid;
-  grid-template-columns: 96px 1fr;
+  grid-template-columns: 104px minmax(0, 1fr);
   gap: 10px;
   align-items: start;
   padding: 7px 9px;
@@ -443,6 +447,9 @@ async function setShell(tier: number): Promise<void> {
   background: rgba(3, 9, 16, 0.55);
   max-height: 168px;
   overflow-y: auto;
+  /* Its own scroll made it the one item the box could squeeze. It keeps its height now
+     that the box scrolls instead. */
+  flex: 0 0 auto;
 }
 
 .ca__ledger-head {

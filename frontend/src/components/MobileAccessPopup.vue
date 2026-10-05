@@ -434,7 +434,7 @@ watch(
 
 .ma__row {
   display: grid;
-  grid-template-columns: 1fr 88px;
+  grid-template-columns: minmax(0, 1fr) 88px;
   gap: 10px;
   align-items: center;
   padding: 7px 9px;
@@ -443,7 +443,7 @@ watch(
 }
 
 .ma__row--all {
-  grid-template-columns: 88px 1fr;
+  grid-template-columns: 88px minmax(0, 1fr);
   padding: 4px 0 0;
 }
 

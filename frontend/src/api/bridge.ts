@@ -787,6 +787,41 @@ export interface VoiceChoice {
   id: string
   label: string
   current: boolean
+  /** ``builtin`` ships with the engine; ``clone`` was recorded by the operator. */
+  kind?: string
+  /** How long the clip behind a clone is, so the list can say what it is showing. */
+  duration_ms?: number
+  /** A clone whose clip was uploaded to the vendor. Only true when asked for. */
+  cloud?: boolean
+}
+
+/** The rules the recording UI must state *before* somebody speaks into a microphone. */
+export interface CloningState {
+  available: boolean
+  reason: string
+  min_ms: number
+  comfortable_ms: number
+  max_ms: number
+  max_voices: number
+}
+
+/** Where a desktop recording stands. The page polls this while the timer runs. */
+export interface SampleStatus {
+  phase: 'idle' | 'recording' | 'captured' | string
+  ms: number
+  peak: number
+  silent?: boolean
+  error: string
+  ok?: boolean
+  target_ms?: number
+  min_ms?: number
+  max_ms?: number
+  can_save?: boolean
+  /** Whether the clip was handed to the vendor for a cloud clone (only when asked). */
+  uploaded?: boolean
+  cloud_error?: string
+  voice?: VoiceChoice
+  voices?: VoiceChoice[]
 }
 
 export interface VoiceList {
@@ -802,6 +837,8 @@ export interface VoiceList {
   speed_max: number
   volume_min: number
   volume_max: number
+  /** The recording rules, and whether a voice can be made here at all. */
+  cloning?: CloningState
 }
 
 /** What the shell did with a skin change: applied to the other window, or not. */
@@ -1002,6 +1039,14 @@ interface PywebviewApi {
   tts_pick(voice: string): Promise<VoiceList>
   tts_preview(voice: string): Promise<VoicePreview>
   tts_set_style(speed?: number, volume?: number): Promise<VoiceList>
+  /** Recording a sample of *this* machine's operator. Audio never crosses the bridge. */
+  voice_sample_start(): Promise<SampleStatus>
+  voice_sample_status(): Promise<SampleStatus>
+  voice_sample_stop(): Promise<SampleStatus>
+  voice_sample_discard(): Promise<SampleStatus>
+  voice_sample_save(name: string, prompt_text: string, upload: boolean): Promise<SampleStatus>
+  /** Forget a recorded voice: deletes one of the operator's own files. */
+  voice_clone_remove(voice_id: string): Promise<{ error: string; voices: VoiceChoice[] }>
   computer_levels(): Promise<ComputerLevels>
   computer_set_tier(tier: number): Promise<ComputerLevels>
   computer_set_typing(allowed: boolean): Promise<ComputerLevels>
@@ -1204,6 +1249,24 @@ let mockSpeed = 1
 let mockVolume = 1
 /** The picked 音色, remembered like the two sliders. Not ``mockVoice``, which is the fake voice service. */
 let mockTtsVoice = 'zh-CN-XiaoxiaoNeural'
+
+const mockVoiceChoices: VoiceChoice[] = [
+  { id: 'zh-CN-XiaoxiaoNeural', label: '晓晓 · 女声 · 温和（Edge 默认）', current: false, kind: 'builtin' },
+  { id: 'zh-CN-YunxiNeural', label: '云希 · 男声 · 清亮', current: false, kind: 'builtin' },
+  { id: 'zh-CN-XiaoyiNeural', label: '晓伊 · 女声 · 活泼', current: false, kind: 'builtin' },
+]
+
+/**
+ * Preview-only recorder. It counts up and hands back a stand-in clip so the whole flow
+ * (录 -> 停 -> 写句子 -> 存 -> 列表里多一行「我的」) can be walked in a browser. App.vue
+ * prints 「数据为模拟生成」 whenever this mock is what is answering -- and a browser page
+ * has no microphone here anyway, since the real recording happens in Python.
+ */
+const mockSample = { phase: 'idle' as string, startedAt: 0, ms: 0 }
+/** Same three numbers the Python sampler reports, so a browser walk sees the same rules. */
+const MOCK_SAMPLE_TARGET_MS = 15000
+const MOCK_SAMPLE_MIN_MS = 2000
+const MOCK_SAMPLE_MAX_MS = 30000
 
 /**
  * Preview-only alert rows, so the box and its 「知道了」 can be exercised in a browser.
@@ -1596,11 +1659,15 @@ const mock: PywebviewApi = {
       error: '',
       engine: 'edge_tts',
       current: mockTtsVoice,
-      choices: [
-        { id: 'zh-CN-XiaoxiaoNeural', label: '晓晓 · 女声 · 温和（Edge 默认）', current: true },
-        { id: 'zh-CN-YunxiNeural', label: '云希 · 男声 · 清亮', current: false },
-        { id: 'zh-CN-XiaoyiNeural', label: '晓伊 · 女声 · 活泼', current: false },
-      ].map((row) => ({ ...row, current: row.id === mockTtsVoice })),
+      choices: mockVoiceChoices.map((row) => ({ ...row, current: row.id === mockTtsVoice })),
+      cloning: {
+        available: true,
+        reason: '',
+        min_ms: MOCK_SAMPLE_MIN_MS,
+        comfortable_ms: 15000,
+        max_ms: MOCK_SAMPLE_MAX_MS,
+        max_voices: 20,
+      },
       speed: mockSpeed,
       volume: mockVolume,
       speed_min: 0.5,
@@ -1620,6 +1687,75 @@ const mock: PywebviewApi = {
     if (speed !== undefined) mockSpeed = speed
     if (volume !== undefined) mockVolume = volume
     return this.tts_voices()
+  },
+  async voice_sample_start() {
+    mockSample.phase = 'recording'
+    mockSample.startedAt = Date.now()
+    mockSample.ms = 0
+    return this.voice_sample_status()
+  },
+  async voice_sample_status() {
+    if (mockSample.phase === 'recording') {
+      mockSample.ms = Math.min(Date.now() - mockSample.startedAt, MOCK_SAMPLE_MAX_MS)
+    }
+    const rolling = mockSample.phase === 'recording'
+    return {
+      phase: mockSample.phase,
+      ms: mockSample.ms,
+      peak: rolling ? 5200 : mockSample.phase === 'captured' ? 6000 : 0,
+      silent: false,
+      error: '',
+      target_ms: MOCK_SAMPLE_TARGET_MS,
+      min_ms: MOCK_SAMPLE_MIN_MS,
+      max_ms: MOCK_SAMPLE_MAX_MS,
+      can_save: mockSample.phase === 'captured' && mockSample.ms >= MOCK_SAMPLE_MIN_MS,
+    }
+  },
+  async voice_sample_stop() {
+    if (mockSample.phase !== 'recording') {
+      return { ...(await this.voice_sample_status()), ok: false, error: '现在没在录' }
+    }
+    mockSample.phase = 'captured'
+    mockSample.ms = Math.max(mockSample.ms, 8000)
+    return { ...((await this.voice_sample_status()) as SampleStatus), ok: true, error: '' }
+  },
+  async voice_clone_remove(voice_id: string) {
+    const id = String(voice_id || '')
+    const at = mockVoiceChoices.findIndex((row) => row.id === id && row.kind === 'clone')
+    if (at < 0) return { error: '没有这个音色：' + id, voices: mockVoiceChoices.filter((row) => row.kind === 'clone') }
+    mockVoiceChoices.splice(at, 1)
+    return { error: '', voices: mockVoiceChoices.filter((row) => row.kind === 'clone') }
+  },
+  async voice_sample_discard() {
+    mockSample.phase = 'idle'
+    mockSample.ms = 0
+    return this.voice_sample_status()
+  },
+  async voice_sample_save(name: string, prompt_text: string, upload = false) {
+    if (mockSample.phase !== 'captured') {
+      return { ...(await this.voice_sample_status()), ok: false, error: '先录一段再存' }
+    }
+    if (!String(prompt_text || '').trim()) {
+      return { ...(await this.voice_sample_status()), ok: false, error: '要写下你刚才念的那句话' }
+    }
+    const id = 'clone:' + Math.random().toString(16).slice(2, 14)
+    const label = (String(name || '').trim() || '我的声音') + ' · 我录的'
+    mockVoiceChoices.unshift({ id, label, current: false, kind: 'clone', duration_ms: mockSample.ms })
+    mockSample.phase = 'idle'
+    const ms = mockSample.ms
+    mockSample.ms = 0
+    return {
+      ...((await this.voice_sample_status()) as SampleStatus),
+      ok: true,
+      error: '',
+      ms,
+      uploaded: false,
+      // The mock has no vendor, so the honest simulation is the failure it would hit on a
+      // machine without a key: the recording stays local and the reason comes back.
+      cloud_error: upload ? '（模拟）没设 DASHSCOPE_API_KEY，真机上这里回的是厂商那句原因' : '',
+      voice: { id, label, current: false, kind: 'clone' },
+      voices: mockVoiceChoices.filter((row) => row.kind === 'clone'),
+    }
   },
   async chat_sessions() {
     return { error: '', current: 'mock', sessions: [] }
@@ -2096,6 +2232,15 @@ function applyMockSettings(patch: Record<string, unknown>): SettingsSnapshot {
       applied[key] = 'set'
       continue
     }
+    if (key === 'add_model') {
+      const reason = mockAddProviders(next, value)
+      if (reason) {
+        problems[key] = reason
+        continue
+      }
+      applied[key] = value
+      continue
+    }
     if (key === 'base_url' && !/^https?:\/\/.+/.test(String(value))) {
       problems[key] = '地址必须以 http:// 或 https:// 开头'
       continue
@@ -2199,6 +2344,59 @@ function applyMockSettings(patch: Record<string, unknown>): SettingsSnapshot {
   }
   Object.assign(mockSettings, next)
   return { ...mockSettings }
+}
+
+/**
+ * The add-provider queue, applied the way ``SettingsService._add_model`` applies it:
+ * one batch, all or nothing, and a name refused against both the rows on screen and the
+ * rest of the batch. A mock that accepted what the real shell refuses would let a browser
+ * walk "prove" a save that never reaches disk -- which is precisely how the
+ * ModelSpec bug stayed invisible for so long. Returns a refusal, or '' when applied.
+ */
+function mockAddProviders(next: SettingsSnapshot, value: unknown): string {
+  const rows = Array.isArray(value) ? value : [value]
+  if (!rows.length) return '没有要添加的服务商'
+  const known = new Set(next.models.map((row) => row.name))
+  const fresh: ModelRow[] = []
+  for (const item of rows) {
+    const row = (item ?? {}) as Record<string, unknown>
+    const name = String(row.name ?? '').trim()
+    const url = String(row.base_url ?? '').trim()
+    const model = String(row.model ?? '').trim()
+    if (!/^[a-z0-9_-]{1,32}$/.test(name)) return '模型名字只能是小写字母、数字、- 和 _，1-32 位'
+    if (!/^https?:\/\//.test(url)) return `${name}：地址必须以 http:// 或 https:// 开头`
+    if (!model || /\s/.test(model) || model.length > 150) {
+      return `${name}：模型名不能含空格且不超过 150 字符`
+    }
+    if (known.has(name)) return `已经有叫 ${name} 的模型；要改它就在那一行上改`
+    known.add(name)
+    fresh.push({
+      name,
+      base_url: url,
+      model,
+      models: [{ id: model, label: model }],
+      default_model: model,
+      key_env: `${name.toUpperCase().replace(/-/g, '_')}_API_KEY`,
+      key_set: Boolean(String(row.api_key ?? '').trim()),
+      source: '界面添加',
+      edited: false,
+      current: false,
+    })
+  }
+  next.models = [...next.models, ...fresh]
+  next.providers = [...next.providers, ...fresh.map((row) => row.name)]
+  for (const row of fresh) {
+    mockProviders.push({
+      name: row.name,
+      base_url: row.base_url,
+      models: row.models,
+      default_model: row.default_model,
+      key_set: row.key_set,
+      key_variable: row.key_env,
+      current: false,
+    })
+  }
+  return ''
 }
 
 /** Same verdicts as ``jarvis/app/wake_keywords.py``, so a browser preview cannot accept a
@@ -2576,6 +2774,43 @@ export function previewVoice(voice: string): Promise<VoicePreview> {
  */
 export function setVoiceStyle(speed?: number, volume?: number): Promise<VoiceList> {
   return bridge().then((target) => target.tts_set_style(speed, volume))
+}
+
+/**
+ * The five desktop-recording verbs. The clip stays in Python's memory between 录 and 存,
+ * so nothing here is a payload: only the state crosses, plus the two short strings the
+ * operator types when they decide to keep it.
+ */
+export function startVoiceSample(): Promise<SampleStatus> {
+  return bridge().then((target) => target.voice_sample_start())
+}
+
+export function voiceSampleStatus(): Promise<SampleStatus> {
+  return bridge().then((target) => target.voice_sample_status())
+}
+
+export function stopVoiceSample(): Promise<SampleStatus> {
+  return bridge().then((target) => target.voice_sample_stop())
+}
+
+/** Removing a recorded voice deletes the operator's own clip. Nothing here is automatic. */
+export function removeVoiceClone(voiceId: string): Promise<{ error: string; voices: VoiceChoice[] }> {
+  return bridge().then((target) => target.voice_clone_remove(voiceId))
+}
+
+export function discardVoiceSample(): Promise<SampleStatus> {
+  return bridge().then((target) => target.voice_sample_discard())
+}
+
+/** Storing the take. `upload` is the operator's one-time yes to sending their voice to
+ *  the vendor; it defaults to off here as well as in Python, so forgetting to pass it
+ *  can never turn into a disclosure. */
+export function saveVoiceSample(
+  name: string,
+  promptText: string,
+  upload = false
+): Promise<SampleStatus> {
+  return bridge().then((target) => target.voice_sample_save(name, promptText, upload))
 }
 
 export function fetchComputerLevels(): Promise<ComputerLevels> {

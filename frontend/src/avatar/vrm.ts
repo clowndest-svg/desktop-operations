@@ -283,6 +283,9 @@ class VrmCharacter implements Character {
 
   private standHeight = 1.5
 
+  /** 屏幕那一片绕远端那条边转 —— 坐下去的时候它从合上开到打开，所以建的时候就要留住。 */
+  private laptopHinge: THREE.Group | null = null
+
   /** 膝上那台电脑，只在坐着的时候出现。 */
   private readonly laptop: THREE.Group = this.buildLaptop()
 
@@ -420,7 +423,12 @@ class VrmCharacter implements Character {
     }
     // 盘腿是坐在地上，不是坐在空气上：整具身体随姿态一起沉下去。
     this.root.position.y = -this.sitDrop * eased
-    this.laptop.visible = eased > 0.4
+    // 电脑跟着"打开"：合着 → 坐下这半秒里掀起来。原来是一句 visible = eased > 0.4，
+    // 于是它在她坐到一半的时候凭空出现 —— 那是这轮里最像 bug 的一处。
+    this.laptop.visible = eased > 0.02
+    if (this.laptopHinge !== null) {
+      this.laptopHinge.rotation.x = -LAPTOP.screenLean * Math.min(1, eased * 1.25)
+    }
     this.framing = this.blendFraming(eased)
   }
 
@@ -502,6 +510,9 @@ class VrmCharacter implements Character {
     screen.position.set(0, LAPTOP.screenHeight / 2, 0)
     hinge.add(screen)
     laptop.add(hinge)
+    this.laptopHinge = hinge
+    // 合上的那一片：开合交给 applySit 跟着坐下的缓动走。
+    hinge.rotation.x = 0
     laptop.visible = false
     return laptop
   }

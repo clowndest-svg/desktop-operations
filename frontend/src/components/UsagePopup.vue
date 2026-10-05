@@ -103,19 +103,26 @@
             </ul>
           </div>
 
-          <table class="usage__mt">
-            <thead>
-              <tr>
-                <th>模型</th>
-                <th class="usage__num">token</th>
-                <th class="usage__num">占比</th>
-                <th class="usage__num">输入 / 输出</th>
-                <th class="usage__num">次数</th>
-                <th class="usage__num">缓存</th>
-                <th class="usage__num">均延迟</th>
-              </tr>
-            </thead>
-            <tbody>
+          <!--
+            The scroller is the safety net, not the design: seven right-aligned columns of
+            tabular figures need more width than a 680px dialog had, and the last two
+            (缓存 / 均延迟) simply fell off the panel edge. The box is wider now, and on a
+            narrow window or a big DPI scale the table scrolls instead of being cut.
+          -->
+          <div class="usage__table-wrap">
+            <table class="usage__mt">
+              <thead>
+                <tr>
+                  <th>模型</th>
+                  <th class="usage__num">token</th>
+                  <th class="usage__num">占比</th>
+                  <th class="usage__num">输入 / 输出</th>
+                  <th class="usage__num">次数</th>
+                  <th class="usage__num">缓存</th>
+                  <th class="usage__num">均延迟</th>
+                </tr>
+              </thead>
+              <tbody>
               <tr v-for="row in modelRows" :key="row.key" :class="{ 'usage__mt--rest': row.rest }">
                 <td>
                   <i class="usage__chip" :style="{ background: row.color }"></i>
@@ -143,7 +150,8 @@
                 <td class="usage__num hud-num">{{ Math.round(totals.avg_latency_ms) }} ms</td>
               </tr>
             </tbody>
-          </table>
+            </table>
+          </div>
         </div>
         <p v-else-if="!loading" class="usage__loading">还没有按模型分开的记录。</p>
 
@@ -384,7 +392,10 @@ watch(
 
 .usage__box {
   position: relative;
-  width: min(680px, 94vw);
+  /* 680px could not hold the donut column *and* seven columns of figures: the last two
+     fell off the panel. 900px fits both without scrolling at normal scaling; below that
+     the table scrolls inside its own wrapper rather than being cut. */
+  width: min(900px, 94vw);
   max-height: 88vh;
   overflow: auto;
   padding: 16px 20px 20px;
@@ -615,8 +626,17 @@ watch(
   color: var(--hud-cyan);
 }
 
+.usage__table-wrap {
+  /* The scroller has to be the grid item that is allowed to shrink; without min-width:0 a
+     grid track refuses to go below its content and the overflow never happens -- the
+     table just keeps walking out of the dialog. */
+  min-width: 0;
+  overflow-x: auto;
+}
+
 .usage__mt {
   width: 100%;
+  min-width: 620px;
   border-collapse: collapse;
   font-size: 11px;
 }

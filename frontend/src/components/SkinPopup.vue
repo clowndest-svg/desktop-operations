@@ -120,6 +120,10 @@ async function choose(id: string): Promise<void> {
 .sk__box {
   position: relative;
   width: min(560px, 94vw);
+  /* The card grid grows with the number of skins, and this box had neither a height limit
+     nor a scroller: past the viewport edge the last row was simply unreachable. */
+  max-height: 84vh;
+  overflow-y: auto;
   padding: 16px 20px 14px;
   border: 1px solid var(--hud-line);
   border-top: 1px solid var(--hud-rim);

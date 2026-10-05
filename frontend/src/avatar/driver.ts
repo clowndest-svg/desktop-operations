@@ -42,10 +42,11 @@ const MOOD_POSE: Record<Mood, MoodPose> = {
   dormant: { pitch: 0.1, yaw: 0.05, roll: 0.02, brows: -0.18, gaze: -0.35, lids: 0.42, sit: 0 },
   armed: { pitch: -0.02, yaw: 0, roll: 0, brows: 0.02, gaze: 0, lids: 0, sit: 0 },
   listening: { pitch: -0.07, yaw: 0.1, roll: -0.05, brows: 0.22, gaze: 0.1, lids: 0, sit: 0 },
-  // 低头想，不是稍微歪一下。上一条是 pitch 0.04 / lids 0.08：在 250 像素的窗口里
-  // 和不动没有区别，用户因此说"她没反应"。这几个数是按"一眼看得出来她在想"调的。
-  // sit: 1 是同一条判断的延续 —— 用户在等的时候她该做一件"要等"的事，而不是站着发呆。
-  thinking: { pitch: 0.3, yaw: -0.34, roll: 0.1, brows: 0.16, gaze: -0.5, lids: 0.52, sit: 1 },
+  // 坐着想，不是打盹。上一版是 pitch 0.3（低头）+ lids 0.52（半闭眼）+ gaze -0.5（往
+  // 下看）—— 三个都往"睡"的方向走，用户说"她没反应"其实是在说她不像是忙，是像是关机。
+  // 现在：头歪一点、眼睛开着看自己膝盖上那块屏幕、眉头稍微收。真正的"在想"是下面
+  // shapeThinking 那点慢漂移和偶尔一次沉吟，不是把眼睛闭上。
+  thinking: { pitch: 0.15, yaw: -0.16, roll: 0.13, brows: 0.04, gaze: -0.17, lids: 0.12, sit: 1 },
   speaking: { pitch: -0.02, yaw: 0, roll: 0, brows: 0.08, gaze: 0, lids: 0, sit: 0 },
 }
 
@@ -85,6 +86,13 @@ export class FaceDriver {
   private readonly look = { yaw: 0, pitch: 0 }
   private readonly lastPointer = { x: 0, y: 0 }
   private pointerAge = 99
+  /** How far the thinking drift has faded in (0 when she is not thinking), where its
+   *  cycle is, and the one slow chin-dip that is currently running. */
+  private thinkAmount = 0
+  private thinkPhase = 0
+  private thinkNod = 0
+  private nextThinkNod = 4
+  private readonly think = { pitch: 0, roll: 0 }
   private readonly targets = { pitch: 0, yaw: 0, roll: 0, brows: 0, gaze: 0, lids: 0, sit: 0 }
 
   /**
@@ -106,6 +114,7 @@ export class FaceDriver {
     this.detectOnset(loud, delta)
     this.shapeVisemes(levels)
     this.shapeMood(mood, delta, levels.talking)
+    this.shapeThinking(mood, input.elapsed, delta, input.calm)
     this.shapeBlink(input.elapsed, delta)
     this.trackPointer(input.pointer, delta, input.calm)
 
@@ -118,9 +127,13 @@ export class FaceDriver {
       // The pointer offset goes on *outside* the mood targets: those ease over a
       // quarter second and a cursor moves in one frame, and folding one into the
       // other would make her either ignore the mouse or forget her mood.
-      this.pose.pitch = clampRange(this.targets.pitch - this.nod * 0.16 + this.look.pitch, -0.42, 0.4)
+      this.pose.pitch = clampRange(
+        this.targets.pitch - this.nod * 0.16 + this.look.pitch + this.think.pitch,
+        -0.42,
+        0.4,
+      )
       this.pose.yaw = clampRange(this.targets.yaw + this.look.yaw, -0.9, 0.9)
-      this.pose.roll = this.targets.roll + this.nod * 0.04 - this.look.yaw * 0.12
+      this.pose.roll = this.targets.roll + this.nod * 0.04 - this.look.yaw * 0.12 + this.think.roll
     }
     this.pose.brows = clamp01(this.targets.brows + this.browLift)
     // The eyes lead the turn by a third of it. A head that rotates without the eyes
@@ -224,6 +237,36 @@ export class FaceDriver {
     // moving mouth reads as sleeping, which is a hard thing to unsee.
     const speaking = talking ? -0.06 : 0
     this.pose.blink = clamp01(this.blinkAmount() + this.targets.lids + speaking)
+  }
+
+  /**
+   * The one thing that makes a held pose read as *thinking* rather than as paused.
+   *
+   * A figure that stands perfectly still for twenty seconds is a figure with nothing
+   * happening -- which is exactly what the previous preset did once the head had bowed.
+   * So: a slow drift of a degree or two on pitch and roll (two different periods, so it
+   * never visibly loops), and one small chin-dip every four to seven seconds, which is
+   * the "hmm" a person actually makes while reading something.
+   *
+   * It fades in and out rather than switching: a head that stops mid-drift is its own
+   * jerk, and reduced-motion has to reach this too, so the whole thing is gated on
+   * ``calm`` and left at zero when the caller does not want it.
+   */
+  private shapeThinking(mood: Mood, elapsed: number, delta: number, calm: boolean): void {
+    const active = mood === 'thinking' && !calm
+    const rate = 1 - Math.exp(-delta / (active ? 0.6 : 0.3))
+    this.thinkAmount += ((active ? 1 : 0) - this.thinkAmount) * rate
+    if (active) {
+      this.thinkPhase += delta
+      if (elapsed >= this.nextThinkNod) {
+        this.nextThinkNod = elapsed + 3.8 + Math.random() * 3.4
+        this.thinkNod = 1
+      }
+    }
+    this.thinkNod -= this.thinkNod * (1 - Math.exp(-delta / 0.55))
+    this.think.pitch =
+      (Math.sin(this.thinkPhase * 1.15) * 0.021 + this.thinkNod * 0.05) * this.thinkAmount
+    this.think.roll = Math.sin(this.thinkPhase * 0.62 + 1.1) * 0.03 * this.thinkAmount
   }
 
   private shapeBlink(elapsed: number, delta: number): void {
