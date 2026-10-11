@@ -48,7 +48,8 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from dataclasses import replace as _dataclass_replace
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Final
 
 from jarvis.app.collaboration import MODE_TABLE, Collaboration
 from jarvis.app.conversation import (
@@ -192,6 +193,9 @@ class _Turn:
 
     text: str
     tools_used: tuple[str, ...] = ()
+    artifacts: tuple[str, ...] = ()
+    """文件路径：这一轮真落到盘上的东西（画出来的图、生成的文档）。原样带上，页面决定怎么摆。"""
+
     reasoning: str = ""
     reasoning_tokens: int | None = None
     prompt_tokens: int | None = None
@@ -230,6 +234,39 @@ def _never() -> bool:
     return False
 
 
+#: 只有这两个工具的"存在：…"算产出。别的工具（read_file、open_app）的输出里也会出现
+#: 绝对路径，把它们当"这一轮画了一张图"就是凭空多出一张不存在的图。
+ARTIFACT_TOOLS: Final[frozenset[str]] = frozenset({"generate_image", "write_document"})
+_ARTIFACT_MARK: Final = "存在："
+#: 我们自己的两句话里，路径后面紧跟的一定是这些字符之一（图片那句是「（512x512 …」，
+#: 文档那句是「，中文字体 …」/句号）。不用正则：路径里本来就可能有空格。
+_ARTIFACT_STOPS: Final = ("（", "。", "，")
+
+
+def _artifacts_of(name: str, result: str) -> tuple[str, ...]:
+    """从一个工具的回话里挑出**真在盘上**的文件路径。"""
+    if name not in ARTIFACT_TOOLS or _ARTIFACT_MARK not in result:
+        return ()
+    found: list[str] = []
+    for line in result.splitlines():
+        _, mark, rest = line.partition(_ARTIFACT_MARK)
+        if not mark:
+            continue
+        path = rest.strip()
+        for stop in _ARTIFACT_STOPS:
+            path = path.split(stop)[0]
+        path = path.strip().strip('"')
+        if not path:
+            continue
+        try:
+            handle = Path(path)
+            if handle.is_file():
+                found.append(str(handle))
+        except OSError:  # 路径太长、或刚被别的进程删掉 —— 不算产出，也别把这一轮炸掉
+            continue
+    return tuple(found)
+
+
 def _error_kind(exc: BaseException) -> str:
     """The token the page draws its advice from, off the exception's own class.
 
@@ -263,6 +300,11 @@ class ChatReply:
 
     tools_used: tuple[str, ...] = ()
     """Tools the model actually invoked while answering."""
+
+    artifacts: tuple[str, ...] = ()
+    """Files this turn produced. The page shows a picture inline and offers the rest
+    as a path it can copy or open -- which is the difference between "she says she
+    drew it" and a file the operator can actually pick up."""
 
     without_tools: bool = False
     """This answer came back only after the tool table had been dropped.
@@ -363,6 +405,7 @@ class ChatReply:
             "question": self.question,
             "answer": self.answer,
             "error": self.error,
+            "artifacts": list(self.artifacts),
             "reasoning": self.reasoning,
             "record": self.record,
             "model": self.model,
@@ -1035,6 +1078,7 @@ class ChatService:
             question,
             answer,
             tools_used=turn.tools_used,
+            artifacts=turn.artifacts,
             without_tools=lean,
             tool_pack=pack,
             tool_count=len(tools),
@@ -1679,6 +1723,7 @@ class ChatService:
         sees one ``ChatResponse`` per round whether or not anything streamed.
         """
         used: list[str] = []
+        made: list[str] = []
         thoughts: list[str] = []
         spent: list[int | None] = []
         prompts: list[int | None] = []
@@ -1730,6 +1775,7 @@ class ChatService:
             return _Turn(
                 text=response.content,
                 tools_used=tuple(used),
+                artifacts=tuple(made),
                 reasoning="\n\n".join(part for part in thoughts if part),
                 reasoning_tokens=_sum_or_none(spent),
                 prompt_tokens=_sum_or_none(prompts),
@@ -1776,6 +1822,9 @@ class ChatService:
                 used.append(requested.name)
                 self._phase(chat, chat.tool_phase(), on_phase)
                 result_text = self._invoke(requested.name, requested.arguments)
+                for produced in _artifacts_of(requested.name, result_text):
+                    if produced not in made:
+                        made.append(produced)
                 messages.append(ChatMessage.tool_result(requested.id, result_text))
             logger.debug(
                 "tool round %d finished, %d call(s)", round_index + 1, len(response.tool_calls)

@@ -61,6 +61,10 @@ DIST_TO_IMPORTS: dict[str, tuple[str, ...]] = {
     "pyautogui": ("pyautogui",),
     "pypdf": ("pypdf",),
     "python-docx": ("docx",),
+    # r105 起这几个不只是"读得懂"，还要能"写得出来"：文档生成那四种壳。
+    "openpyxl": ("openpyxl",),
+    "python-pptx": ("pptx",),
+    "reportlab": ("reportlab",),
     # The LAN endpoint's self-signed certificate. Lazily imported inside
     # ensure_certificate, so a machine without the extra still starts and only the
     # 「手机接入」 switch refuses.

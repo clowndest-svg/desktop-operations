@@ -280,6 +280,7 @@ class TestPayloadShape:
             "task_id": "",
             "cancelled": False,
             "record": "",
+            "artifacts": [],
             "tools": {"count": 0, "used": [], "pack": "", "degraded": ""},
         }
 
@@ -295,7 +296,8 @@ class TestPayloadShape:
         merged conclusion cannot reconstruct who argued for it.
         ``sources``/``grounded``/token counts still do not: they travel through the state
         bridge, and every key added here is a key the built bundle has to be rebuilt in
-        step with.
+        step with. ``artifacts`` is the one added in r105 -- a picture the turn drew is
+        not something the page can guess from the sentence next to it.
         """
         reply = ChatReply(
             "问",
@@ -324,6 +326,7 @@ class TestPayloadShape:
             "task_id",
             "cancelled",
             "record",
+            "artifacts",
             "tools",
         }
 

@@ -826,6 +826,15 @@ export interface ChatReply {
   task_id?: string
   cancelled?: boolean
   tools?: ToolReport
+  /**
+   * Files this turn put on disk: a drawn PNG, a generated .xlsx / .docx / .pptx / .pdf.
+   *
+   * Absolute paths, never bytes -- the page asks for the one picture it is about to show
+   * (``artifact_read``) and hands the rest to the shell (``copy_image`` / ``open_artifact``).
+   * This is the evidence half of the bubble: 「画好了」 with a path behind it is a claim the
+   * operator can pick up, and one without is just a sentence a model wrote.
+   */
+  artifacts: string[]
 }
 
 /**
@@ -848,6 +857,49 @@ export interface ToolReport {
   degraded: string
 }
 
+/**
+ * What ``artifact_read`` hands back for one picture this turn produced.
+ *
+ * A shrunken ``data:image/...`` URL rather than a file URL: the page is not allowed to
+ * read the disk, and the shell only ever answers for paths inside the directories *it*
+ * wrote. Anything else comes back ``ok: false`` with the reason in ``error`` -- and that
+ * reason is shown on screen, not logged.
+ */
+export interface ArtifactPicture {
+  ok: boolean
+  data_url: string
+  error: string
+}
+
+/**
+ * The answer the three "do something on this machine" doors share.
+ *
+ * ``copy_text`` / ``copy_image`` / ``open_artifact`` all either did it or say why they
+ * did not. There is no third state: a button that neither acts nor explains is the bug
+ * this project has been billed for repeatedly.
+ */
+export interface ActionResult {
+  ok: boolean
+  error: string
+}
+
+/** ``open_artifact`` 的两档：交给系统默认程序，或在资源管理器里把它选中。 */
+export type ArtifactHow = 'open' | 'folder'
+
+/**
+ * Whether this machine has a network, as the shell's probe last saw it.
+ *
+ * ``online === null`` is "还没测过", which is a different claim from "没网" and has to stay
+ * drawable as one. ``seconds_ago`` says how old the reading is, so a probe thread that
+ * stopped moving cannot keep the bar saying 有网 forever. The door only ever reads a cache
+ * -- it never blocks, which is what makes it safe on a 10 秒 interval.
+ */
+export interface NetworkState {
+  online: boolean | null
+  detail: string
+  seconds_ago: number | null
+}
+
 
 export interface ChatTurn {
   role: 'user' | 'assistant'
@@ -866,6 +918,14 @@ export interface ChatTurn {
   record?: string
   /** Absent on a user turn and on anything reloaded from the transcript. */
   tools?: ToolReport
+  /**
+   * Files this turn produced, in the same shape ``ChatReply`` carries.
+   *
+   * Always sent now (``jarvis.ui.state_bridge.ChatTurn.to_dict`` writes the key), so the
+   * panel can draw a picture or a document row for a turn it did not see arrive. A user
+   * turn has an empty list; so does an answer that only wrote a sentence.
+   */
+  artifacts: string[]
 }
 
 /**
@@ -1744,6 +1804,14 @@ interface PywebviewApi {
   audio_ready(ok: boolean, reason: string, role: string): Promise<AudioOutputState>
   audio_output(): Promise<AudioOutputState>
   speech_stop(): Promise<{ stopped: boolean }>
+  // 本轮产出的文件：读图、进剪贴板、交给系统，以及"到底有没有网"。
+  // 形参名照投屏那条禁令一样避开 window/promise/arguments —— 这些名字是 pywebview 生成
+  // new Function 时会被遮蔽掉的内部标识符，占了名字这一扇门在打包版里根本调不动。
+  artifact_read(path: string): Promise<ArtifactPicture>
+  copy_text(text: string): Promise<ActionResult>
+  copy_image(path: string): Promise<ActionResult>
+  open_artifact(path: string, how: string): Promise<ActionResult>
+  network_state(): Promise<NetworkState>
 }
 
 declare global {
@@ -2173,6 +2241,23 @@ const mockImageAnswer = (prompt: string): ImageAnswer => {
 }
 
 
+/** 本轮产出的文件：浏览器预览里没有盘，也没有 Windows 剪贴板，所以这三扇门只能照实说
+ *  「这里做不到」，同时把形状摆全 —— 图片那一行给一张真 PNG，文件那一行给一个路径。
+ *  和 mockImage 一样，这些常量必须声明在 ``mock`` 那个对象字面量**外面**：写进字面量里
+ *  这个文件就不长了（这个坑已经踩过一次）。 */
+const MOCK_ARTIFACT_PIC = 'C:\\Users\\你\\Pictures\\小夜生图\\xiaoye_mock_橘猫.png'
+const MOCK_ARTIFACT_DOC = 'C:\\Users\\你\\Documents\\小夜导出\\xiaoye_mock_季度汇总.xlsx'
+
+/** 有没有网：预览里探测不了任何东西，所以给一个恒真的读数并在句子里写明是模拟。 */
+const mockNetwork: NetworkState = { online: true, detail: '模拟', seconds_ago: 0 }
+
+/** 预览里让「画」和「表」两句各带一件产出，气泡里那两行才有东西可排版。 */
+const mockArtifacts = (text: string): string[] => {
+  if (/画|图/.test(text)) return [MOCK_ARTIFACT_PIC]
+  if (/表|文档|导出/.test(text)) return [MOCK_ARTIFACT_DOC]
+  return []
+}
+
 const mock: PywebviewApi = {
   async snapshot() {
     const jitter = (base: number, spread: number) =>
@@ -2308,17 +2393,23 @@ const mock: PywebviewApi = {
         answer: '',
         error: mockChat.error,
         reasoning: '',
+        artifacts: [],
       }
     }
     const answer = '（浏览器预览模式的样例回答）我是小夜。桌面版里这句话来自真实模型。'
     // The desktop transcript is pushed from Python; the mock has to keep its own,
     // or the panel is empty in preview and nobody can tell that from a bug.
-    mockHistory.push({ role: 'user', text }, { role: 'assistant', text: answer })
+    const made = mockArtifacts(text)
+    mockHistory.push(
+      { role: 'user', text, artifacts: [] },
+      { role: 'assistant', text: answer, artifacts: made },
+    )
     return {
       question: text,
       answer: attachments.length ? `${answer}（收到 ${attachments.length} 个附件）` : answer,
       error: '',
       reasoning: '',
+      artifacts: made,
     }
   },
   async chat_send(text, attachments = [], conversation = '', provider = '', model = '') {
@@ -2327,10 +2418,11 @@ const mock: PywebviewApi = {
     // this can do without pretending a fake can stream.
     const row = mockProviders.find((entry) => entry.name === (provider || mockPicked.provider))
     const keyless = Boolean(row) && needsKey(row!)
+    const made = mockArtifacts(text)
     const answer = attachments.length
       ? `（浏览器预览模式的样例回答）我是小夜。带 ${attachments.length} 个附件，桌面版里这句话来自真实模型。`
       : '（浏览器预览模式的样例回答）我是小夜。桌面版里这句话来自真实模型。'
-    mockHistory.push({ role: 'user', text })
+    mockHistory.push({ role: 'user', text, artifacts: [] })
     mockChat.status = 'running'
     mockChat.phase = '思考中'
     mockChat.error = ''
@@ -2344,7 +2436,12 @@ const mock: PywebviewApi = {
         mockChat.error = `API key environment variable '${row.key_variable}' is not set (provider='${row.name}', variable='${row.key_variable}')`
         mockChat.error_kind = 'auth'
       } else {
-        mockHistory.push({ role: 'assistant', text: answer, model: model || 'mock' })
+        mockHistory.push({
+          role: 'assistant',
+          text: made.length ? `${answer}（预览样例：这一轮带出一件产出）` : answer,
+          model: model || 'mock',
+          artifacts: made,
+        })
         mockChat.status = 'done'
         mockChat.phase = ''
         // 这一对勾了「不带工具」，所以这一轮的答案确实没有手：真版本在必须扔掉工具表才
@@ -2379,9 +2476,9 @@ const mock: PywebviewApi = {
     // One seat's worth of sample text, and no claim that a table ran: the preview has no
     // model behind it, and a mock that fakes three opinions reads as the feature working.
     const answer = `（浏览器预览模式）${MODE_LABELS[mode]} 要真的模型，这里一个也没有。`
-    mockHistory.push({ role: 'user', text })
+    mockHistory.push({ role: 'user', text, artifacts: [] })
     window.setTimeout(() => {
-      mockHistory.push({ role: 'assistant', text: answer, record: '' })
+      mockHistory.push({ role: 'assistant', text: answer, record: '', artifacts: [] })
     }, 400)
     return {
       ok: true,
@@ -2521,6 +2618,48 @@ const mock: PywebviewApi = {
   },
   async speech_stop() {
     return { stopped: false }
+  },
+  async artifact_read(path) {
+    // 预览里没有盘可读，所以只认"看起来是图片"的那一个，并照实说这是样例像素。
+    // 非图片那一句是给界面排版"门答了 ok:false + 一句原因"这个形状的。
+    if (/\.(png|jpe?g|webp)$/i.test(String(path || ''))) {
+      return {
+        ok: true,
+        data_url: `data:image/png;base64,${MOCK_IMAGE_PNG}`,
+        error: '',
+      }
+    }
+    return { ok: false, data_url: '', error: '预览里没有文件可读（桌面版只认软件自己产出的那几个目录）' }
+  },
+  async copy_text(text) {
+    const body = String(text || '')
+    if (!body.trim()) return { ok: false, error: '没有要复制的内容' }
+    try {
+      // 预览走浏览器自己的剪贴板，成了就说成了；做不到就把异常那句原样交出去，
+      // 这一扇门在预览里失败是常态（非安全上下文里 navigator.clipboard 就没有）。
+      await navigator.clipboard.writeText(body)
+      return { ok: true, error: '' }
+    } catch (err) {
+      return {
+        ok: false,
+        error: `浏览器不让页面写剪贴板：${err instanceof Error ? err.message : String(err)}`,
+      }
+    }
+  },
+  async copy_image(path) {
+    return {
+      ok: false,
+      error: `预览放不进图片（${String(path || '')} 也没有真的文件）—— 桌面版走 Windows 剪贴板`,
+    }
+  },
+  async open_artifact(path, how) {
+    return {
+      ok: false,
+      error: `预览打不开文件${how === 'folder' ? '，也没有资源管理器可选中它' : ''}：${String(path || '')}`,
+    }
+  },
+  async network_state() {
+    return { ...mockNetwork }
   },
   async process_kill(items) {
     // The preview refuses the same three ways the real controller does, so the
@@ -4974,6 +5113,45 @@ export function setupImage(
 
 export function fetchMirrorDevices(): Promise<MirrorDevices> {
   return bridge().then((target) => target.mirror_devices())
+}
+
+/**
+ * 把这一轮画出的一张图读成 data URL。
+ *
+ * 页面不许自己碰盘：这一扇门只认软件产出的那几个目录，别的什么都回 `ok: false` 加一句
+ * 原因 —— 而那句原因要画在屏上，不许进 console。调用方自己按路径缓存：一张图问一次。
+ */
+export function artifactRead(path: string): Promise<ArtifactPicture> {
+  return bridge().then((target) => target.artifact_read(path))
+}
+
+/**
+ * 后手那扇门：把一段字交给 Windows 剪贴板。
+ *
+ * 顺序是**先试** `api/clipboard.ts` 那条浏览器自己的路，它报了 `failed` 才走到这里；
+ * 两边都说没成，屏上就得写着没成，而不是让按钮按下去什么都没发生。
+ */
+export function copyTextViaBridge(text: string): Promise<ActionResult> {
+  return bridge().then((target) => target.copy_text(text))
+}
+
+/** 把图片本身放进剪贴板（CF_DIB）。浏览器做不到这件事，所以这是唯一的一扇门。 */
+export function copyImage(path: string): Promise<ActionResult> {
+  return bridge().then((target) => target.copy_image(path))
+}
+
+/** 交给系统默认程序，或在资源管理器里选中它。桌面版没有"下载"这个动作 —— 文件本来就在盘上。 */
+export function openArtifact(path: string, how: ArtifactHow = 'open'): Promise<ActionResult> {
+  return bridge().then((target) => target.open_artifact(path, how))
+}
+
+/**
+ * 有没有网。**只读那一侧的缓存**，所以可以按 10 秒问一次；它不是探测，探测在那条守护线程上。
+ *
+ * `online === null` 是"还没测过"，界面必须能把它和"没网"分开画。
+ */
+export function fetchNetworkState(): Promise<NetworkState> {
+  return bridge().then((target) => target.network_state())
 }
 
 /** Open the scrcpy window. Empty serial means "the one phone that is connected". */

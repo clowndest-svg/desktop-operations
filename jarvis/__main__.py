@@ -23,8 +23,10 @@ from jarvis.app.command_access import CommandAccess
 from jarvis.app.computer_access import ComputerAccess
 from jarvis.app.demo import run_voice_demo
 from jarvis.app.disk_service import DiskService
+from jarvis.app.documents import DocumentService
 from jarvis.app.image_gen import ImageService
 from jarvis.app.model_probe import ModelCaps, ModelProber
+from jarvis.app.net_state import NetworkWatch
 from jarvis.app.pet_library import PetLibrary
 from jarvis.app.pet_service import PetService
 from jarvis.app.phone_screen import PhoneScreenReader
@@ -259,6 +261,15 @@ class _Capabilities:
     images: ImageService | None = None
     """生图那一层。面板、工具、设置三处共用同一个实例 —— 引擎只该有一个去向。"""
 
+    documents: DocumentService | None = None
+    """文档生成（xlsx/docx/pptx/pdf）。工具、面板、对话里那几行"打开/所在文件夹"共用它。"""
+
+    network: NetworkWatch | None = None
+    """有没有网。顶栏那一格读它，探测在那条守护线程上按点做。"""
+
+    paths: AppPaths | None = None
+    """软件自己产出的目录在哪 —— 那几扇门要靠它把"能读的文件"收在圈内。"""
+
 
 def _logging_settings_factory(
     config_service: ConfigService, *, verbose: bool
@@ -481,6 +492,10 @@ def _register_capabilities(
     # 所以传的是"到时候去拿"的回调 —— 没有投屏运行时或没有偏好文件时它是 None，
     # 那条工具就不广告：模型答应得再自然，然后每次都"我看不清"，是最糟的一种假。
     phone_screen = _phone_reader(mirror, lambda: ocr, llm_service, preferences)
+    documents = DocumentService(paths.exports_dir)
+    # 有没有网是探出来的，不是问出来的：这条线程按点探一次，界面那一侧只读缓存。
+    network = NetworkWatch()
+    app.register(network)
     tools = ToolService(
         lambda: config_service.config.tools,
         monitor_factory=_monitor_factory(sampler),
@@ -516,6 +531,8 @@ def _register_capabilities(
         settings=settings,
         voices=voices,
         conversations=transcript,
+        # 文档生成不需要窗口，命令行那一侧也该有：它只是往盘上写一份文件。
+        documents=documents,
         # What the alert centre still has open, read-only through ``system_report``.
         # She can see that C: is under the line; saying 「知道了」 stays a human act.
         alerts=alerts,
@@ -602,6 +619,9 @@ def _register_capabilities(
         transcript=transcript,
         phone_screen=phone_screen,
         images=images,
+        documents=documents,
+        network=network,
+        paths=paths,
     )
 
 
@@ -1106,6 +1126,9 @@ def _run_desktop(args: argparse.Namespace) -> int:
             mirror=screen_mirror,
             phone_screen=capabilities.phone_screen,
             images=image_engine,
+            documents=capabilities.documents,
+            network=capabilities.network,
+            paths=capabilities.paths,
             audio=audio_pusher,
             tools=capabilities.tools,
             voice_picker=voice_picker,

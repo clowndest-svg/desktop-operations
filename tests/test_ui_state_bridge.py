@@ -340,3 +340,35 @@ def test_the_read_aloud_switch_travels_on_the_snapshot() -> None:
 
     assert state.speaks_typed is False
     assert state.to_dict()["speaks_typed"] is False
+
+
+class TestReplayedHistoryKeepsArtifacts:
+    """切走再切回来，那一张画过的图还得在气泡下面。
+
+    对话表里没有"产物"这一列，所以回灌时由外壳把 ``存在：<路径>`` 再认一次交进来；
+    这一格只验"交进来之后别在半路被丢掉"。
+    """
+
+    def test_a_switched_back_tab_still_shows_its_picture(self) -> None:
+        bridge = StateBridge()
+        picture = r"E:\DaiMa\某处\生图\a.png"
+        bridge.replace_history(
+            [
+                {"role": "user", "content": "画一张橘猫"},
+                {
+                    "role": "assistant",
+                    "content": f"画好了，存在：{picture}（512x512）",
+                    "artifacts": [picture],
+                },
+            ]
+        )
+        history = bridge.snapshot().history
+        assert [turn.role for turn in history] == ["user", "assistant"]
+        assert history[1].artifacts == (picture,), "回灌的那一份把产物擦了"
+
+    def test_a_picture_with_no_words_still_takes_a_slot(self) -> None:
+        """只有图、没有配话的一轮也要看得见 —— 以前一句 if not content 就把它擦了。"""
+        bridge = StateBridge()
+        bridge.replace_history([{"role": "assistant", "content": "", "artifacts": [r"E:\a.png"]}])
+        history = bridge.snapshot().history
+        assert len(history) == 1 and history[0].artifacts == (r"E:\a.png",)

@@ -175,6 +175,17 @@ class AppPaths:
         """
         return self.data_dir / "生图"
 
+    @property
+    def exports_dir(self) -> Path:
+        """Documents this program generated (xlsx / docx / pptx / pdf).
+
+        Same argument as ``images_dir``: it is work the assistant made, so it lives
+        where a person can open it, and the tool may be pointed somewhere else when
+        the operator names a directory -- but this is the answer to "where did it go"
+        when nobody said.
+        """
+        return self.data_dir / "文档"
+
     def ensure(self) -> None:
         """Create every directory of the layout (idempotent)."""
         for directory in (
@@ -187,6 +198,7 @@ class AppPaths:
             self.audit_dir,
             self.pets_dir,
             self.images_dir,
+            self.exports_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
 

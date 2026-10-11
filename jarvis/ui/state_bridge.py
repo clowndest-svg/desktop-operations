@@ -125,6 +125,14 @@ class ChatTurn:
     replayed into every later question would be the largest thing in the request.
     """
 
+    artifacts: tuple[str, ...] = ()
+    """Files this turn put on disk (a drawn picture, a generated document).
+
+    Paths, not bytes: the page asks for the one picture it is about to show. An
+    answer that says "画好了" with nothing behind it is a claim, so this is the
+    evidence half of the bubble.
+"""
+
     tools: Mapping[str, object] = field(default_factory=dict)
     """What this answer's request actually carried: count, pack, tools used, why not.
 
@@ -324,6 +332,7 @@ class UiState:
                     "reasoning": turn.reasoning,
                     "model": turn.model,
                     "record": turn.record,
+                    "artifacts": list(turn.artifacts),
                     "tools": dict(turn.tools),
                 }
                 for turn in self.history
@@ -346,6 +355,11 @@ notifying at most this often loses nothing -- the next flush carries the newest 
 partial -- while a per-token notify would spend the desktop's time redrawing instead of
 answering.
 """
+
+
+def _row_list(value: object) -> Sequence[object]:
+    """回灌进来的那一行里，产物可能是一个列表，也可能压根没有。"""
+    return value if isinstance(value, list) else ()
 
 
 class StateBridge:
@@ -416,6 +430,7 @@ class StateBridge:
         model: str = "",
         record: str = "",
         tools: Mapping[str, object] | None = None,
+        artifacts: Sequence[str] = (),
     ) -> None:
         """Append one message that did not come from the microphone.
 
@@ -427,7 +442,7 @@ class StateBridge:
         round table: three models writing into one log need their rows labelled.
         """
         with self._lock:
-            self._add_turn(role, text, reasoning, model, record, tools)
+            self._add_turn(role, text, reasoning, model, record, tools, artifacts)
             snapshot = self._build()
         self._notify(snapshot)
 
@@ -448,9 +463,11 @@ class StateBridge:
                     role=str(row.get("role") or ""),
                     text=str(row.get("content") or ""),
                     model=str(row.get("model") or ""),
+                    artifacts=tuple(str(item) for item in _row_list(row.get("artifacts"))),
                 )
                 for row in rows
-                if row.get("role") in ("user", "assistant") and str(row.get("content") or "")
+                if row.get("role") in ("user", "assistant")
+                and (str(row.get("content") or "") or row.get("artifacts"))
             ][-self._max_history :]
             snapshot = self._build()
         self._notify(snapshot)
@@ -605,13 +622,16 @@ class StateBridge:
         model: str = "",
         record: str = "",
         tools: Mapping[str, object] | None = None,
+        artifacts: Sequence[str] = (),
     ) -> None:
-        if not text:
+        if not text and not artifacts:
+            # 只有图、没有话的回答也要看得见 —— 以前这里一句 if not text 就把它擦了。
             return
         self._history.append(
             ChatTurn(
                 role=role,
-                text=text,
+                text=text or "（这一张没有配话）",
+                artifacts=tuple(artifacts),
                 reasoning=reasoning,
                 model=model,
                 record=record,

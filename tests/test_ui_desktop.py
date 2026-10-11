@@ -8,16 +8,20 @@ page pulls on mount, and the script the pump pushes into the browser.
 from __future__ import annotations
 
 import base64
+import ctypes
 import datetime
 import json
 import os
 import threading
 import time
 from collections.abc import Mapping, Sequence
+from ctypes import wintypes
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from PIL import Image
 
 from jarvis.app.alerts import AlertService
 from jarvis.app.chat_service import ChatReply, ChatService
@@ -26,6 +30,7 @@ from jarvis.app.preferences import WINDOW_RECT, Preferences
 from jarvis.app.system_service import SystemService
 from jarvis.app.voice_picker import VoicePicker
 from jarvis.app.voice_service import VoiceService
+from jarvis.config.paths import AppPaths
 from jarvis.config.schema import ToolsSection, TtsSection
 from jarvis.core.events import PipelineEvent, VoicePhase
 from jarvis.core.exceptions import PlannerError
@@ -160,6 +165,7 @@ def _bridge(
     alerts: Any = None,
     system: SystemService | None = None,
     pets: Any = None,
+    paths: Any = None,
 ) -> HudBridge:
     if system is None:
         system = SystemService(_NoTelemetry(), alerts=alerts)
@@ -189,6 +195,7 @@ def _bridge(
         usage=usage,
         alerts=alerts,
         pets=pets,
+        paths=paths,
     )
     if turns is not None:
         bridge.attach_turns(turns)
@@ -382,6 +389,7 @@ class TestChatSurface:
             "provider": "",
             "conversation": "",
             "task_id": "",
+            "artifacts": [],
             "cancelled": False,
             "record": "",
             "tools": {"count": 0, "used": [], "pack": "", "degraded": ""},
@@ -3687,3 +3695,92 @@ class TestTheEngineReReadsThePreferencesBeforeItDecides:
         bridge.chat_send("今天星期几", [], "", "", "")
 
         assert local_server.tuning().model == wanted
+
+
+class TestTheArtifactDoors:
+    """那五扇门：读图、复制、打开，以及"什么算软件自己产出的"。"""
+
+    def test_a_path_outside_the_output_dirs_is_not_an_artifact(self, tmp_path: Path) -> None:
+        paths = AppPaths.resolve({"JARVIS_HOME": str(tmp_path / "数据")})
+        paths.ensure()
+        bridge = _bridge(tmp_path, paths=paths)
+        elsewhere = tmp_path / "别人的.png"
+        elsewhere.write_bytes(b"\x89PNG")
+        assert bridge.artifact_read(str(elsewhere))["ok"] is False
+        assert bridge.copy_image(str(elsewhere))["ok"] is False
+        assert bridge.open_artifact(str(elsewhere), "open")["ok"] is False
+
+    def test_a_picture_under_the_output_dir_comes_back_shrunk(self, tmp_path: Path) -> None:
+        paths = AppPaths.resolve({"JARVIS_HOME": str(tmp_path / "数据")})
+        paths.ensure()
+        picture = paths.images_dir / "一张.png"
+        Image.new("RGB", (900, 700), (30, 200, 90)).save(picture)
+        bridge = _bridge(tmp_path, paths=paths)
+        answer = bridge.artifact_read(str(picture))
+        assert answer["ok"] is True
+        url = str(answer["data_url"])
+        assert url.startswith("data:image/jpeg;base64,") and len(url) > 200
+
+    def test_a_non_picture_is_refused_by_the_reader_but_not_by_the_opener(
+        self, tmp_path: Path
+    ) -> None:
+        """文档不能当图读，但可以"打开"—— 两件事各有各的门。"""
+        paths = AppPaths.resolve({"JARVIS_HOME": str(tmp_path / "数据")})
+        paths.ensure()
+        doc = paths.exports_dir / "一份.docx"
+        doc.write_bytes(b"PK")
+        bridge = _bridge(tmp_path, paths=paths)
+        assert bridge.artifact_read(str(doc))["ok"] is False
+        assert bridge.copy_image(str(doc))["ok"] is False
+
+    def test_network_state_says_so_when_nothing_is_wired(self, tmp_path: Path) -> None:
+        state = _bridge(tmp_path).network_state()
+        assert state["online"] is None and "没" in str(state["detail"])
+
+    def test_copy_text_refuses_empty_instead_of_clearing_the_clipboard(
+        self, tmp_path: Path
+    ) -> None:
+        answer = _bridge(tmp_path).copy_text("   ")
+        assert answer["ok"] is False and "没有要复制" in str(answer["error"])
+
+    def test_a_real_copy_round_trips_through_the_windows_clipboard(self, tmp_path: Path) -> None:
+        """这一条要真开剪贴板：判据是"读回来是同一串"，不是"调用没抛"。"""
+        from jarvis.ui import clipboard
+
+        bridge = _bridge(tmp_path)
+        text = "小夜 r105 的剪贴板回读 · 123"
+        assert bridge.copy_text(text)["ok"] is True
+        assert clipboard.has_text() is True
+        user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
+        user32.GetClipboardData.restype = wintypes.HANDLE
+        kernel32.GlobalSize.argtypes = [wintypes.HANDLE]
+        kernel32.GlobalSize.restype = ctypes.c_size_t
+        kernel32.GlobalLock.argtypes = [wintypes.HANDLE]
+        kernel32.GlobalLock.restype = ctypes.c_void_p
+        assert user32.OpenClipboard(None)
+        handle = user32.GetClipboardData(13)
+        size = kernel32.GlobalSize(handle)
+        pointer = kernel32.GlobalLock(handle)
+        raw = ctypes.string_at(pointer, size) if pointer else b""
+        kernel32.GlobalUnlock(handle)
+        user32.CloseClipboard()
+        assert raw.decode("utf-16-le").rstrip("\x00") == text
+
+    def test_the_replay_carries_a_picture_back_but_nothing_else(self, tmp_path: Path) -> None:
+        paths = AppPaths.resolve({"JARVIS_HOME": str(tmp_path / "数据")})
+        paths.ensure()
+        bridge = _bridge(tmp_path, paths=paths)
+        picture = paths.images_dir / "a.png"
+        picture.write_bytes(b"\x89PNG")
+        row = bridge._with_artifacts(
+            {"role": "assistant", "content": f"画好了，存在：{picture}（512x512）"}
+        )
+        assert row["artifacts"] == [str(picture)]
+        elsewhere = tmp_path / "别人的.png"
+        elsewhere.write_bytes(b"x")
+        assert "artifacts" not in bridge._with_artifacts(
+            {"role": "assistant", "content": f"存在：{elsewhere}。"}
+        )
+        assert "artifacts" not in bridge._with_artifacts(
+            {"role": "assistant", "content": f"存在：{paths.images_dir / '没了.png'}（512）"}
+        ), "文件都不在了，别把死链摆回屏上"

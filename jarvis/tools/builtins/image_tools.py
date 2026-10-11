@@ -84,13 +84,21 @@ _SPECS: Final[tuple[tuple[ToolSpec, str], ...]] = (
         ToolSpec(
             name=_GENERATE,
             description=(
-                "按一句话生成一张图片，存到本机「生图」目录并回一个路径。用户说"
-                "「画一张…」「生成一张…的图」「给我做个头像/壁纸」时用。size 可留空，"
-                "留空就用软件里记着的那一档。"
+                "按一句话生成一张图片，存到本机「生图」目录并回一个路径。用户说「画一张…」"
+                "「生成一张…的图」「给我做个头像/壁纸」，或者任何让你画点什么的说法，都用这一条。"
+                "**调之前先把用户那句话扩写成英文标签**：引擎那边的文本编码器只认英文，"
+                "中文整句对它约等于没听见（实测「生成一个绿色的哥布林」出来的是一张动漫美女）。"
+                "顺序是 主体 → 主体的关键属性（颜色这类写在名词前面，必要时重复一次）→ 场景 → "
+                "光照 → 风格/媒介；逗号分隔的短语，不要写完整句子，也不要加用户没提的人物或性别。"
+                "用户说得很随便时，由你补成一句具体能画的描述。"
+                "size 可留空，留空用软件记着的那一档。"
             ),
             parameters=object_schema(
                 {
-                    "prompt": string_property("想要画面的完整描述，越具体越好"),
+                    "prompt": string_property(
+                        "扩写后的英文标签串，例如 green goblin, green skin, muscular, "
+                        "pointed ears, standing, dark forest, moonlight, fantasy illustration"
+                    ),
                     "size": string_property("宽x高，例如 512x512 / 768x768 / 1024x1024，可留空"),
                 },
                 required=("prompt",),

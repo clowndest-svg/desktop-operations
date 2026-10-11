@@ -297,6 +297,7 @@ class TestStateBridgeCarriesIt:
                 # only place the page can read who argued what, and it is display-only
                 # -- nothing stores it, so this is the whole of its life.
                 "record": "",
+                "artifacts": [],
                 "tools": {},
             }
         ]

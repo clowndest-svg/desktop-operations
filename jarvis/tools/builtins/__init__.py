@@ -13,6 +13,7 @@ from collections.abc import Callable
 from jarvis.tools.builtins import (
     assistant_tools,
     computer_tools,
+    document_tools,
     file_tools,
     image_tools,
     insight_tools,
@@ -55,6 +56,7 @@ def build_builtin_tools(
     mirror: mirror_tools.MirrorSurface | None = None,
     phone: mirror_tools.PhoneScreenSurface | None = None,
     images: image_tools.ImageEngineSurface | None = None,
+    documents: document_tools.DocumentSurface | None = None,
 ) -> list[tuple[ToolSpec, ToolHandler]]:
     """Assemble every built-in tool.
 
@@ -132,6 +134,7 @@ def build_builtin_tools(
         *selfconfig_tools.build(settings=settings, voices=voices, conversations=conversations),
         *(mirror_tools.build(mirror, phone) if mirror is not None else []),
         *image_tools.build(images),
+        *document_tools.build(documents),
     ]
 
 

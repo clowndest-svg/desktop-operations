@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 
@@ -168,15 +169,26 @@ class TestLoader:
         with pytest.raises(KnowledgeError, match="文件太大"):
             load_document(path, max_file_mb=0)
 
-    def test_pdf_without_the_parser_names_the_extra(self, tmp_path: Path) -> None:
+    def test_pdf_without_the_parser_names_the_extra(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """The failure has to tell the operator what to install, not just that
-        an import failed."""
+        an import failed.
+
+        ``sys.modules[...] = None`` 是让"这个包没装"这件事**由测试决定**：r105 起
+        ``[docs]`` 这一组在开发机上真的装着（要生成文档），以前那两条全靠"我机器上没装"
+        才红得下来 —— 换台机器就悄悄不成立了。
+        """
+        monkeypatch.setitem(sys.modules, "pypdf", None)
         path = tmp_path / "a.pdf"
         path.write_bytes(b"%PDF-1.4")
         with pytest.raises(KnowledgeError, match=r"\[docs\]"):
             load_document(path, max_file_mb=1)
 
-    def test_docx_without_the_parser_names_the_extra(self, tmp_path: Path) -> None:
+    def test_docx_without_the_parser_names_the_extra(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setitem(sys.modules, "docx", None)
         path = tmp_path / "a.docx"
         path.write_bytes(b"PK\x03\x04")
         with pytest.raises(KnowledgeError, match=r"\[docs\]"):

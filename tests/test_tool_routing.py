@@ -67,6 +67,7 @@ def _registered() -> set[str]:
         alerts=stub,
         mirror=stub,
         images=stub,
+        documents=stub,
         # The read-the-phone-screen tool hangs off the same pack, and it is only built
         # when there is a reader behind it. Leaving it out here made this guard report a
         # live route as a stale name; the point of the guard is the *other* direction.
@@ -100,7 +101,6 @@ class TestRouting:
         "text",
         [
             "你好啊",
-            "帮我写一份周报",
             "现在几点了",
             "这套系统的架构设计怎么样",
             "讲个笑话",
@@ -128,6 +128,31 @@ class TestRouting:
 
     def test_mixing_chinese_and_english_in_one_ask(self) -> None:
         assert set(classify_tool_intent("帮我看下 node 的版本")) >= {"runtime"}
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # 这四句是用户实拍里真说过的话。前三句在 r104 之前一条都没命中 image 包，
+            # 于是 generate_image 根本没进请求，她回「当前我无法直接生成图片」——
+            # 而那台机器上 ComfyUI 正在 8188 上服务。
+            "嗯，随便生成有张图片给我",
+            "帮我做一张壁纸",
+            "来张图",
+            "生成一张橘猫的图",
+        ],
+    )
+    def test_the_way_a_person_actually_asks_for_a_picture(self, text: str) -> None:
+        assert "image" in classify_tool_intent(text)
+
+    def test_a_pictorial_ask_with_no_picture_word_still_reaches_the_tool(self) -> None:
+        """「生成一个绿色的哥布林」里没有「图」这个字，任何关键词表都抓不住它。
+
+        所以 generate_image 进了兜底包 —— 和 r89 把 ``remember`` 放进兜底包是同一条理由：
+        省 token 的规矩不该决定"她能不能被告诉一件事"。
+        """
+        assert classify_tool_intent("生成一个绿色的哥布林") == ()
+        offered = select_tool_names((), sorted(_registered()))
+        assert "generate_image" in offered, "兜底包里少了它，用户只能听见「我画不了」"
 
     def test_being_told_to_remember_reaches_the_memory_pack(self) -> None:
         """r89 measured 「记一下：我的部署端口是 8199」 falling to 兜底 with no ``remember``."""
@@ -224,3 +249,13 @@ class TestPacksStayWhole:
         general = set(PACKS[GENERAL]) | set(CORE)
         assert len(general) <= 8, f"兜底包已经 {len(general)} 个工具：{sorted(general)}"
         assert len(general) < len({t for pack in PACKS.values() for t in pack})
+
+
+def test_the_picture_word_may_sit_a_few_chars_behind_the_verb() -> None:
+    """中文没有词边界：「随便生成有张图片给我」里，动词和"图"字隔了两个字。
+
+    单独一条不参数化的测试是给变异验证用的 —— 参数化那一条一个 nodeid 收四例，
+    "点不到恰好一条"的判据就没法用它。
+    """
+    for text in ("嗯，随便生成有张图片给我", "帮我做一张壁纸", "来张图", "给我整个头像"):
+        assert "image" in classify_tool_intent(text), text

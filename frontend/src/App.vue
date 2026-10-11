@@ -147,6 +147,19 @@
     <SkinPopup :open="skinOpen" @close="skinOpen = false" />
 
     <UsagePopup :open="usageOpen" @close="usageOpen = false" />
+    <!--
+      断线那张卡挂在**所有**弹窗的最后。它和这里的每一张不一样：没人点它，是界面自己发现的，
+      所以它必须压得住操作员正开着的那一张 —— 这一窗口的桌面弹窗全是 z-index: 40，同层靠
+      文档顺序决胜，挂在对话区里面它就会沉在设置面板底下（音色 / 告警那两条同一条规矩）。
+      只在"有网 → 没网"那一跳上出现，离线期间每一轮都不许再冒，所以 :open 是 store 里
+      那个一次性开关，不是 network.online === false。
+    -->
+    <OfflineNotice
+      :open="store.offlineNotice"
+      :detail="store.network.detail"
+      :seconds-ago="store.network.seconds_ago"
+      @close="store.dismissOffline()"
+    />
   </div>
 </template>
 
@@ -176,6 +189,7 @@ import ComputerAccessPopup from '@/components/ComputerAccessPopup.vue'
 import MobileAccessPopup from '@/components/MobileAccessPopup.vue'
 import MirrorPopup from '@/components/MirrorPopup.vue'
 import ImagePopup from '@/components/ImagePopup.vue'
+import OfflineNotice from '@/components/OfflineNotice.vue'
 import ProcessPanel from '@/components/ProcessPanel.vue'
 import SettingsPanel from '@/components/SettingsPanel.vue'
 import TopBar from '@/components/TopBar.vue'

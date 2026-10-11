@@ -16,6 +16,7 @@ from jarvis.tools.builtins import (
     assistant_tools,
     build_builtin_tools,
     computer_tools,
+    document_tools,
     image_tools,
     insight_tools,
     mirror_tools,
@@ -76,6 +77,7 @@ class ToolService:
         mirror: mirror_tools.MirrorSurface | None = None,
         phone: mirror_tools.PhoneScreenSurface | None = None,
         images: image_tools.ImageEngineSurface | None = None,
+        documents: document_tools.DocumentSurface | None = None,
         registry: ToolRegistry | None = None,
     ) -> None:
         """Create the service.
@@ -128,6 +130,7 @@ class ToolService:
         self._mirror = mirror
         self._phone = phone
         self._images = images
+        self._documents = documents
         self._registry = registry or ToolRegistry(settings_provider)
         self._started = False
 
@@ -171,6 +174,7 @@ class ToolService:
             # registry has never heard of.
             phone=self._phone,
             images=self._images,
+            documents=self._documents,
             web_opener=self._web_opener,
         ):
             self._registry.register(spec, handler)

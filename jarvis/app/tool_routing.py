@@ -50,6 +50,7 @@ PACKS: Final[dict[str, tuple[str, ...]]] = {
     ),
     "mirror": ("mirror_devices", "mirror_start", "mirror_stop", "phone_screen_read"),
     "image": ("generate_image", "image_status"),
+    "documents": ("write_document", "document_kinds"),
     "process": ("list_processes", "propose_kill_process"),
     "settings": ("settings_read", "settings_apply", "voice_pick"),
     "reminders": ("add_reminder", "list_reminders", "cancel_reminder"),
@@ -64,7 +65,12 @@ PACKS: Final[dict[str, tuple[str, ...]]] = {
     # "remember this" decided whether she could be told anything. Every other pack is
     # about saving tokens; this one is about not being deaf to the single most
     # assistant-shaped sentence a person says.
-    GENERAL: ("memory_search", "remember", "knowledge_search", "chat_search"),
+    #
+    # ``generate_image`` joined for the same reason (r105): 「生成一个绿色的哥布林」
+    # names no picture-word at all, so no regex can catch it, and the model was handed
+    # a tool table with no way to draw -- 「当前我无法直接生成图片」 on a machine where
+    # ComfyUI was running two metres away.
+    GENERAL: ("memory_search", "remember", "knowledge_search", "chat_search", "generate_image"),
 }
 """Intent -> the tools that can answer it.
 
@@ -133,7 +139,19 @@ _PATTERNS: Final[dict[str, re.Pattern[str]]] = {
     "image": re.compile(
         r"画一张|画张|画个|画幅|画一幅|生图|生成图片|生成一张|生成个|出张图|出图|"
         r"做个头像|做张头像|配张图|做壁纸|弄壁纸|换壁纸|文生图|stable diffusion|comfyui|"
-        r"帮我画|给我画",
+        r"帮我画|给我画|"
+        # r105：用户实拍里那两句一条都没命中 ——「嗯，随便生成有张图片给我」和
+        # 「帮我做一张壁纸」。少了这一条，generate_image 根本没进请求，她只能回
+        # 「当前我无法直接生成图片」。中文没有词边界，所以按"动词 + 最多八个字 + 图画类名词"收。
+        r"(生成|做|来|整|要|给我|帮我).{0,8}(图|图片|照片|壁纸|头像|插画|海报|logo)",
+        re.IGNORECASE,
+    ),
+    # r105：「帮我做一份周报」「导出成 Excel」这类话以前一条都不命中，
+    # 于是她手里根本没有 write_document —— 只能拿 write_file 写一个 .md 交差。
+    "documents": re.compile(
+        r"excel|xlsx|csv 表|word|docx|文档|pptx?|幻灯片|演示|汇报|pdf|周报|日报|月报|"
+        r"台账|明细表|清单表|说明书|方案书|建议书|导出成|导出为|做成.{0,4}(表|文档|报告)|"
+        r"生成.{0,6}(文档|报告|表格|幻灯片)",
         re.IGNORECASE,
     ),
     "process": re.compile(

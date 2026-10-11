@@ -235,6 +235,53 @@
             </div>
             <span class="chat__text">{{ line.text }}</span>
             <!--
+              这一轮产出的文件：图就地画出来，其余给一行名字加三颗按钮。
+
+              桌面版没有「下载」这个动作 —— 文件本来就在盘上，所以人要的是"打开它"和
+              "让我看见它在哪儿"，而不是一个假的进度条。门答 `ok: false` 时那句原因落在
+              这一行的按钮下面，不许只进 console：按了没反应和"没权限/文件不在"在屏上
+              必须是两件事。
+            -->
+            <div v-if="line.role === 'assistant' && line.artifacts.length" class="chat__arts">
+              <div v-for="(art, slot) in line.artifacts" :key="`art-${index}-${slot}`" class="chat__art">
+                <img
+                  v-if="isPicture(art) && pictureOf(art)"
+                  class="chat__art-pic"
+                  :src="pictureOf(art)"
+                  :alt="baseName(art)"
+                />
+                <p v-else-if="isPicture(art)" class="chat__art-wait">{{ waitWords(art) }}</p>
+                <div v-else class="chat__art-file">
+                  <span class="chat__art-name">{{ baseName(art) }}</span>
+                  <span class="chat__art-ext">{{ suffixOf(art) }}</span>
+                </div>
+                <span class="chat__art-row">
+                  <template v-if="isPicture(art)">
+                    <button class="hud-btn chat__art-btn" type="button" @click="copyPicture(art)">复制图片</button>
+                    <button class="hud-btn chat__art-btn" type="button" @click="openArt(art, 'open')">打开</button>
+                  </template>
+                  <template v-else>
+                    <button class="hud-btn chat__art-btn" type="button" @click="copyPath(art)">复制路径</button>
+                    <button class="hud-btn chat__art-btn" type="button" @click="openArt(art, 'open')">打开</button>
+                    <button class="hud-btn chat__art-btn" type="button" @click="openArt(art, 'folder')">所在文件夹</button>
+                  </template>
+                </span>
+                <p v-if="artWhy(art)" class="chat__art-why">{{ artWhy(art) }}</p>
+              </div>
+            </div>
+            <!--
+              气泡这段话本身也要能抄走。先试浏览器那条路（`api/clipboard.ts` 会照实回报
+              copied / empty / failed 三种结果），它说没成才走 Windows 剪贴板那扇门 ——
+              两扇都说没成，屏上就写着没成，按钮不许假装成功。
+              只有图、没有配话的那一轮，这一颗给的是「没有内容」，那也是一种说法。
+            -->
+            <div v-if="line.role === 'assistant'" class="chat__copy">
+              <button class="hud-btn chat__art-btn" type="button" @click="copyBubble(index, line.text)">
+                {{ copyMark(index) }}
+              </button>
+              <span v-if="copyWhy(index)" class="chat__art-why">{{ copyWhy(index) }}</span>
+            </div>
+            <!--
               Collapsed by default and only drawn when there is something in it: the
               chain is there to explain a surprising answer, not to double the height of
               every bubble. Opening it is a read, so nothing here is spoken aloud.
@@ -455,23 +502,42 @@
   </section>
 </template>
 
+<script lang="ts">
+/**
+ * 本轮画出来的那一张图，按路径缓存 —— 声明在**模块级**，不是 setup 里的一个 ref。
+ *
+ * 这一屏每 1.5 秒就被快照重画一次，而 `artifact_read` 是真去读盘、真去缩图的一扇门。
+ * 在渲染函数里直接问它，就是每 1.5 秒把每一张图重读一遍 —— 那正是这个窗口为"轮询把活
+ * 干了两遍"付过账的形状。所以：一条路径问一次（``pictureAsked``），答案留到下次挂载还在
+ * （``pictureCache``），失败的也留着 —— 它要在屏上站着，不许退回空白。
+ */
+const pictureCache = new Map<string, string>()
+const pictureAsked = new Set<string>()
+</script>
+
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
+  artifactRead,
   chatCancel,
   chatSend,
   chatCollaborate,
+  copyImage,
+  copyTextViaBridge,
   fetchModels,
   fetchSessionMessages,
   fetchSessions,
   formatBytes,
   newConversation,
   newSession,
+  openArtifact,
   openConversation,
   pickConversationModel,
   pickModel,
   saveTuning,
   switchSession,
+  type ActionResult,
+  type ArtifactHow,
   type Attachment,
   type ConversationCard,
   type ModelSpec,
@@ -480,6 +546,7 @@ import {
   type SessionInfo,
   type ToolReport,
 } from '@/api/bridge'
+import { copyText, type CopyOutcome } from '@/api/clipboard'
 import { readAsDataUrl, shrinkToBudget } from '@/api/thumbnail'
 import { stamp } from '@/api/time'
 import {
@@ -490,6 +557,8 @@ import {
   type ModelCap,
   type SeatChoice,
 } from '@/api/bridge'
+import { useVoiceStore } from '@/stores/voice'
+import SessionsPopup from '@/components/SessionsPopup.vue'
 
 /** 下拉框里的顺序，和后端 `COLLABORATION_MODES` 是同一批值。 */
 const MODE_ORDER: CollaborationMode[] = ['single', 'table', 'boss', 'vote']
@@ -497,8 +566,6 @@ const MODE_ORDER: CollaborationMode[] = ['single', 'table', 'boss', 'vote']
 /** 一桌几家、最多几轮。后端 jarvis/app/round_table.py 里各有一份，测试钉住不许漂。 */
 const MAX_SEATS = 4
 const MAX_ROUNDS = 3
-import { useVoiceStore } from '@/stores/voice'
-import SessionsPopup from '@/components/SessionsPopup.vue'
 
 // The dialog itself lives in App.vue: this panel only asks for it.
 const emit = defineEmits<{ (e: 'usage'): void; (e: 'voice'): void }>()
@@ -557,6 +624,15 @@ interface Line {
    * under an old answer would be inventing that.
    */
   tools?: ToolReport
+  /**
+   * Files this turn put on disk, in the shape the shell sends them.
+   *
+   * Live turns carry it straight from the snapshot. A reloaded row gets whatever the
+   * memory copy of the same turn had (see ``loadCurrent``) rather than nothing, because
+   * pressing 放大 walks this path and wiping the row is the 「放大把思考过程擦掉」 bug in
+   * a new costume: 「画好了」 with the picture gone is a claim with nothing behind it.
+   */
+  artifacts: string[]
 }
 
 const seeded = ref<Line[]>([])
@@ -878,6 +954,9 @@ async function loadCurrent(): Promise<void> {
         model: before?.model ?? '',
         tools: before?.tools,
         attachments: turn.attachments ?? [],
+        // 产出落不落盘是服务端的事，这一格只负责"重新读一遍不许把屏上那张擦掉"：
+        // 文字对得上就是同一轮，把内存里那份带过去（和 reasoning 同一条判据）。
+        artifacts: before?.artifacts ?? [],
       }
     })
     consumed.value = voice.history.length
@@ -996,14 +1075,251 @@ const lines = computed<Line[]>(() =>
       model: turn.model ?? '',
       tools: turn.tools,
       attachments: turn.text === overlay.value?.text ? overlay.value.attachments : [],
+      artifacts: turn.artifacts ?? [],
     })),
-  ].filter((line) => line.text.trim() !== ''),
+    // 只有图、没有配话的那一轮也要看得见：服务端现在容许它存在（`_add_turn` 里那句
+    // `if not text` 会把它整轮擦掉，改成了「有产出就留」），页面这一头的过滤器不能
+    // 接着当第二道闸 —— 少这一条，画完一句话都没说的那张图就在屏上凭空消失。
+  ].filter((line) => line.text.trim() !== '' || line.artifacts.length > 0),
 )
 const error = computed(() => localError.value || voice.error)
 const notice = computed(() => voice.notice)
 /** A reply to the last click wins over the ambient status line, then fades. */
 const shownNotice = computed(() => switchNotice.value || notice.value)
 const listening = computed(() => voice.turn === 'listening')
+
+/**
+ * 这一轮产出的文件：一张图问一次，每一颗按钮的结果都落在屏上。
+ *
+ * 三份状态各有各的去处 —— 图的数据在 ``pictureCache``（模块级，见文件顶上的 `<script>`）
+ * 加一份 reactive 的镜像给模板用；读图失败的话**不消失**，因为「这张没画出来」和「这一轮
+ * 还在读」在屏上必须是两件事；按钮那一句结果 2.6 秒后退回按钮本名，不许常驻。
+ */
+const pictures = ref<Record<string, string>>({})
+const pictureFails = ref<Record<string, string>>({})
+const flashes = ref<Record<string, string>>({})
+const bubbleMarks = ref<Record<number, CopyOutcome>>({})
+const flashTimers: Record<string, number> = {}
+
+/** 和图片那一档扩展名 —— 和 `jarvis.ui.desktop` 的 `_ARTIFACT_IMAGE_SUFFIXES` 是同一批值。 */
+const PICTURE_SUFFIXES = ['.png', '.jpg', '.jpeg', '.webp']
+
+function suffixOf(path: string): string {
+  const tail = String(path || '').split(/[\\/]/).pop() ?? ''
+  const dot = tail.lastIndexOf('.')
+  return dot > 0 ? tail.slice(dot).toLowerCase() : ''
+}
+
+function isPicture(path: string): boolean {
+  return PICTURE_SUFFIXES.includes(suffixOf(path))
+}
+
+/** 给人看的是文件名，不是整条路径；路径那一格有专门的「复制路径」。 */
+function baseName(path: string): string {
+  return String(path || '').split(/[\\/]/).pop() ?? String(path || '')
+}
+
+function pictureOf(path: string): string {
+  return pictures.value[path] ?? ''
+}
+
+/** 还在读 / 读不出来 —— 两个都得说得出名字，不能都画成"这里什么都没有"。 */
+function waitWords(path: string): string {
+  return pictureFails.value[path] ?? '这一张还在读…'
+}
+
+/**
+ * 只在"这一屏第一次见到这条路径"时敲一次门。
+ *
+ * 触发器是路径列表拼出来的一个字符串，不是路径数组本身：`lines` 每 1.5 秒就是一次新数组，
+ * watch 那个数组等于每 1.5 秒重跑一遍 —— 读盘的那扇门就是这么被敲成轮询的。
+ */
+const picturePaths = computed<string[]>(() => {
+  const found = new Set<string>()
+  for (const line of lines.value) {
+    if (line.role !== 'assistant') continue
+    for (const path of line.artifacts) if (isPicture(path)) found.add(path)
+  }
+  return [...found]
+})
+const pictureKey = computed(() => picturePaths.value.join('\n'))
+
+function askPicture(path: string): void {
+  if (pictureAsked.has(path)) return
+  pictureAsked.add(path)
+  const cached = pictureCache.get(path)
+  if (cached) {
+    pictures.value = { ...pictures.value, [path]: cached }
+    return
+  }
+  artifactRead(path)
+    .then((answer) => {
+      if (answer.ok && answer.data_url) {
+        pictureCache.set(path, answer.data_url)
+        pictures.value = { ...pictures.value, [path]: answer.data_url }
+        return
+      }
+      pictureFails.value = { ...pictureFails.value, [path]: answer.error || '这一张图没读出来' }
+    })
+    .catch((err: unknown) => {
+      pictureFails.value = {
+        ...pictureFails.value,
+        [path]: err instanceof Error ? err.message : String(err),
+      }
+    })
+}
+
+watch(pictureKey, () => { for (const path of picturePaths.value) askPicture(path) }, { immediate: true })
+
+/** 一句结果挂多久：按钮要给人看清，但不许变成屏上一道擦不掉的疤。 */
+const FLASH_MS = 2600
+
+const ART_LABELS: Record<string, string> = {
+  'copy-image': '复制图片',
+  'copy-path': '复制路径',
+  open: '打开',
+  folder: '所在文件夹',
+}
+
+const ART_OK: Record<string, string> = {
+  'copy-image': '图已经在剪贴板里了',
+  'copy-path': '已复制',
+  open: '交给了系统',
+  folder: '打开了它所在的位置',
+}
+
+/** 一颗按钮的临时结果，2.6 秒后自己退回去。读图失败不是这一类 —— 那一格不许消失。 */
+function flash(key: string, text: string): void {
+  flashes.value = { ...flashes.value, [key]: text }
+  window.clearTimeout(flashTimers[key])
+  flashTimers[key] = window.setTimeout(() => {
+    const next = { ...flashes.value }
+    delete next[key]
+    flashes.value = next
+  }, FLASH_MS)
+}
+
+/** 这一件东西上最近一句要说的话 —— 一个槽，几颗按钮共用，谁最后响谁说。 */
+function artWhy(path: string): string {
+  for (const action of ['copy-image', 'copy-path', 'open', 'folder']) {
+    const text = flashes.value[`${action}|${path}`]
+    if (text) return `${ART_LABELS[action]}：${text}`
+  }
+  return ''
+}
+
+/**
+ * 一扇门一次点击：成了报成，没成把服务端那句话原样贴出来。
+ *
+ * 这句不许吞：`ok: false` 带的是一个能照着修的原因（「只能复制软件自己产出的文件」/
+ * 「这个路径不是软件画出来的图片」），写进 console 就等于没有 —— 用户不会开控制台，
+ * 更不会在两个人都看着的屏幕上找错误。
+ */
+async function runDoor(action: string, path: string, call: () => Promise<ActionResult>): Promise<void> {
+  try {
+    const answer = await call()
+    flash(`${action}|${path}`, answer.ok ? (ART_OK[action] ?? '成了') : answer.error || '这一扇没答应')
+  } catch (err) {
+    flash(`${action}|${path}`, err instanceof Error ? err.message : String(err))
+  }
+}
+
+function copyPicture(path: string): Promise<void> {
+  return runDoor('copy-image', path, () => copyImage(path))
+}
+
+function openArt(path: string, how: ArtifactHow): Promise<void> {
+  return runDoor(how === 'folder' ? 'folder' : 'open', path, () => openArtifact(path, how))
+}
+
+/** 抄的是那串路径本身，所以先走浏览器那两行代码，它说没成才敲剪贴板那扇门。 */
+function copyPath(path: string): Promise<void> {
+  return copyViaBothWays('copy-path', path)
+}
+
+/**
+ * 先 `navigator.clipboard`，报 `failed` 才走 `copy_text` 那扇门。
+ *
+ * 顺序是这个项目定下来的：浏览器那条在打包版里常常就是没权限，而 Windows 剪贴板那一条
+ * 永远可用；反过来先敲门，就等于每次复制都过一次进程间调用。两种都没成才写「没复制上」，
+ * 并且把门那句原因挂在旁边。
+ */
+async function copyViaBothWays(action: string, value: string): Promise<void> {
+  const outcome = await copyText(value)
+  if (outcome === 'copied') {
+    flash(`${action}|${value}`, ART_OK[action] ?? '已复制')
+    return
+  }
+  if (outcome === 'empty') {
+    flash(`${action}|${value}`, '没有内容可复制')
+    return
+  }
+  try {
+    const answer = await copyTextViaBridge(value)
+    flash(`${action}|${value}`, answer.ok ? (ART_OK[action] ?? '已复制') : answer.error || '没复制上')
+  } catch (err) {
+    flash(`${action}|${value}`, err instanceof Error ? err.message : String(err))
+  }
+}
+
+const COPY_MARKS: Record<CopyOutcome, string> = {
+  copied: '已复制',
+  empty: '没有内容',
+  failed: '没复制上',
+}
+
+/** 没按过时这一格就是按钮本名 —— 给它一个默认的"已复制"是假动作的教科书写法。 */
+function copyMark(index: number): string {
+  const outcome = bubbleMarks.value[index]
+  return outcome ? COPY_MARKS[outcome] : '复制'
+}
+
+/** 那句原因的槽和按钮同名：`copy|<行号>`，由 `copyBubble` 写。 */
+function copyWhy(index: number): string {
+  return flashes.value[`copy|${index}`] ?? ''
+}
+
+/** 按钮本名过一会儿自己回来；行号会跟着新的一轮往下挪，所以旧的自己退场。 */
+const markTimers: Record<number, number> = {}
+
+function setMark(index: number, outcome: CopyOutcome): void {
+  bubbleMarks.value = { ...bubbleMarks.value, [index]: outcome }
+  window.clearTimeout(markTimers[index])
+  markTimers[index] = window.setTimeout(() => {
+    const next = { ...bubbleMarks.value }
+    delete next[index]
+    bubbleMarks.value = next
+    delete markTimers[index]
+  }, FLASH_MS)
+}
+
+/** 气泡这段话：结果写在按钮本身上，失败的原因挂在它右边。 */
+async function copyBubble(index: number, value: string): Promise<void> {
+  const outcome = await copyText(value)
+  if (outcome === 'copied') {
+    setMark(index, 'copied')
+    return
+  }
+  if (outcome === 'empty') {
+    setMark(index, 'empty')
+    flash(`copy|${index}`, '这一段没有话，只有产出')
+    return
+  }
+  // 浏览器那条路报的是 failed：这一轮还没有输，敲 Windows 剪贴板那一扇门。
+  try {
+    const answer = await copyTextViaBridge(value)
+    setMark(index, answer.ok ? 'copied' : 'failed')
+    if (!answer.ok) flash(`copy|${index}`, answer.error || '剪贴板那扇门也没答应')
+  } catch (err) {
+    setMark(index, 'failed')
+    flash(`copy|${index}`, err instanceof Error ? err.message : String(err))
+  }
+}
+
+onBeforeUnmount(() => {
+  for (const timer of Object.values(flashTimers)) window.clearTimeout(timer)
+  for (const timer of Object.values(markTimers)) window.clearTimeout(timer)
+})
 
 /**
  * The tabs, and the one being read.
@@ -1925,6 +2241,93 @@ async function clear(): Promise<void> {
   font-size: 0.86em;
   color: var(--hud-dim);
   opacity: 0.85;
+}
+
+/*
+ * 这一轮的产出。图片自己占一块，文件名那一行走同一套排版，两行都跟着一条按钮排。
+ *
+ * 颜色一律取自皮肤的那几枚变量：这一窗口的皮肤系统只动色相 token，写死一套色就会在
+ * 换成琥珀/玫瑰的那一套皮肤上留下一个不属于任何皮肤的黑箱子。
+ */
+.chat__arts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.chat__art {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.chat__art-pic {
+  /* 和生图面板同一把尺子：一张图不该把对话那一列顶成一屏的宽度。 */
+  max-width: 320px;
+  width: 100%;
+  border: 1px solid var(--hud-line);
+  border-radius: 10px;
+}
+
+.chat__art-wait {
+  margin: 0;
+  padding: 6px 10px;
+  border: 1px dashed var(--hud-line);
+  border-radius: 10px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--hud-dim);
+  word-break: break-word;
+}
+
+.chat__art-file {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.chat__art-name {
+  font-size: 12px;
+  color: var(--hud-text);
+  word-break: break-all;
+}
+
+.chat__art-ext {
+  font-family: var(--hud-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--hud-dim);
+}
+
+.chat__art-row {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 小一号的幽灵按钮：和投屏 / 生图那两张弹窗里的一样，只是这一格挤在气泡里。 */
+.chat__art-btn {
+  padding: 2px 9px;
+  font-size: 10px;
+}
+
+.chat__art-why {
+  margin: 0;
+  font-size: 10px;
+  line-height: 1.6;
+  color: var(--hud-amber);
+  word-break: break-word;
+}
+
+.chat__copy {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
 }
 
 /* Three dots, staggered. Deliberately CSS-only: a JS-driven spinner would add one

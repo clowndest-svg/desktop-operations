@@ -534,6 +534,10 @@ class ImageService:
             return self._fail(f"{probe['url']} 答了话，但没报出任何一个权重文件名。")
         seed = random.randrange(1, 2**62)
         prefix = f"xiaoye_{time.strftime('%Y%m%d-%H%M%S')}"
+        # 负面词留空是**量出来的**，不是没做：r105 试过 SD1.5 那套惯例
+        # （masterpiece/best quality 前置 + worst quality/low quality 负面），
+        # 同一台引擎同一权重同一尺寸下"绿色占比"从 0.099 掉到 0.007，前置更惨（0.0003）。
+        # 颜色都保不住，谈不上"质量"。要再动这两个参数，先按 N>=4 个种子重测。
         graph = build_workflow(checkpoint, prompt, "", width, height, steps, seed, prefix)
         try:
             pid = self._submit(probe["url"], graph)
@@ -839,7 +843,7 @@ class ImageService:
             "steps": steps,
             "seed": seed,
             "seconds": seconds,
-            "preview": _preview_data_url(blob),
+            "preview": preview_data_url(blob),
             "error": "",
         }
 
@@ -1115,7 +1119,7 @@ def as_opener(func: Callable[..., Any]) -> Opener:
     return call
 
 
-def _preview_data_url(blob: bytes) -> str:
+def preview_data_url(blob: bytes) -> str:
     """把图缩成一条 data URL 给界面。缩不了就回空串 —— 预览是锦上添花，不是功能。"""
     try:
         from PIL import Image
@@ -1196,4 +1200,5 @@ __all__ = [
     "build_workflow",
     "parse_cloud_answer",
     "parse_size",
+    "preview_data_url",
 ]

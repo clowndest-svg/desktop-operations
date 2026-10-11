@@ -102,8 +102,11 @@ automation = [
 # need a real parser, so they are an extra rather than a reason to make every
 # install carry one.
 docs = [
-    "pypdf>=4.2.0",       # PDF text extraction
-    "python-docx>=1.1.0",  # DOCX text extraction
+    "pypdf>=4.2.0",        # PDF text extraction
+    "python-docx>=1.1.0",  # DOCX text extraction + 生成
+    "openpyxl>=3.1.0",     # xlsx 读写（写：每节一张表，数字写成数字）
+    "python-pptx>=1.0.0",  # pptx 生成（封面 + 每节一页）
+    "reportlab>=4.0.0",    # pdf 生成（中文靠系统字体，缺则退 CID）
 ]
 # 手机版 M1：电脑端局域网服务。唯一的新依赖是 TLS 自签证书——stdlib 的 ``ssl`` 能
 # *用* 证书却不能 *造* 证书，而「只在内网跑、没有 CA 会给一台 192.168.x.x 签发」是
@@ -225,6 +228,14 @@ module = [
     "mss.*",
     "PIL",
     "PIL.*",
+    "openpyxl",
+    "openpyxl.*",
+    "docx",
+    "pptx",
+    "pptx.*",
+    "reportlab",
+    "reportlab.*",
+    "pypdf",
     "playwright",
     "playwright.*",
     "pyautogui",

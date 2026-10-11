@@ -1,8 +1,26 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import { fetchSnapshot, onBackground, type AlertRow, type Metrics } from '@/api/bridge'
+import {
+  fetchNetworkState,
+  fetchSnapshot,
+  onBackground,
+  type AlertRow,
+  type Metrics,
+  type NetworkState,
+} from '@/api/bridge'
 
 const HISTORY_LIMIT = 60
+
+/**
+ * How often the network chip is re-read.
+ *
+ * Its own interval, deliberately not the 1500 ms snapshot one: that timer already pays
+ * for a walk over the process table, and hanging a second question on it would make every
+ * telemetry poll answer "有没有网" from a reading the shell only refreshes on its own
+ * schedule. The door itself never blocks (it reads a cache), so the cost here is a promise
+ * about cadence, not about latency.
+ */
+const NETWORK_INTERVAL_MS = 10_000
 
 export interface Point {
   t: number
@@ -28,7 +46,27 @@ export const useSystemStore = defineStore('system', () => {
   const connected = ref(false)
   const lastUpdated = ref(0)
 
+  /**
+   * 有没有网，as the shell's probe last saw it.
+   *
+   * Starts at ``online: null`` -- "还没测过" -- which is a third state the bar has to draw
+   * differently from "没网", and the reason the field is nullable rather than a boolean
+   * defaulting to false.
+   */
+  const network = ref<NetworkState>({ online: null, detail: '', seconds_ago: null })
+  /** Why the *door* failed, which is not the same sentence as "the machine has no network". */
+  const networkError = ref('')
+  /**
+   * The one card that says 没网了.
+   *
+   * Set on the flip from online to offline and by nothing else, so a machine that stays
+   * offline does not get re-warned every 10 seconds, and a launch that has never had a
+   * network never sees it either (``null`` is not a flip).
+   */
+  const offlineNotice = ref(false)
+
   let timer: ReturnType<typeof setInterval> | undefined
+  let networkTimer: ReturnType<typeof setInterval> | undefined
   let detachBackground: (() => void) | undefined
   // True while the window is off screen, as the shell says it. Not derived from
   // document.hidden, which does not know about a hide-to-tray.
@@ -162,12 +200,44 @@ export const useSystemStore = defineStore('system', () => {
     }
   }
 
+  /**
+   * 问一次「有没有网」，并且只在**那一跳**上冒卡片。
+   *
+   * 三种状态都要能画出来：`true` 是有网，`false` 是没网，`null` 是还没测过 —— 最后一档
+   * 不该冒卡片，因为一个从来没通过网的机器和一个刚断线的机器是两件事，而卡片的作用是
+   * "刚才还能用，现在不能了"。已经离线时每一轮都不许再冒：10 秒一跳会把一句提醒变成一个
+   * 关不掉的弹窗。
+   */
+  async function tickNetwork(): Promise<void> {
+    try {
+      const next = await fetchNetworkState()
+      if (network.value.online === true && next.online === false) offlineNotice.value = true
+      network.value = next
+      networkError.value = ''
+    } catch (err) {
+      // 门本身没答上，和"这台机器没网"不是一回事，所以两句话分开记。
+      networkError.value = err instanceof Error ? err.message : String(err)
+    }
+  }
+
+  function startNetwork(): void {
+    if (networkTimer !== undefined) return
+    void tickNetwork()
+    networkTimer = setInterval(() => void tickNetwork(), NETWORK_INTERVAL_MS)
+  }
+
+  /** 「知道了」：这张卡只说一次，关掉就不会自己回来 —— 除非真断了一次。 */
+  function dismissOffline(): void {
+    offlineNotice.value = false
+  }
+
   function start(ms = 1500): void {
     if (running) return
     running = true
     intervalMs = ms
     void tick()
     reschedule()
+    startNetwork()
     document.addEventListener('visibilitychange', onVisibility)
     detachBackground = onBackground(onBackgroundChange)
   }
@@ -189,6 +259,10 @@ export const useSystemStore = defineStore('system', () => {
       clearInterval(timer)
       timer = undefined
     }
+    if (networkTimer !== undefined) {
+      clearInterval(networkTimer)
+      networkTimer = undefined
+    }
     document.removeEventListener('visibilitychange', onVisibility)
     detachBackground?.()
     detachBackground = undefined
@@ -201,6 +275,39 @@ export const useSystemStore = defineStore('system', () => {
   const disks = computed(() => metrics.value.disks ?? [])
   const processes = computed(() => metrics.value.top_processes ?? [])
 
+  /**
+   * The chip's three words, and why ``null`` gets its own.
+   *
+   * 网络未知 is not a hedge: it is the state between "the probe thread has not run yet"
+   * and a verdict. Printing 有网 there would be the confident zero the CPU numeral used to
+   * show, and printing 没网 would send someone to check a cable that is fine.
+   */
+  const netLabel = computed(() => {
+    if (network.value.online === true) return '有网'
+    if (network.value.online === false) return '没网'
+    return '网络未知'
+  })
+
+  /** Same three states as the dot, reusing the indicators every other chip already draws. */
+  const netDotClass = computed(() => {
+    if (network.value.online === true) return 'live'
+    if (network.value.online === false) return 'error'
+    return 'idle'
+  })
+
+  /**
+   * The tooltip carries the age, because that is the whole point of a cached reading.
+   *
+   * 「有网」 written next to a probe that stopped moving five minutes ago is a lie by
+   * omission -- the number has to be reachable without opening anything.
+   */
+  const netTitle = computed(() => {
+    if (networkError.value) return networkError.value
+    const age = network.value.seconds_ago
+    const ago = age === null ? '还没测过' : `距今 ${age} 秒`
+    return `${network.value.detail || '没有更多信息'} · ${ago}`
+  })
+
   return {
     metrics,
     cpuHistory,
@@ -211,12 +318,20 @@ export const useSystemStore = defineStore('system', () => {
     connected,
     lastUpdated,
     cpuReady,
+    network,
+    networkError,
+    offlineNotice,
+    netLabel,
+    netDotClass,
+    netTitle,
     cpuPercent,
     memoryPercent,
     cores,
     disks,
     processes,
     tick,
+    tickNetwork,
+    dismissOffline,
     start,
     stop,
     setIntervalMs,

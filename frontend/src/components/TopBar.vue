@@ -13,6 +13,22 @@
       </span>
 
       <!--
+        有没有网，单独一格：遥测中断说的是"读不到这台机器"，这一格说的是"这台机器连不上外面"。
+        两件事的修法相反，画在同一个灯上就是让人去查错的那根线。
+
+        title 里带着这一跳多旧（`store.netTitle`）。这一格读的是服务端缓存，每 10 秒问一次，
+        所以探测线程不走了和"没网"在屏上长得一样 —— 把秒数写出来是唯一能分开它们的办法。
+      -->
+      <span
+        class="hud-chip"
+        :class="store.network.online === false ? 'hud-chip--bad' : ''"
+        :title="store.netTitle"
+      >
+        <span class="hud-dot" :class="store.netDotClass"></span>
+        <span class="hud-label">{{ store.netLabel }}</span>
+      </span>
+
+      <!--
         Two axes, one chip: ``phase`` says whether the microphone is available at
         all, ``turn`` says what it is doing. Showing "聆听中" after a failed start
         would be the kind of lie that costs a demo.

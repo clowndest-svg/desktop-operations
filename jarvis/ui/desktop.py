@@ -61,6 +61,7 @@ from jarvis.app.turns import (
 )
 from jarvis.app.voice_library import VoiceLibraryError
 from jarvis.config import MobileSection
+from jarvis.config.paths import AppPaths
 from jarvis.core.events import VoicePhase
 from jarvis.ui import autostart
 from jarvis.ui.compositor import (
@@ -86,6 +87,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from jarvis.app.command_access import CommandAccess
     from jarvis.app.computer_access import ComputerAccess
     from jarvis.app.disk_service import DiskService
+    from jarvis.app.documents import DocumentService
+    from jarvis.app.net_state import NetworkWatch
     from jarvis.app.pet_service import PetService
     from jarvis.app.preferences import Preferences
     from jarvis.app.process_service import ProcessService
@@ -586,6 +589,9 @@ class HudBridge:
         alerts: Any | None = None,
         mirror: ScreenMirrorService | None = None,
         images: ImageService | None = None,
+        documents: DocumentService | None = None,
+        paths: AppPaths | None = None,
+        network: NetworkWatch | None = None,
         phone_screen: PhoneScreenReader | None = None,
     ) -> None:
         self._system = system
@@ -622,6 +628,10 @@ class HudBridge:
         self._planner = planner
         self._mirror = mirror
         self._images = images
+        self._documents = documents
+        # 读本轮产出文件的那几扇门，要知道哪些目录算软件自己写的。
+        self._paths = paths or AppPaths.resolve()
+        self._network = network
         self._phone = phone_screen
         self._pet: PetController | None = None
         self._remember_pet: Callable[[bool], None] | None = None
@@ -2577,7 +2587,8 @@ class HudBridge:
         state = self._state
         if state is not None:
             state.clear_stream(task_id)
-            if conversation == self._active_tab() and reply.answer:
+            made = tuple(getattr(reply, "artifacts", ()) or ())
+            if conversation == self._active_tab() and (reply.answer or made):
                 state.add_turn(
                     "assistant",
                     reply.answer,
@@ -2585,6 +2596,7 @@ class HudBridge:
                     reply.model,
                     reply.record,
                     reply.to_dict().get("tools"),
+                    made,
                 )
             if self._turns is None or not self._turns.waiting():
                 state.set_turn(UiVoiceState.IDLE)
@@ -2680,8 +2692,39 @@ class HudBridge:
     def _push_history(self, conversation_id: str) -> None:
         if self._state is None or self._chat is None:
             return
-        rows = self._chat.session_messages(str(conversation_id)).get("messages") or []
-        self._state.replace_history(rows if isinstance(rows, list) else [])
+        raw = self._chat.session_messages(str(conversation_id)).get("messages") or []
+        rows = [self._with_artifacts(row) for row in raw] if isinstance(raw, list) else []
+        self._state.replace_history(rows)
+
+    def _with_artifacts(self, row: Mapping[str, object]) -> Mapping[str, object]:
+        """切回一个标签时，那一张画过的图要跟着回来。
+
+        对话表里没有"产物"这一列（加一列要迁移库，今晚不该为这个动库），但助手那句话里
+        本来就有 ``存在：<绝对路径>`` —— 同一条判据再认一次即可。只认软件自己产出的两个
+        目录：别的目录里真躺着一张 png 不算"她画的"。
+        """
+        if not isinstance(row, dict) or row.get("role") != "assistant":
+            return row
+        text = str(row.get("content") or "")
+        if "存在：" not in text:
+            return row
+        roots = (self._paths.images_dir, self._paths.exports_dir)
+        made: list[str] = []
+        for line in text.splitlines():
+            _, mark, rest = line.partition("存在：")
+            if not mark:
+                continue
+            candidate = rest.split("（")[0].split("。")[0].split("，")[0].strip().strip('"')
+            if not candidate:
+                continue
+            try:
+                where = Path(candidate)
+                inside = any(where.is_absolute() and where.is_relative_to(root) for root in roots)
+            except (OSError, ValueError):
+                continue
+            if inside and where.is_file():
+                made.append(str(where))
+        return {**row, "artifacts": made} if made else row
 
     def _prune_results(self) -> None:
         """Keep the waiting callers' store bounded.
@@ -2900,6 +2943,111 @@ class HudBridge:
         if problems:
             status["error"] = "；".join(problems)
         return status
+
+    # ------------------------------------------------------------------
+    # 这一轮产出的文件：看图、复制、打开，以及"到底有没有网"
+    # ------------------------------------------------------------------
+
+    _ARTIFACT_IMAGE_SUFFIXES: tuple[str, ...] = (".png", ".jpg", ".jpeg", ".webp")
+    _ARTIFACT_FILE_SUFFIXES: tuple[str, ...] = (
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".webp",
+        ".xlsx",
+        ".docx",
+        ".pptx",
+        ".pdf",
+        ".csv",
+        ".md",
+        ".txt",
+    )
+
+    def _artifact_here(self, path: object) -> Path | None:
+        """把页面递回来的路径收进"软件自己产出的那些目录"里。
+
+        不收的话，这一扇门就是"任意文件读 + 任意文件打开"：页面是模型的嘴，而模型会被
+        它读到的任何一段文字牵着走。
+        """
+        raw = str(path or "").strip()
+        if not raw:
+            return None
+        try:
+            where = Path(raw).expanduser().resolve()
+        except OSError:
+            return None
+        roots = [self._paths.images_dir, self._paths.exports_dir, self._paths.notes_dir]
+        for root in roots:
+            try:
+                where.relative_to(root.resolve())
+            except ValueError:
+                continue
+            return where if where.is_file() else None
+        return None
+
+    def artifact_read(self, path: object) -> dict[str, object]:
+        """把本轮画出来的那张图交给页面显示（缩过的一侧，和生图面板同一把尺子）。"""
+        where = self._artifact_here(path)
+        if where is None or where.suffix.lower() not in self._ARTIFACT_IMAGE_SUFFIXES:
+            return {"ok": False, "data_url": "", "error": "这个路径不是软件自己画出来的图片"}
+        from jarvis.app.image_gen import preview_data_url
+
+        try:
+            return {"ok": True, "data_url": preview_data_url(where.read_bytes()), "error": ""}
+        except OSError as exc:
+            return {"ok": False, "data_url": "", "error": f"图片读不出来：{exc}"}
+
+    def copy_text(self, text: object) -> dict[str, object]:
+        """复制一段文字。页面那条 navigator.clipboard 失败时的后手，也是语音路径的入口。"""
+        from jarvis.ui import clipboard
+
+        body = str(text or "")
+        if not body.strip():
+            return {"ok": False, "error": "没有要复制的内容"}
+        try:
+            clipboard.copy_text(body)
+        except clipboard.ClipboardError as exc:
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "error": ""}
+
+    def copy_image(self, path: object) -> dict[str, object]:
+        """把一张图放进剪贴板。浏览器那条路做不到这件事，只能从这一侧进。"""
+        from jarvis.ui import clipboard
+
+        where = self._artifact_here(path)
+        if where is None:
+            return {"ok": False, "error": "只能复制软件自己产出的文件"}
+        try:
+            clipboard.copy_image(str(where))
+        except clipboard.ClipboardError as exc:
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "error": ""}
+
+    def open_artifact(self, path: object, how: object = "open") -> dict[str, object]:
+        """``open`` 交给系统默认程序，``folder`` 在资源管理器里选中它。
+
+        桌面应用里没有"下载"这个动作 —— 文件本来就在盘上，用户要的是"打开它"或
+        "让我看到它在哪儿"，所以给这两样，而不是造一个假的下载条。
+        """
+        where = self._artifact_here(path)
+        if where is None or where.suffix.lower() not in self._ARTIFACT_FILE_SUFFIXES:
+            return {"ok": False, "error": "这个路径不是软件产出的文件"}
+        import subprocess
+
+        if str(how or "open") == "folder":
+            subprocess.Popen(["explorer", "/select,", str(where)])
+            return {"ok": True, "error": ""}
+        try:
+            os.startfile(str(where))
+        except OSError as exc:
+            return {"ok": False, "error": f"打不开：{exc}"}
+        return {"ok": True, "error": ""}
+
+    def network_state(self) -> dict[str, object]:
+        """有没有网。**只读缓存**，探测在那条守护线程上按点做。"""
+        if self._network is None:
+            return {"online": None, "detail": "这个进程没有接网络探测", "seconds_ago": None}
+        return self._network.state()
 
     def mirror_start(self, serial: object = "") -> MirrorStatus:
         """Open the mirror window. The answer is the state after the attempt.
@@ -3576,6 +3724,9 @@ def run(
     mirror: ScreenMirrorService | None = None,
     images: ImageService | None = None,
     phone_screen: PhoneScreenReader | None = None,
+    documents: DocumentService | None = None,
+    network: NetworkWatch | None = None,
+    paths: AppPaths | None = None,
     debug: bool = False,
 ) -> int:
     """Open the HUD window and block until it closes.
@@ -3736,6 +3887,9 @@ def run(
     bridge = HudBridge(
         system,
         disk,
+        documents=documents,
+        network=network,
+        paths=paths,
         voice=voice,
         chat=chat,
         state=state,
