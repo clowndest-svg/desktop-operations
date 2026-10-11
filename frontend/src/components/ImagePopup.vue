@@ -40,23 +40,47 @@
               <input v-model.number="steps" class="hud-field im__steps" type="number" min="4" max="60" :disabled="busy" @change="tune" />
             </div>
             <p class="im__why">{{ sizeNote }}</p>
-            <p class="im__why">步数是采样次数，多一步就慢一点；本机那张卡实测 512x512 二十步约 22 秒。</p>
+            <p class="im__why">步数是采样次数，多一步就慢一点；512x512 二十步，这一轮在这台 1650 上连画 24 张实测 24.5~26.6 秒。</p>
             <div class="im__actions">
               <button class="hud-btn hud-btn--primary" type="button" :disabled="busy || !prompt.trim()" @click="generate">
                 {{ busy ? '正在画…' : '画一张' }}
               </button>
               <button class="hud-btn" type="button" :disabled="busy" @click="reprobe">检测本机引擎</button>
             </div>
-            <p v-if="busy" class="im__note">本机画图是真的要等几十秒，别关这个框 —— 画完会自己出现在下面。</p>
+            <p v-if="busy" class="im__note">
+              已经等了 {{ elapsed }} 秒 —— 512x512 二十步，这一轮在这台机器上连画 24 张实测
+              24.5~26.6 秒一张，你那张实拍是 67.1 秒（为什么慢这一次没量，别当断线）。
+              别关这个框，画完会自己出现在下面。
+            </p>
           </div>
 
           <!-- 上一次那张 -->
           <div class="im__section">
             <span class="hud-label">刚画的那张</span>
             <div v-if="lastImage" class="im__result">
-              <img class="im__pic" :src="lastImage" alt="刚生成的图" />
+              <!--
+                右键有菜单（复制图片 / 打开 / 所在文件夹），双击直接打开 —— 但这两件事
+                也各留一颗按钮：看不见不等于做不到，用户不该靠猜手势。
+              -->
+              <img
+                class="im__pic"
+                :src="lastImage"
+                alt="刚生成的图"
+                @contextmenu.prevent="pictureMenu($event)"
+                @dblclick="openArtifact(lastPath, 'open')"
+              />
+              <div class="im__acts">
+                <button class="hud-btn im__btn" type="button" @click="copyImage(lastPath)">复制图片</button>
+                <button class="hud-btn im__btn" type="button" @click="openArtifact(lastPath, 'open')">打开</button>
+                <button class="hud-btn im__btn" type="button" @click="openArtifact(lastPath, 'folder')">所在文件夹</button>
+              </div>
               <p class="im__file">{{ lastPath }}</p>
               <p class="im__why">{{ lastWords }}</p>
+              <!-- 引擎实际听见的那句：中文被展开成英文标签，不写出来就是悄悄改写。 -->
+              <p v-if="lastSent && lastSent !== prompt.trim()" class="im__sent">
+                引擎听见的那句：<span class="im__sent-text">{{ lastSent }}</span>
+              </p>
+              <p v-if="lastNote" class="im__why im__why--warn">{{ lastNote }}</p>
             </div>
             <p v-else class="im__empty">还没画过。上面那句写完按「画一张」。</p>
           </div>
@@ -117,17 +141,20 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 
 import {
+  copyImage,
   fetchImageState,
   generateImage,
+  openArtifact,
   probeImageEngine,
   saveSettings,
   setupImage,
   tuneImage,
   type ImageState,
 } from '@/api/bridge'
+import { useContextMenu, type MenuEntry } from '@/composables/useContextMenu'
 
 const empty: ImageState = {
   engine: 'auto',
@@ -171,6 +198,50 @@ const cloudKey = ref('')
 const lastImage = ref('')
 const lastPath = ref('')
 const lastWords = ref('')
+/**
+ * 引擎**实际听见**的那一句（中文会被展开成英文标签）和没展开出来的词。
+ *
+ * 这两个必须摆在面板上：悄悄把用户写的改写成另一串字，就算结果更好，用户也无从知道
+ * "为什么我改了一个词，画面全变了"。看得见，才谈得上调。
+ */
+const lastSent = ref('')
+const lastNote = ref('')
+
+const { openMenu } = useContextMenu()
+
+/**
+ * 等待期间自己走的秒数。引擎只在**跑完**那一刻才给结果，中途没有任何百分比可读，
+ * 所以这里不假装知道进度，只报"已经等了多久"—— 一张 22~67 秒的图，屏上只写着
+ * "正在画…"，第二反应是它死了。
+ */
+const elapsed = ref(0)
+let elapsedTimer: number | undefined
+
+function startClock(): void {
+  elapsed.value = 0
+  window.clearInterval(elapsedTimer)
+  elapsedTimer = window.setInterval(() => {
+    elapsed.value += 1
+  }, 1000)
+}
+
+function stopClock(): void {
+  window.clearInterval(elapsedTimer)
+  elapsedTimer = undefined
+}
+
+onBeforeUnmount(stopClock)
+
+/** 预览图上那颗右键菜单：打包版没有原生菜单可退，只能自己给一份。 */
+function pictureMenu(event: MouseEvent): void {
+  if (!lastPath.value) return
+  const entries: MenuEntry[] = [
+    { label: '复制图片', run: () => void copyImage(lastPath.value) },
+    { label: '打开', run: () => void openArtifact(lastPath.value, 'open') },
+    { label: '所在文件夹', run: () => void openArtifact(lastPath.value, 'folder') },
+  ]
+  openMenu(event, entries)
+}
 
 const WORDS: Record<string, string> = {
   off: '没在用',
@@ -232,12 +303,15 @@ async function generate(): Promise<void> {
   const text = prompt.value.trim()
   if (!text) return
   busy.value = true
+  startClock()
   try {
     const answer = await generateImage(text, sizeChoice.value)
     if (answer.ok) {
       lastImage.value = answer.preview
       lastPath.value = answer.path
       lastWords.value = `${answer.size} · ${answer.steps} 步 · ${answer.engine === 'local' ? '本机 ComfyUI' : '云端 API'} · ${answer.seconds} 秒 · 种子 ${answer.seed}`
+      lastSent.value = answer.prompt || ''
+      lastNote.value = answer.prompt_note || ''
       emit('changed', '画好了')
     } else {
       emit('changed', answer.error || '这一张没画成')
@@ -246,6 +320,7 @@ async function generate(): Promise<void> {
   } catch (err) {
     state.error = err instanceof Error ? err.message : String(err)
   } finally {
+    stopClock()
     busy.value = false
   }
 }
@@ -429,12 +504,43 @@ watch(
 .im__result {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
 }
 
 .im__pic {
   max-width: 320px;
-  border-radius: 10px;
+  border: 1px solid var(--hud-edge);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.im__acts {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 8px;
+}
+
+.im__btn {
+  font-size: 12px;
+}
+
+/* 引擎实际听见的那句：等宽、可选、允许换行 —— 用户要照着它改词。 */
+.im__sent {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--hud-dim);
+}
+
+.im__sent-text {
+  font-family: var(--hud-mono);
+  color: var(--hud-text);
+  word-break: break-word;
+  user-select: text;
+}
+
+.im__why--warn {
+  color: var(--hud-amber);
 }
 
 .im__file {
@@ -442,6 +548,7 @@ watch(
   font-size: 12px;
   word-break: break-all;
   color: var(--hud-text, #e7ebf3);
+  user-select: text;
 }
 
 .im__tail {

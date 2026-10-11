@@ -233,7 +233,7 @@
                 <span v-else class="chat__file">{{ file.name }} · {{ formatBytes(file.size) }}</span>
               </template>
             </div>
-            <span class="chat__text">{{ line.text }}</span>
+            <span class="chat__text" @contextmenu.prevent="textMenu($event, index, line.text)">{{ line.text }}</span>
             <!--
               这一轮产出的文件：图就地画出来，其余给一行名字加三颗按钮。
 
@@ -243,49 +243,70 @@
               必须是两件事。
             -->
             <div v-if="line.role === 'assistant' && line.artifacts.length" class="chat__arts">
-              <div v-for="(art, slot) in line.artifacts" :key="`art-${index}-${slot}`" class="chat__art">
+              <div
+                v-for="(art, slot) in line.artifacts"
+                :key="`art-${index}-${slot}`"
+                class="chat__art"
+                @contextmenu.prevent="artMenu($event, art)"
+              >
                 <img
                   v-if="isPicture(art) && pictureOf(art)"
                   class="chat__art-pic"
                   :src="pictureOf(art)"
                   :alt="baseName(art)"
+                  @dblclick="openArt(art, 'open')"
                 />
                 <p v-else-if="isPicture(art)" class="chat__art-wait">{{ waitWords(art) }}</p>
+                <!--
+                  文件不是"一行名字加三颗按钮"，是一张卡片：左边一枚按扩展名上色的角标，
+                  中间名字 + 大小两行，右边只留一颗主操作和一颗 ⋯。四颗按钮平铺会把
+                  名字挤到换行，用户说的"太丑"就是这一处。
+                -->
                 <div v-else class="chat__art-file">
-                  <span class="chat__art-name">{{ baseName(art) }}</span>
-                  <span class="chat__art-ext">{{ suffixOf(art) }}</span>
+                  <span class="chat__art-icon" :data-ext="extLabel(art)">{{ extLabel(art) }}</span>
+                  <span class="chat__art-meta">
+                    <span class="chat__art-name">{{ baseName(art) }}</span>
+                    <span class="chat__art-sub">{{ fileSub(art) }}</span>
+                  </span>
+                  <span class="chat__art-acts">
+                    <button class="hud-btn chat__art-btn" type="button" @click="openArt(art, 'open')">
+                      打开
+                    </button>
+                    <button
+                      class="chat__art-more"
+                      type="button"
+                      aria-label="更多操作"
+                      @click="artMenu($event, art)"
+                    >⋯</button>
+                  </span>
                 </div>
-                <span class="chat__art-row">
-                  <template v-if="isPicture(art)">
-                    <button class="hud-btn chat__art-btn" type="button" @click="copyPicture(art)">复制图片</button>
-                    <button class="hud-btn chat__art-btn" type="button" @click="openArt(art, 'open')">打开</button>
-                  </template>
-                  <template v-else>
-                    <button class="hud-btn chat__art-btn" type="button" @click="copyPath(art)">复制路径</button>
-                    <button class="hud-btn chat__art-btn" type="button" @click="openArt(art, 'open')">打开</button>
-                    <button class="hud-btn chat__art-btn" type="button" @click="openArt(art, 'folder')">所在文件夹</button>
-                  </template>
+                <span v-if="isPicture(art)" class="chat__art-row">
+                  <button class="hud-btn chat__art-btn" type="button" @click="copyPicture(art)">复制图片</button>
+                  <button class="hud-btn chat__art-btn" type="button" @click="openArt(art, 'open')">打开</button>
+                  <button class="hud-btn chat__art-btn" type="button" @click="openArt(art, 'folder')">所在文件夹</button>
                 </span>
                 <p v-if="artWhy(art)" class="chat__art-why">{{ artWhy(art) }}</p>
               </div>
             </div>
             <!--
-              气泡这段话本身也要能抄走。先试浏览器那条路（`api/clipboard.ts` 会照实回报
-              copied / empty / failed 三种结果），它说没成才走 Windows 剪贴板那扇门 ——
-              两扇都说没成，屏上就写着没成，按钮不许假装成功。
-              只有图、没有配话的那一轮，这一颗给的是「没有内容」，那也是一种说法。
+              气泡这段话本身也要能抄走 —— 但它是这一条的**页脚**，不是第四颗按钮：
+              和"本轮调用了哪条工具"并成一行，右击那段话也能拿到同一件事。
+
+              先试浏览器那条路（`api/clipboard.ts` 会照实回报 copied / empty / failed
+              三种结果），它说没成才走 Windows 剪贴板那扇门 —— 两扇都说没成，屏上就写着
+              没成，按钮不许假装成功。
             -->
-            <div v-if="line.role === 'assistant'" class="chat__copy">
-              <button class="hud-btn chat__art-btn" type="button" @click="copyBubble(index, line.text)">
+            <div
+              v-if="line.role === 'assistant'"
+              class="chat__footline"
+              @contextmenu.prevent="textMenu($event, index, line.text)"
+            >
+              <button class="chat__foot-btn" type="button" @click="copyBubble(index, line.text)">
                 {{ copyMark(index) }}
               </button>
+              <span v-if="line.tools" class="chat__tools">{{ toolReport(line.tools) }}</span>
               <span v-if="copyWhy(index)" class="chat__art-why">{{ copyWhy(index) }}</span>
             </div>
-            <!--
-              Collapsed by default and only drawn when there is something in it: the
-              chain is there to explain a surprising answer, not to double the height of
-              every bubble. Opening it is a read, so nothing here is spoken aloud.
-            -->
             <details v-if="line.role === 'assistant' && line.reasoning" class="chat__reasoning">
               <summary class="hud-label">思考过程</summary>
               <pre class="chat__reasoning-text">{{ line.reasoning }}</pre>
@@ -519,6 +540,7 @@ const pictureAsked = new Set<string>()
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   artifactRead,
+  artifactStat,
   chatCancel,
   chatSend,
   chatCollaborate,
@@ -547,6 +569,7 @@ import {
   type ToolReport,
 } from '@/api/bridge'
 import { copyText, type CopyOutcome } from '@/api/clipboard'
+import { useContextMenu, type MenuEntry } from '@/composables/useContextMenu'
 import { readAsDataUrl, shrinkToBudget } from '@/api/thumbnail'
 import { stamp } from '@/api/time'
 import {
@@ -1316,6 +1339,100 @@ async function copyBubble(index: number, value: string): Promise<void> {
   }
 }
 
+/* ------------------------------------------------------------ 右键菜单 */
+
+const { openMenu } = useContextMenu()
+
+/**
+ * 附件卡片第二行那句"多大 · 什么时候写的"。
+ *
+ * 只有路径时这一格只能显示扩展名，而人挑文件靠的是"这是我刚那份吗"。`artifact_stat`
+ * 和读图走同一道收束（不在软件自己那两个产出目录里就不给），并且**一次问一条、问过
+ * 不再问** —— 这一屏 1.5 秒重画一次，不能把读盘敲成轮询。
+ */
+const stats = ref<Record<string, string>>({})
+const statsAsked = new Set<string>()
+
+function fileSub(path: string): string {
+  return stats.value[path] ?? extLabel(path)
+}
+
+/** 角标上那三个字母：`.xlsx` 太长了，而且点号在图标里没有意义。 */
+function extLabel(path: string): string {
+  return suffixOf(path).replace('.', '').toUpperCase()
+}
+
+function askStat(path: string): void {
+  if (statsAsked.has(path)) return
+  statsAsked.add(path)
+  const fallback = (): void => {
+    stats.value = { ...stats.value, [path]: extLabel(path) }
+  }
+  artifactStat(path)
+    .then((answer) => {
+      if (!answer.ok) {
+        fallback()
+        return
+      }
+      stats.value = {
+        ...stats.value,
+        [path]: `${formatBytes(answer.size)} · ${dayTime(answer.mtime)}`,
+      }
+    })
+    .catch(fallback)
+}
+
+/** 卡片上那句短日期：全时间戳留给对话流的分段，这一格要短到不换行。 */
+function dayTime(epoch: number): string {
+  if (!epoch) return ''
+  const date = new Date(epoch * 1000)
+  const now = new Date()
+  const clock = `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+  if (date.toDateString() === now.toDateString()) return `今天 ${clock}`
+  if (date.toDateString() === new Date(now.getTime() - 86400000).toDateString()) return `昨天 ${clock}`
+  return `${date.getMonth() + 1}-${String(date.getDate()).padStart(2, '0')} ${clock}`
+}
+
+const filePaths = computed<string[]>(() =>
+  lines.value.flatMap((line) =>
+    line.role === 'assistant' ? line.artifacts.filter((path) => !isPicture(path)) : [],
+  ),
+)
+watch(filePaths, (paths) => { for (const path of paths) askStat(path) }, { immediate: true })
+
+/** 选中的字优先：拖了三分之一句却复制回整段回答，是越帮越忙。 */
+function pickedText(): string {
+  return (document.getSelection()?.toString() ?? '').trim()
+}
+
+async function copyAnywhere(value: string): Promise<void> {
+  await copyViaBothWays('copy-any', value)
+}
+
+function textMenu(event: MouseEvent, index: number, text: string): void {
+  const picked = pickedText()
+  const entries: MenuEntry[] = []
+  if (picked) entries.push({ label: '复制选中文字', run: () => copyAnywhere(picked) })
+  if (text.trim()) entries.push({ label: '复制这段回答', run: () => copyBubble(index, text) })
+  if (!entries.length) entries.push({ label: '这一段没有内容', run: () => {}, disabled: true })
+  openMenu(event, entries)
+}
+
+/**
+ * 一个对象一个菜单（微信那条规矩）：图、文件都从这一处出，那几颗按钮只是它的快捷方式。
+ * 打包版没有原生右键菜单可退 —— pywebview 把 `AreDefaultContextMenusEnabled` 绑在
+ * debug 上（edgechromium.py:288），不自己做一个，右键就是"鼠标没反应"。
+ */
+function artMenu(event: MouseEvent, path: string): void {
+  const entries: MenuEntry[] = []
+  if (isPicture(path)) entries.push({ label: '复制图片', run: () => copyPicture(path) })
+  entries.push({ label: '打开', run: () => openArt(path, 'open') })
+  entries.push({ label: '所在文件夹', run: () => openArt(path, 'folder') })
+  entries.push({ separator: true })
+  entries.push({ label: '复制文件路径', run: () => copyPath(path) })
+  openMenu(event, entries)
+}
+
 onBeforeUnmount(() => {
   for (const timer of Object.values(flashTimers)) window.clearTimeout(timer)
   for (const timer of Object.values(markTimers)) window.clearTimeout(timer)
@@ -2043,15 +2160,26 @@ async function clear(): Promise<void> {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: 6px 12px 7px;
-  border-radius: 16px;
-  background: rgba(10, 26, 44, 0.72);
-  border: 1px solid rgba(77, 216, 255, 0.14);
+  padding: 8px 12px 9px;
+  /*
+   * 靠说话人那一侧的角收小：微信、iMessage、Ant Design X 的 Bubble 都是这个形状，
+   * 眼睛靠它判断"这句是谁说的"，比那一行「小夜」两个字快。
+   */
+  border-radius: 4px 12px 12px;
+  /* 表面取自皮肤：写死一档 rgba 会在换成琥珀/玫瑰的那套皮肤上留一个不属于任何皮肤的黑箱子。 */
+  background: var(--hud-surface);
+  border: 1px solid var(--hud-line);
 }
 
 .chat__turn--user .chat__bubble {
-  background: linear-gradient(180deg, rgba(77, 216, 255, 0.16), rgba(77, 216, 255, 0.06));
-  border-color: rgba(77, 216, 255, 0.34);
+  border-radius: 12px 4px 12px;
+  /* 皮肤动的是色相 token，这里写死 cyan 的话，换到琥珀/玫瑰那一套就是不属于任何皮肤的一块蓝。 */
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--hud-cyan) 16%, transparent),
+    color-mix(in srgb, var(--hud-cyan) 6%, transparent)
+  );
+  border-color: color-mix(in srgb, var(--hud-cyan) 34%, transparent);
 }
 
 /* The chairs. A wrap row of toggles, because the list is however many models exist
@@ -2194,6 +2322,9 @@ async function clear(): Promise<void> {
 }
 
 .chat__text {
+  /* 1.65 + 13px：对话列是"读"的地方，行高压到 1.4 以下就是一堵墙。 */
+  font-size: 13px;
+  line-height: 1.65;
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -2228,10 +2359,12 @@ async function clear(): Promise<void> {
 }
 
 .chat__tools {
-  margin-top: 4px;
-  font-size: 0.8em;
+  /*
+   * 原来这里挂着 opacity: .75 —— 叠在 --hud-dim 上把这句"本轮调用了哪条工具"压到
+   * 约 4.0:1，正好掉在 AA 线下。它现在和「复制这段」并排，靠字号分层就够，不靠半透明。
+   */
+  font-size: 11px;
   color: var(--hud-dim);
-  opacity: 0.75;
 }
 
 .chat__reasoning-text {
@@ -2252,82 +2385,191 @@ async function clear(): Promise<void> {
 .chat__arts {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  margin-top: 6px;
+  gap: 12px;
+  margin-top: 10px;
+  max-width: 100%;
 }
 
 .chat__art {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 4px;
+  gap: 8px;
+  min-width: 0;
 }
 
 .chat__art-pic {
-  /* 和生图面板同一把尺子：一张图不该把对话那一列顶成一屏的宽度。 */
-  max-width: 320px;
+  /*
+   * 260 而不是 320：IM 会话里的缩略图普遍落在 240–280 这一档（融云的默认最长边就是
+   * 240），再宽就把对话列顶成一屏，读起来不像对话。圆角跟 --hud-radius 分档：
+   * 图 8、卡片 12，两档就够，多一档就开始像拼凑的。
+   */
+  max-width: 260px;
   width: 100%;
-  border: 1px solid var(--hud-line);
-  border-radius: 10px;
+  border: 1px solid var(--hud-edge);
+  border-radius: 8px;
+  cursor: pointer;
 }
 
 .chat__art-wait {
   margin: 0;
-  padding: 6px 10px;
-  border: 1px dashed var(--hud-line);
-  border-radius: 10px;
-  font-size: 11px;
+  padding: 8px 10px;
+  border: 1px dashed var(--hud-edge);
+  border-radius: 8px;
+  font-size: 12px;
   line-height: 1.6;
   color: var(--hud-dim);
   word-break: break-word;
 }
 
+/*
+ * 一张卡片，不是一个文件名加一排按钮：左边角标、中间两行（名字 + 多大·什么时候）、
+ * 右边只留一颗主操作和一颗 ⋯。名字截断，按钮永不换行 —— 用户说的"太丑"就是
+ * 四颗按钮 wrap 成两行、把名字挤到上面去。
+ */
 .chat__art-file {
   display: flex;
-  align-items: baseline;
-  gap: 6px;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  max-width: 380px;
+  padding: 8px 10px;
+  border: 1px solid var(--hud-edge);
+  border-radius: 12px;
+  /* 层次靠"比背景亮一层的面"，不靠黑阴影投在近黑底上（那等于没有）。 */
+  background: var(--hud-surface);
+}
+
+.chat__art-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 7px;
+  font-family: var(--hud-mono);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  color: #04101a;
+  background: var(--hud-cyan);
+}
+
+.chat__art-icon[data-ext='PDF'] {
+  background: var(--hud-red);
+}
+
+.chat__art-icon[data-ext='DOCX'] {
+  background: var(--hud-cyan);
+}
+
+.chat__art-icon[data-ext='XLSX'] {
+  background: var(--hud-green);
+}
+
+.chat__art-icon[data-ext='PPTX'] {
+  background: var(--hud-amber);
+}
+
+.chat__art-meta {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
   min-width: 0;
 }
 
 .chat__art-name {
   font-size: 12px;
+  line-height: 1.4;
   color: var(--hud-text);
-  word-break: break-all;
+  /* 可选：拖得动名字才谈得上复制它，省略号只是这一格放不下时的样子。 */
+  user-select: text;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.chat__art-ext {
-  font-family: var(--hud-mono);
-  font-size: 10px;
-  letter-spacing: 0.06em;
+.chat__art-sub {
+  font-size: 11px;
+  line-height: 1.4;
   color: var(--hud-dim);
 }
 
-.chat__art-row {
+.chat__art-acts {
   display: inline-flex;
-  flex-wrap: wrap;
+  flex: none;
   align-items: center;
   gap: 6px;
 }
 
-/* 小一号的幽灵按钮：和投屏 / 生图那两张弹窗里的一样，只是这一格挤在气泡里。 */
+.chat__art-row {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 12px 字号 + 26px 高（--hud-control-h）：10px 那一档在任何设计体系里都不存在。 */
 .chat__art-btn {
-  padding: 2px 9px;
-  font-size: 10px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+/* 溢出菜单那颗：视觉上 20px，命中区补到 26×26（WCAG 2.5.8 的最小 24）。 */
+.chat__art-more {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--hud-line);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--hud-dim);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.chat__art-more:hover {
+  color: var(--hud-text);
+  border-color: var(--hud-edge);
+  background: rgba(77, 216, 255, 0.1);
 }
 
 .chat__art-why {
   margin: 0;
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.6;
   color: var(--hud-amber);
   word-break: break-word;
 }
 
-.chat__copy {
+/*
+ * 气泡的页脚：复制这段 + "本轮调用了哪条工具"并成一行。
+ * 原来那颗「复制」自己占一行、和产物那排按钮长成一个样，看上去像第四颗按钮。
+ */
+.chat__footline {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-top: 4px;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.chat__foot-btn {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--hud-dim);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.chat__foot-btn:hover {
+  color: var(--hud-cyan);
+  text-decoration: underline;
 }
 
 /* Three dots, staggered. Deliberately CSS-only: a JS-driven spinner would add one

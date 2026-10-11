@@ -35,6 +35,19 @@
   --hud-radius: 12px;
   --hud-pill: 999px;
   --hud-control-h: 26px;
+
+  /*
+   * Two tokens the frame was missing. `--hud-line` sits at 0.22 alpha, which on
+   * #010306 composites to about 1.5:1 — fine for a decorative hairline, not fine for
+   * the edge of a card you are supposed to notice (WCAG 1.4.11 asks 3:1 for anything
+   * that carries meaning). And "raised" was a black shadow on a near-black ground,
+   * i.e. no elevation at all.
+   *
+   * Both derive from --hud-cyan, so every skin moves them without a per-skin override.
+   */
+  --hud-edge: color-mix(in srgb, var(--hud-cyan) 42%, transparent);
+  --hud-surface: color-mix(in srgb, var(--hud-cyan) 6%, var(--hud-bg-deep));
+  --hud-surface-2: color-mix(in srgb, var(--hud-cyan) 11%, var(--hud-bg-deep));
 }
 
 /*
@@ -137,6 +150,30 @@ body {
   font-family: 'Microsoft YaHei', 'PingFang SC', system-ui, sans-serif;
   overflow: hidden;
   user-select: none;
+}
+
+/*
+ * 但**读的地方**必须能拖选中。上面那条是给外壳写的 —— 拖一下标题栏就把整屏字染蓝是
+ * 灾难；它顺手把对话正文、思考过程、失败原因这些给人读的东西一起锁了，结果就是用户
+ * 那句"对话框里鼠标不能做一点事"。手机端早就分开了（mobile.css 锁 body、放开输入框），
+ * 桌面这边按同一条规矩补：白名单，不放开通配。
+ *
+ * 选中色也在这里定：默认高亮是系统那套蓝，压在这张深色 HUD 上几乎看不见选了些什么。
+ */
+.chat__text,
+.chat__reasoning-text,
+.chat__failed-reason,
+.chat__failed-hint,
+.chat__art-name,
+.hud-readout,
+pre,
+code {
+  user-select: text;
+}
+
+::selection {
+  background: rgba(77, 216, 255, 0.28);
+  color: var(--hud-text);
 }
 
 /*

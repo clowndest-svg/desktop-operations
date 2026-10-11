@@ -3733,6 +3733,29 @@ class TestTheArtifactDoors:
         assert bridge.artifact_read(str(doc))["ok"] is False
         assert bridge.copy_image(str(doc))["ok"] is False
 
+    def test_the_stat_door_reports_size_and_time_for_our_own_file(self, tmp_path: Path) -> None:
+        """附件卡片那句"多大 · 什么时候写的"。数字必须是从盘上 stat 出来的。"""
+        paths = AppPaths.resolve({"JARVIS_HOME": str(tmp_path / "数据")})
+        paths.ensure()
+        doc = paths.exports_dir / "一份.xlsx"
+        doc.write_bytes(b"x" * 4321)
+        bridge = _bridge(tmp_path, paths=paths)
+        answer = bridge.artifact_stat(str(doc))
+        assert answer["ok"] is True
+        assert answer["size"] == 4321, "卡片上那个大小不能是估的"
+        assert int(str(answer["mtime"])) > 0
+
+    def test_the_stat_door_refuses_a_path_it_did_not_write(self, tmp_path: Path) -> None:
+        """收束和读图同一道：能问出任意文件的大小与修改时间，就是在一台机器上探装了什么。"""
+        paths = AppPaths.resolve({"JARVIS_HOME": str(tmp_path / "数据")})
+        paths.ensure()
+        elsewhere = tmp_path / "别人的.xlsx"
+        elsewhere.write_bytes(b"secret")
+        bridge = _bridge(tmp_path, paths=paths)
+        answer = bridge.artifact_stat(str(elsewhere))
+        assert answer["ok"] is False
+        assert answer["size"] == 0 and answer["mtime"] == 0, "拒绝时不许漏出任何数"
+
     def test_network_state_says_so_when_nothing_is_wired(self, tmp_path: Path) -> None:
         state = _bridge(tmp_path).network_state()
         assert state["online"] is None and "没" in str(state["detail"])

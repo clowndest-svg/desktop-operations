@@ -38,6 +38,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final, Protocol, TypedDict
 
+from jarvis.app.image_prompt import expand
 from jarvis.app.preferences import (
     IMAGE_CLOUD_BASE,
     IMAGE_CLOUD_MODEL,
@@ -173,6 +174,13 @@ class ImageAnswer(TypedDict):
     path: str
     engine: str
     prompt: str
+    prompt_input: str
+    """用户/模型**原来说的那句**。中文那句会展开成英文标签（``prompt``），两个都留着，
+    面板才能说清"你写的"和"引擎听见的"是两回事 —— 悄悄改写就是假能力的一种。"""
+
+    prompt_note: str
+    """展开时没覆盖到的词（``image_prompt`` 认不出来的那部分），空串 = 全都认出来了。"""
+
     size: str
     steps: int
     seed: int
@@ -480,6 +488,22 @@ class ImageService:
         return ""
 
     def generate(self, prompt: str, *, size: object = None, steps: object = None) -> ImageAnswer:
+        """出一张图。**中文那句在这里展开成英文标签**，两条引擎、面板和工具都走这一步。
+
+        为什么做在服务层而不是面板里：对话那条路一直是模型先把中文扩写成英文标签再调
+        ``generate_image``（r105 的工具描述硬性要求），面板却把用户原话一个字不改送进
+        ``CLIPTextEncode`` —— 同一句「画一个绿色瘦弱的哥布林」在那边画对了、在这边画成了
+        动漫美女。差的是同一层展开，不是同一个模型。
+        """
+        raw = str(prompt or "").strip()
+        plan = expand(raw)
+        answer = self._run(plan.prompt, size=size, steps=steps)
+        # 原话与"没翻出来的词"一起回：面板要把它显示出来，不许悄悄改写用户说的话。
+        answer["prompt_input"] = raw
+        answer["prompt_note"] = plan.note
+        return answer
+
+    def _run(self, prompt: str, *, size: object = None, steps: object = None) -> ImageAnswer:
         """出一张图。两条引擎都从这里出去，失败一定带一句能照着做的话。"""
         text = str(prompt or "").strip()
         if not text:
@@ -839,6 +863,8 @@ class ImageService:
             "path": str(path),
             "engine": engine,
             "prompt": prompt,
+            "prompt_input": "",
+            "prompt_note": "",
             "size": size,
             "steps": steps,
             "seed": seed,
@@ -858,6 +884,8 @@ class ImageService:
             "path": "",
             "engine": "",
             "prompt": "",
+            "prompt_input": "",
+            "prompt_note": "",
             "size": "",
             "steps": 0,
             "seed": 0,

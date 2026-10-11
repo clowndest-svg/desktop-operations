@@ -489,6 +489,8 @@ def _image_answer_unavailable(detail: str) -> ImageAnswer:
         "path": "",
         "engine": "",
         "prompt": "",
+        "prompt_input": "",
+        "prompt_note": "",
         "size": "",
         "steps": 0,
         "seed": 0,
@@ -2996,6 +2998,22 @@ class HudBridge:
             return {"ok": True, "data_url": preview_data_url(where.read_bytes()), "error": ""}
         except OSError as exc:
             return {"ok": False, "data_url": "", "error": f"图片读不出来：{exc}"}
+
+    def artifact_stat(self, path: object) -> dict[str, object]:
+        """这张卡片第二行那句"多大 · 什么时候写的"。
+
+        只有路径的话那一格只能显示扩展名，而人挑文件靠的是"这是我刚那份吗"。
+        收束和读图同一道：不在软件自己产出的目录里就不给 —— 页面能问出任意一个
+        文件的大小和修改时间，听起来无害，实际是在探测用户装了什么。
+        """
+        where = self._artifact_here(path)
+        if where is None:
+            return {"ok": False, "size": 0, "mtime": 0, "error": "这个路径不是软件产出的文件"}
+        try:
+            info = where.stat()
+        except OSError as exc:
+            return {"ok": False, "size": 0, "mtime": 0, "error": f"读不到：{exc}"}
+        return {"ok": True, "size": info.st_size, "mtime": int(info.st_mtime), "error": ""}
 
     def copy_text(self, text: object) -> dict[str, object]:
         """复制一段文字。页面那条 navigator.clipboard 失败时的后手，也是语音路径的入口。"""

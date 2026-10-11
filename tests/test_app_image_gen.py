@@ -379,6 +379,49 @@ class TestProbe:
         assert "权重" in answer["error"] or "没报出" in answer["error"]
 
 
+class TestChineseBecomesTags:
+    """中文那句"画什么"要变成引擎听得懂的英文标签 —— 这一层是纯函数，不碰引擎。
+
+    钉的不是"翻得漂亮"，是三条会 regress 的形状：**没有中文就一个字都不许动**
+    （对话里模型已经扩写过的英文再被这层改一次就是灾难）、颜色要贴着主体、
+    认不出的词要**说出来**而不是静默丢掉。
+    """
+
+    def test_an_english_prompt_is_not_touched(self) -> None:
+        from jarvis.app.image_prompt import expand
+
+        said = "green goblin, green skin, dark forest, moonlight"
+        assert expand(said).prompt == said, "模型扩写过的英文再被改一次，就是外行指导内行"
+
+    def test_the_color_sits_in_front_of_the_subject(self) -> None:
+        from jarvis.app.image_prompt import expand
+
+        answer = expand("画一个绿色瘦弱的哥布林")
+        # 最后那三个词是量出来的：属性带着主体再说一遍，中心绿 0.52 / 外圈 0.17；
+        # 只写 "thin" 的那一组是 0.05~0.16，和不带主体的没有区别。
+        assert answer.prompt == "green goblin, green skin, thin goblin"
+        assert answer.unknown == ()
+
+    def test_words_the_table_does_not_know_are_said_out_loud(self) -> None:
+        from jarvis.app.image_prompt import expand
+
+        answer = expand("画一只喷火的麒麟兽")
+        assert "qilin" in answer.prompt
+        assert answer.unknown, "认不出来却不说 = 用户以为引擎听见了"
+        assert "没翻出来" in answer.note
+
+    def test_a_sentence_nothing_matches_is_left_alone(self) -> None:
+        from jarvis.app.image_prompt import expand
+
+        assert expand("这张不画").prompt == "这张不画", "一个词都没认出来时不许拼半句英文糊弄"
+
+    def test_measure_words_do_not_become_part_of_the_picture(self) -> None:
+        from jarvis.app.image_prompt import expand
+
+        assert "画" not in expand("帮我画一张壁纸").prompt
+        assert "wallpaper" in expand("帮我画一张壁纸").prompt
+
+
 class TestLocalGenerate:
     """工作流发出去的那张图，和拿回来的那个文件。"""
 
@@ -388,7 +431,9 @@ class TestLocalGenerate:
         assert answer["ok"] is True, answer["error"]
         got = hub.engine.submitted
         assert got["checkpoint"] == "anythingV3_fp16.safetensors"
-        assert got["positive"] == "一只橘猫"
+        # SD1.5 的编码器只认英文标签：中文原话送进去等于没说话（r105 实拍那个动漫美女）。
+        assert got["positive"] == "orange cat, orange skin"
+        assert answer["prompt_input"] == "一只橘猫", "原话必须留着，面板要说清引擎听见了什么"
         assert got["latent"] == {"width": 512, "height": 512, "batch_size": 1}
         assert got["steps"] == 18
         assert got["node_count"] == 7, "节点少了就是工作流拼错，不是引擎的锅"
@@ -626,7 +671,7 @@ class TestTheToolLayer:
         hub.use_local()
         words = self._handlers(hub.service)["generate_image"]({"prompt": "一只橘猫"})
         assert "画好了" in words
-        assert hub.engine.submitted["positive"] == "一只橘猫"
+        assert hub.engine.submitted["positive"] == "orange cat, orange skin"
         assert hub.service.status()["last_path"] in words, "回话里没给路径，用户不知道图去哪了"
         for needle in ("512x512", "本地 ComfyUI", "秒", "种子"):
             assert needle in words, f"回话缺了 {needle}：用户下一句就要问它"
@@ -800,9 +845,10 @@ class TestRoutingAndBridge:
         bridge = HudBridge.__new__(HudBridge)
         bridge._images = hub.service
         hub.use_local()
-        answer = bridge.image_generate("桥这一侧的一句描述", "512x512")
+        answer = bridge.image_generate("画一只蓝色的鸟", "512x512")
         assert answer["ok"] is True, answer["error"]
-        assert hub.engine.submitted["positive"] == "桥这一侧的一句描述"
+        assert hub.engine.submitted["positive"] == "blue bird, blue skin"
+        assert answer["prompt_input"] == "画一只蓝色的鸟"
         state = bridge.image_tune("local", "768x768", 24)
         assert state["size"] == "768x768" and state["steps"] == 24 and state["error"] == ""
         bad = bridge.image_tune("nonsense", "512x512", 20)

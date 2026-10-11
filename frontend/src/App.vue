@@ -160,6 +160,11 @@
       :seconds-ago="store.network.seconds_ago"
       @close="store.dismissOffline()"
     />
+    <!--
+      右键菜单在**所有**层的最后：它要能盖过正开着的任何一张弹窗（z-index 60 > 40），
+      而打包版那扇 WebView2 把原生右键菜单关了 —— 不自己做一个，右键就是"鼠标没反应"。
+    -->
+    <ContextMenu />
   </div>
 </template>
 
@@ -190,6 +195,7 @@ import MobileAccessPopup from '@/components/MobileAccessPopup.vue'
 import MirrorPopup from '@/components/MirrorPopup.vue'
 import ImagePopup from '@/components/ImagePopup.vue'
 import OfflineNotice from '@/components/OfflineNotice.vue'
+import ContextMenu from '@/components/ContextMenu.vue'
 import ProcessPanel from '@/components/ProcessPanel.vue'
 import SettingsPanel from '@/components/SettingsPanel.vue'
 import TopBar from '@/components/TopBar.vue'

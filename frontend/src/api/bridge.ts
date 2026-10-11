@@ -540,6 +540,13 @@ export interface ImageAnswer {
   /** 实际走了哪条：``local`` | ``cloud``。空串是没画成。 */
   engine: string
   prompt: string
+  /**
+   * 用户/模型**原来说的那一句**。服务端会把中文展开成英文标签（SD1.5 的编码器只认英文），
+   * `prompt` 是展开之后的，这一格是之前的 —— 面板两样都要显示，悄悄改写就是假能力。
+   */
+  prompt_input: string
+  /** 展开时词典没覆盖到的那几个词，一句人话；空串 = 全都认出来了。 */
+  prompt_note: string
   size: string
   steps: number
   seed: number
@@ -868,6 +875,15 @@ export interface ToolReport {
 export interface ArtifactPicture {
   ok: boolean
   data_url: string
+  error: string
+}
+
+/** ``artifact_stat`` 那一格：附件卡片第二行"多大 · 什么时候写的"。 */
+export interface ArtifactStat {
+  ok: boolean
+  size: number
+  /** epoch 秒；0 = 没读到。 */
+  mtime: number
   error: string
 }
 
@@ -1808,6 +1824,7 @@ interface PywebviewApi {
   // 形参名照投屏那条禁令一样避开 window/promise/arguments —— 这些名字是 pywebview 生成
   // new Function 时会被遮蔽掉的内部标识符，占了名字这一扇门在打包版里根本调不动。
   artifact_read(path: string): Promise<ArtifactPicture>
+  artifact_stat(path: string): Promise<ArtifactStat>
   copy_text(text: string): Promise<ActionResult>
   copy_image(path: string): Promise<ActionResult>
   open_artifact(path: string, how: string): Promise<ActionResult>
@@ -2208,6 +2225,8 @@ function mockImageFail(message: string): ImageAnswer {
     path: '',
     engine: '',
     prompt: '',
+    prompt_input: '',
+    prompt_note: '',
     size: '',
     steps: 0,
     seed: 0,
@@ -2231,6 +2250,8 @@ const mockImageAnswer = (prompt: string): ImageAnswer => {
     path: mockImage.last_path,
     engine: 'cloud',
     prompt,
+    prompt_input: prompt,
+    prompt_note: '',
     size,
     steps: mockImage.steps,
     seed: mockImageSeed,
@@ -2630,6 +2651,12 @@ const mock: PywebviewApi = {
       }
     }
     return { ok: false, data_url: '', error: '预览里没有文件可读（桌面版只认软件自己产出的那几个目录）' }
+  },
+  async artifact_stat(path) {
+    // 预览这一侧没有盘可 stat。返回 ok:false + 一句原因，界面就退回显示扩展名 ——
+    // 不许编一个"12 KB · 刚才"出来，那正是这个项目反复为它付账的那种假。
+    if (!String(path || '').trim()) return { ok: false, size: 0, mtime: 0, error: '没有路径' }
+    return { ok: false, size: 0, mtime: 0, error: '预览里没有文件可问' }
   },
   async copy_text(text) {
     const body = String(text || '')
@@ -5131,6 +5158,10 @@ export function artifactRead(path: string): Promise<ArtifactPicture> {
  * 顺序是**先试** `api/clipboard.ts` 那条浏览器自己的路，它报了 `failed` 才走到这里；
  * 两边都说没成，屏上就得写着没成，而不是让按钮按下去什么都没发生。
  */
+export function artifactStat(path: string): Promise<ArtifactStat> {
+  return bridge().then((target) => target.artifact_stat(path))
+}
+
 export function copyTextViaBridge(text: string): Promise<ActionResult> {
   return bridge().then((target) => target.copy_text(text))
 }
