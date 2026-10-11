@@ -16,7 +16,7 @@ import os
 import shutil
 import socket
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, cast
@@ -26,6 +26,7 @@ from urllib.request import urlopen
 import pytest
 
 from jarvis.app import image_gen
+from jarvis.app.chat_service import ChatService
 from jarvis.app.image_gen import (
     IMAGE_KEY_ENV,
     ImageService,
@@ -42,7 +43,12 @@ from jarvis.app.preferences import (
 )
 from jarvis.app.tool_routing import PACKS, classify_tool_intent
 from jarvis.config.paths import AppPaths
+from jarvis.config.schema import ToolsSection
+from jarvis.llm.types import ChatMessage, ChatResponse, GenerationOptions, ToolCall
 from jarvis.tools.builtins import image_tools
+from jarvis.tools.disk_cleaner import DiskCleaner
+from jarvis.tools.monitor import SystemMonitor
+from jarvis.tools.service import ToolService
 
 #: 96x96 的一张真 PNG，不是 1x1 占位：预览那条路要真的缩一次图才算走过。
 _PROXY_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
@@ -645,6 +651,117 @@ class TestTheToolLayer:
         hub.use_local()
         text = self._handlers(hub.service)["image_status"]({})
         assert "本地引擎" in text and "云端" in text and "尺寸" in text
+
+
+def _tools_section() -> ToolsSection:
+    return ToolsSection.from_mapping(
+        {
+            "enabled": True,
+            "confirm_dangerous": True,
+            "allow_write": False,
+            "allow_shell": False,
+            "file_roots": [],
+            "max_result_chars": 8000,
+        }
+    )
+
+
+class TestThroughTheChatDoor:
+    """手册里挂了几轮的那条：「没有真让某个模型调一次」。
+
+    这里只假在模型那一下，其余全是真的 —— ``ChatService`` 走真分发、注册表真校验参数、
+    ``ImageService`` 真对一个开在端口上的假 ComfyUI 提交工作流、PNG 真落到盘上。
+    判据是 ``reply.tools_used`` 里有 ``generate_image``，以及回话里那个路径**确实在盘上**。
+    """
+
+    def _service(self, hub: Harness) -> ToolService:
+        service = ToolService(
+            _tools_section,
+            monitor_factory=lambda: SystemMonitor(top_processes=0),
+            cleaner_factory=lambda: DiskCleaner(hub.paths.audit_dir / "deletions.jsonl"),
+            images=hub.service,
+        )
+        service.start()
+        return service
+
+    def test_one_sentence_becomes_a_file_on_disk(self, hub: Harness) -> None:
+        hub.use_local()
+        service = self._service(hub)
+        try:
+            assert "generate_image" in [
+                spec.name for spec in service.specs()
+            ], "引擎在跑，工具却没上注册表"
+            chat = ChatService(
+                lambda: _AsksForAPicture(), tool_provider=lambda: service, session_id="t"
+            )
+            chat.start()
+            reply = chat.ask("给我画一只在月光下的橘猫")
+            assert reply.error == "", reply.error
+            assert "generate_image" in reply.tools_used
+            path = Path(str(hub.service.status()["last_path"]))
+            assert path.is_file(), f"回话说画好了，盘上却没有：{path}"
+            assert path.read_bytes()[:4] == b"\x89PNG", "落盘的不是 PNG"
+            assert str(path) in reply.answer, "回话里没带路径，用户不知道去哪看图"
+        finally:
+            service.stop()
+
+    def test_no_engine_means_the_chat_door_has_nothing_to_offer(self, hub: Harness) -> None:
+        """引擎不在的时候这一条不能出现在她递给模型的清单里（假能力比没能力坏）。"""
+        hub.prefs.set(IMAGE_ENGINE, "cloud")
+        hub.prefs.set(IMAGE_CLOUD_BASE, "")
+        service = self._service(hub)
+        try:
+            assert "generate_image" not in [spec.name for spec in service.specs()]
+        finally:
+            service.stop()
+
+
+class _AsksForAPicture:
+    """第一轮调 ``generate_image``，第二轮把工具给的那句话原样说完。
+
+    第二轮是从 ``messages[-1].content`` 里读结果的 —— 那条断言就是"真接线"的证据：
+    参数校验、注册表、引擎任何一环没对上，这里都会拿到一句不像话的回话而红。
+    """
+
+    provider_name = "fake"
+    model = "fake"
+
+    def __init__(self) -> None:
+        self._round = 0
+
+    def complete(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        options: GenerationOptions | None = None,
+    ) -> ChatResponse:
+        del options
+        self._round += 1
+        if self._round == 1:
+            return ChatResponse(
+                content="",
+                model="fake",
+                tool_calls=(
+                    ToolCall(
+                        id="c1",
+                        name="generate_image",
+                        arguments='{"prompt": "一只在月光下的橘猫"}',
+                    ),
+                ),
+            )
+        evidence = messages[-1].content
+        if "画好了" not in evidence:
+            raise AssertionError(f"工具没把结果交回来：{evidence!r}")
+        return ChatResponse(content=evidence, model="fake")
+
+    def stream(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        options: GenerationOptions | None = None,
+    ) -> Any:
+        del messages, options
+        raise AssertionError("这条测试走的是 complete")
 
 
 class TestRoutingAndBridge:

@@ -96,6 +96,11 @@ class BarWindow(Protocol):
 
     def present(self, data_url: str) -> bool: ...
 
+    @property
+    def painted(self) -> bool:
+        """屏上有没有这一块画面。``present`` 说"收下了"，这个说"落下了"。"""
+        ...
+
     def set_hot_spots(self, buttons: Sequence[BubbleButton]) -> None: ...
 
     def set_visible(self, visible: bool) -> None: ...
@@ -438,7 +443,10 @@ class MirrorControlBar:
             return False
         # 不点穿：这一条上的每一格都是要点的。
         window.set_click_through(False)
-        window.set_visible(False)
+        # 这里**不能** set_visible(False)：一帧都没合成过的分层窗被 SW_HIDE 之后，
+        # UpdateLayeredWindow 对这扇窗永远返回 0（重上样式位、换 ShowWindow 码都救不回来，
+        # 只能重建窗口）—— 屏上就是一条"窗在、置顶、按钮在、一个像素都没有"的幽灵。
+        # 起窗时它已经在 OFF_SCREEN 外面了，那才是本项目里"藏起来"的正确做法。
         self._window = window
         self._thread = threading.Thread(target=self._loop, name="jarvis-mirror-bar", daemon=True)
         self._thread.start()
@@ -489,12 +497,15 @@ class MirrorControlBar:
         note = bar_note(status, self._last, time.time())
         inks = self._palette()
         fingerprint = f"{len(self._actions)}|{note}|{inks.fill}"
-        if fingerprint != self._painted:
+        if fingerprint != self._painted or not window.painted:
+            # 后半句是这条链的命：窗口还没在屏上落下任何一个像素，就得重画一次。
+            # 只比指纹的话，"第一次合成失败"会永久定格成一条看不见的窗（r103 实拍）。
             url, _, _ = build_bar(self._actions, note, inks)
             if window.present(url):
                 window.set_hot_spots(hot_spots(self._actions))
                 self._painted = fingerprint
         if not self._shown:
+            # 第一次要露脸：窗口一直在那儿，只是停在屏幕外，挪进来就看得见。
             window.set_visible(True)
             self._shown = True
         if self._docked is not None and window.rect[:2] != self._docked:
@@ -507,9 +518,11 @@ class MirrorControlBar:
         window.keep_topmost()
 
     def _hide(self, window: BarWindow) -> None:
-        if self._shown:
-            window.set_visible(False)
-            self._shown = False
+        """收起来 = 挪回屏幕外，不是 ``ShowWindow(SW_HIDE)``（理由见 start 里那段）。"""
+        if window.rect[:2] != (OFF_SCREEN, OFF_SCREEN):
+            window.move_to(OFF_SCREEN, OFF_SCREEN)
+        self._docked = None
+        self._shown = False
 
     # ------------------------------------------------------------------
     # 那一下

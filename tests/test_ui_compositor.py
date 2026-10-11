@@ -43,6 +43,36 @@ LONG_ANSWER = "好的，现在给你说说今天的安排：上午十点有一�
 """A three-line answer, used wherever the card has to reach its ceiling."""
 
 
+class TestFramesThatFailToLand:
+    """合成失败的那一拍不许把帧吃掉 —— 投屏控制条"窗在、按钮在、屏上什么都没有"就是这么来的。
+
+    ``UpdateLayeredWindow`` 在窗口藏着的时候返回 0（这块桌面上实测过），所以"帧收下了"
+    和"画上屏了"是两件事。以前 ``_paint_pending`` 先把帧从槽里取走再合成，失败就等于永久
+    丢掉那一帧；调用方只比指纹，指纹没变就不会再交第二遍。
+    """
+
+    def test_a_hidden_window_does_not_even_take_the_frame(self, monkeypatch: Any) -> None:
+        win = AlphaWindow(class_name="XiaoYeTestHiddenFrame")
+        frame = (bytes(range(16)), 2, 2)
+        win._frame = frame
+        built: list[tuple[int, int]] = []
+        # 判据不能只看"帧还在不在"：取走之后失败又还回来，看起来一模一样（变异就这么活的）。
+        # 藏着的那一拍必须连位图都不建 —— 那一次合成注定失败。
+        monkeypatch.setattr(win, "_build_bitmap", lambda w, h: built.append((w, h)))
+        win.set_visible(False)
+        win._paint_pending(0)
+        assert win._frame == frame, "藏着的时候别把帧取走"
+        assert built == [], f"藏着的时候连位图都不该建，却建了 {built}"
+
+    def test_a_frame_that_failed_to_composite_is_put_back(self) -> None:
+        win = AlphaWindow(class_name="XiaoYeTestFailedFrame")
+        frame = (bytes(range(16)), 2, 2)
+        win._frame = frame
+        win._paint_pending(0)  # 没有真窗口：这一次合成必失败
+        assert win._frame == frame, "没落地的帧要还回去，下一拍再试"
+        assert win.painted is False, "present 交出去不算画上去了"
+
+
 class TestHitTest:
     def test_the_patch_the_page_drew_is_the_patch_that_clicks(self) -> None:
         assert in_rect(RECT, 300, 50, 420, 640)

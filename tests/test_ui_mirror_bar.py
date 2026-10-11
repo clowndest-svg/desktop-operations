@@ -46,6 +46,8 @@ class FakeWindow:
         self.topmost = 0
         self.click_through: bool | None = None
         self.alive = True
+        # 默认"已经画上去了"，这样下面那些测指纹/停靠的用例不会被重画的分支干扰。
+        self.painted = True
 
     def start(self, **kwargs: Any) -> bool:
         self.rect = (kwargs["x"], kwargs["y"], kwargs["width"], kwargs["height"])
@@ -113,11 +115,14 @@ def build(mirror: FakeMirror, window: FakeWindow, rect: Any = MIRROR) -> mb.Mirr
 
 
 class TestDocking:
-    def test_it_stays_hidden_while_nothing_is_mirrored(self) -> None:
+    def test_it_stays_off_screen_while_nothing_is_mirrored(self) -> None:
         window = FakeWindow()
         bar = build(FakeMirror(phase="off"), window)
         bar.refresh()
-        assert True not in window.shown, "没投屏就摆一条没有归属的按钮在桌面上"
+        assert window.rect[:2] == (
+            mb.OFF_SCREEN,
+            mb.OFF_SCREEN,
+        ), "没投屏就摆一条没有归属的按钮在桌面上"
         assert window.frames == []
 
     def test_it_docks_under_the_picture(self) -> None:
@@ -167,7 +172,7 @@ class TestDocking:
         assert window.moved[-1] == (1061, 930)
         assert window.rect[:2] == (1061, 930)
 
-    def test_it_hides_when_the_picture_window_disappears(self) -> None:
+    def test_it_parks_off_screen_when_the_picture_window_disappears(self) -> None:
         window = FakeWindow()
         seen: list[tuple[int, int, int, int] | None] = [MIRROR]
         bar = mb.MirrorControlBar(
@@ -176,9 +181,28 @@ class TestDocking:
         assert bar.start() is True
         bar.refresh()
         assert window.shown[-1] is True
+        assert window.rect[:2] != (mb.OFF_SCREEN, mb.OFF_SCREEN)
         seen[0] = None  # 投屏窗口被用户关了
         bar.refresh()
-        assert window.shown[-1] is False
+        assert window.rect[:2] == (mb.OFF_SCREEN, mb.OFF_SCREEN), "收回去要挪出屏幕，不是 SW_HIDE"
+
+    def test_it_never_hides_its_own_window(self) -> None:
+        """一帧都没合成过的分层窗被 ``SW_HIDE`` 之后就永远画不上了（这块桌面上实测过：
+        藏→显之后 ``UpdateLayeredWindow`` 一直返回 0，重上样式位、换 ShowWindow 码都救不回来，
+        只能重建窗口）。所以整条生命周期里都不许出现 ``set_visible(False)``。"""
+        window = FakeWindow()
+        seen: list[tuple[int, int, int, int] | None] = [MIRROR]
+        bar = mb.MirrorControlBar(
+            FakeMirror(), mirror_rect=lambda: seen[0], work_area=lambda _m: WORK, window=window
+        )
+        bar.start()
+        bar.refresh()
+        seen[0] = None
+        bar.refresh()
+        seen[0] = MIRROR
+        bar.refresh()
+        assert False not in window.shown, f"藏过一次就再也画不上了：{window.shown}"
+        assert window.painted is True
 
     def test_it_flips_above_when_there_is_no_room_below(self) -> None:
         assert mb.dock_origin((100, 200, 640, 1000), 418, 84, WORK) == (161, 106)
@@ -194,6 +218,29 @@ class TestDocking:
 
     def test_a_picture_on_the_second_monitor_stays_on_that_monitor(self) -> None:
         assert mb.dock_origin((2000, 100, 2400, 900), 418, 84, (1920, 0, 3840, 1080)) == (1991, 910)
+
+
+class TestAFrameThatNeverLands:
+    """r103 实拍：条子的窗在、置顶、七颗按钮都在，屏上一个像素都没有。
+
+    两层凑出来的：窗口还藏着的时候 ``UpdateLayeredWindow`` 会失败（实测返回 0），
+    而合成那一拍已经把帧从槽里取走了；条子这边只比"指纹变没变"，没变就不再画第二遍
+    —— 一次失败就此定格成一条透明的窗。所以判据必须是"落下没有"，不是"交出去没有"。
+    """
+
+    def test_it_keeps_redrawing_until_the_picture_lands(self) -> None:
+        window = FakeWindow()
+        window.painted = False
+        bar = build(FakeMirror(), window)
+        bar.refresh()
+        first = len(window.frames)
+        bar.refresh()
+        assert len(window.frames) > first, "屏上什么都没落下，就该再画一遍"
+        window.painted = True
+        settled = len(window.frames)
+        bar.refresh()
+        bar.refresh()
+        assert len(window.frames) == settled, "落下之后别每帧重画"
 
 
 class TestPressing:

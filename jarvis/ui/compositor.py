@@ -990,6 +990,10 @@ class AlphaWindow:
         # site discards it: a tap is a tap.
         self._on_tap = on_tap
         self._painted = False
+        # 窗口此刻在不在屏上。藏起来的时候 UpdateLayeredWindow 会**失败**（实测返回 0），
+        # 所以那一拍根本不该去取帧 —— 取走了又没落地，画面就永久丢了
+        # （投屏控制条"窗在、按钮在、屏上什么都没有"就是这么来的）。
+        self._visible = True
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -1027,6 +1031,16 @@ class AlphaWindow:
     @property
     def alive(self) -> bool:
         return bool(self._hwnd) and not self._stop.is_set()
+
+    @property
+    def painted(self) -> bool:
+        """屏上此刻到底有没有这一块画面（合成成功过一次才算）。
+
+        调用方拿这个判断"要不要再画一遍"：``present()`` 返回 True 只说明帧收下了，
+        不说明它落到了屏上 —— 这两件事在投屏控制条上第一次被混为一谈，结果是一条
+        存在、置顶、有按钮、但一个像素都没画的透明窗。
+        """
+        return self._surface is not None
 
     # ------------------------------------------------------------------
     # Frames
@@ -1111,6 +1125,7 @@ class AlphaWindow:
         return False
 
     def set_visible(self, visible: bool) -> None:
+        self._visible = visible
         if not self._hwnd:
             return
         # SW_SHOWNOACTIVATE (4), never SW_SHOW (5): the second one activates the window,
@@ -1385,6 +1400,10 @@ class AlphaWindow:
     # ------------------------------------------------------------------
 
     def _paint_pending(self, hwnd: int) -> None:  # pragma: no cover - needs a real window
+        if not self._visible:
+            # 帧留着不动：显出来的那一刻下一拍（80 Hz）就画上。藏着的这一拍去取只会把
+            # 画面消费在一次注定失败的合成里。
+            return
         with self._lock:
             frame = self._frame
             self._frame = None
@@ -1418,12 +1437,28 @@ class AlphaWindow:
                 ULW_ALPHA,
             )
         )
+        # 错误码要在这儿取，晚一步就被别的调用冲掉了。
+        failure = 0 if ok else ctypes.windll.kernel32.GetLastError()
         _USER32.ReleaseDC(0, screen)
         if ok:
             # Only a frame that actually landed is evidence about where she is: the
             # pointer hit test reads these pixels, and a stale copy would answer for
             # a pose the operator cannot see.
             self._surface = frame
+        else:
+            # 没落地就不是"画过了"。把帧还回去，下一拍再试一次 —— 一次失败的合成
+            # 不该换来一个永久的空窗（那是"窗口在、按钮在、屏上什么都没有"那种 bug）。
+            with self._lock:
+                self._frame = frame
+            logger.debug(
+                "合成没落地：错误码 %s，目标 %sx%s，尺寸 %sx%s，窗口 %s",
+                failure,
+                destination.x,
+                destination.y,
+                width,
+                height,
+                hwnd,
+            )
         if not self._painted:
             self._painted = True
             logger.info(
