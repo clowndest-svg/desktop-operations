@@ -13,6 +13,9 @@ import urllib.error
 import urllib.request
 from collections.abc import Mapping
 
+from jarvis.core.constants import USER_AGENT
+from jarvis.llm.transport import open_request
+
 __all__ = ["list_endpoint_models"]
 
 
@@ -25,7 +28,7 @@ def _get_json(url: str, *, timeout: float, headers: Mapping[str, str]) -> tuple[
     """
     request = urllib.request.Request(url, headers=dict(headers), method="GET")
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with open_request(request, timeout=timeout) as response:
             status = int(getattr(response, "status", 200) or 200)
             body = response.read()
     except urllib.error.HTTPError as exc:  # a refusal is an answer, not a crash
@@ -52,7 +55,10 @@ def list_endpoint_models(
     "这一家要钥匙才肯列模型" send the operator to different places.
     """
     url = base_url.rstrip("/") + "/models"
-    headers = {"Accept": "application/json"}
+    # Same reason as the chat transport: the stdlib default UA gets a Cloudflare-fronted
+    # gateway to answer 403 "error code: 1010", and this call is the one the settings
+    # panel makes *before* anything is saved.
+    headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     try:

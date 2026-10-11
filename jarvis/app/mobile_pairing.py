@@ -203,7 +203,12 @@ class PairingVault:
                 token_digest=_digest(token),
             )
             self._devices[device.device_id] = device
-            self._save_locked()
+            try:
+                self._save_locked()
+            except OSError:
+                self._devices.pop(device.device_id, None)
+                logger.error("pairing refused: device could not be persisted")
+                return None
         logger.info("paired device %s (%s)", device.device_id, device.name)
         return token
 
@@ -239,7 +244,11 @@ class PairingVault:
             if device is None or now - device.last_seen < 300.0:
                 return
             self._devices[device_id] = replace(device, last_seen=now)
-            self._save_locked()
+            try:
+                self._save_locked()
+            except OSError:
+                self._devices[device_id] = device
+                logger.warning("could not persist device activity")
 
     # -- device list -----------------------------------------------------
 
@@ -254,9 +263,15 @@ class PairingVault:
         """Cut one device off. Its token stops validating on the next request."""
         with self._lock:
             self._load_locked()
-            if self._devices.pop(str(device_id), None) is None:
+            removed = self._devices.pop(str(device_id), None)
+            if removed is None:
                 return False
-            self._save_locked()
+            try:
+                self._save_locked()
+            except OSError:
+                self._devices[removed.device_id] = removed
+                logger.error("revocation failed: device store was not updated")
+                return False
         logger.info("revoked device %s", device_id)
         return True
 
@@ -264,11 +279,17 @@ class PairingVault:
         """Cut every device off — the answer to "my phone is gone"."""
         with self._lock:
             self._load_locked()
-            count = len(self._devices)
+            previous = dict(self._devices)
+            count = len(previous)
             self._devices.clear()
             self._pending = None
             if count:
-                self._save_locked()
+                try:
+                    self._save_locked()
+                except OSError:
+                    self._devices = previous
+                    logger.error("revocation failed: device store was not updated")
+                    return 0
         logger.info("revoked all %d devices", count)
         return count
 
@@ -310,7 +331,6 @@ class PairingVault:
                     "added_at": device.added_at,
                     "last_seen": device.last_seen,
                     "token_sha256": device.token_digest,
-                    "token": "leaked",
                 }
                 for device in sorted(self._devices.values(), key=lambda item: item.added_at)
             ],
@@ -328,6 +348,7 @@ class PairingVault:
             temporary.replace(self._path)
         except OSError:
             logger.exception("could not write the device store at %s", self._path)
+            raise
 
 
 def _row_to_device(row: object) -> Device | None:

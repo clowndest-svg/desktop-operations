@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 from collections.abc import Callable, Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
@@ -51,6 +53,27 @@ KEYWORD_WEIGHT: Final[float] = 0.5
 """Contribution of a full keyword match, mirroring ``memory``'s weighting so the
 two retrieval paths behave the same way when a user compares them."""
 
+_NOTE_UNSAFE = re.compile(r"[<>:\"/\\|?*\x00-\x1f]+")
+"""Everything Windows refuses in a filename -- both path separators included, because
+a title is model-authored text and 「C:/Users/…」 has to stay one filename."""
+
+_NOTE_TAIL = re.compile(r"[ .]+$")
+"""Trailing dots and spaces, which Windows silently drops and then confuses everybody."""
+
+
+def _note_stem(title: str) -> str:
+    """A filename for one note: readable, and not something the model can aim.
+
+    Chinese titles are kept as they are -- stripping non-ASCII would collapse every
+    note this program is asked to write onto the same empty name. What goes is the
+    illegal set. A short hash of the title rides along so two different titles that
+    clean down to the same characters still become two files, while the *same* title
+    keeps landing on the same file so 「更新那条笔记」 replaces rather than piles up.
+    """
+    safe = _NOTE_TAIL.sub("", _NOTE_UNSAFE.sub(" ", " ".join(title.split())).strip())
+    safe = safe[:80] or "笔记"
+    return f"{safe}-{hashlib.sha256(title.encode('utf-8')).hexdigest()[:8]}"
+
 
 class KnowledgeService:
     """The RAG knowledge base: ingest documents, retrieve evidence, answer."""
@@ -64,6 +87,7 @@ class KnowledgeService:
         settings_provider: Callable[[], KnowledgeSection],
         *,
         llm_provider: Callable[[], LlmClient] | None = None,
+        notes_dir: Path | None = None,
     ) -> None:
         """Create the service.
 
@@ -74,11 +98,15 @@ class KnowledgeService:
             llm_provider: Yields a chat client for :meth:`answer`. ``None``
                 leaves ingestion and retrieval fully working — a text-only
                 install still gets search, just not summarised answers.
+            notes_dir: Where :meth:`ingest_text` may write. ``None`` means this
+                install has nowhere to put a note of her own, and the method
+                refuses with that reason rather than writing somewhere unannounced.
         """
         self._store = store
         self._vector = vector
         self._settings_provider = settings_provider
         self._llm_provider = llm_provider
+        self._notes_dir = notes_dir
         self._repo = KnowledgeRepository(store)
         self._started = False
 
@@ -90,11 +118,32 @@ class KnowledgeService:
             return
         self._store.migrate(NAMESPACE, MIGRATIONS)
         self._started = True
+        self.repair_index()
         logger.info(
             "knowledge service ready (%d document(s), %d chunk(s))",
             self._repo.count_documents(),
             self._repo.count_chunks(),
         )
+
+    def repair_index(self) -> dict[str, int]:
+        """Drop vector records that no longer have a chunk row, and report the counts.
+
+        Runs at start-up because the orphans are already in existing users'
+        databases: every document that was ever re-ingested shorter, and every
+        document forgotten before this existed, left vectors behind that answer
+        searches with text nobody can see in the list any more. Cleaning them
+        deletes no user material -- documents and chunks are the record, the
+        vectors are derived from them.
+        """
+        if not self._started:
+            return {"checked": 0, "removed": 0}
+        ids = self._vector.record_ids(COLLECTION)
+        live = self._repo.existing_chunk_ids(ids)
+        dead = [record for record in ids if record not in live]
+        if dead:
+            self._vector.forget(COLLECTION, dead)
+            logger.warning("知识库里有 %d 条向量已经没有对应切片（旧版本残留），已清掉", len(dead))
+        return {"checked": len(ids), "removed": len(dead)}
 
     def stop(self) -> None:
         self._started = False
@@ -107,6 +156,16 @@ class KnowledgeService:
     def enabled(self) -> bool:
         """Whether the config allows ingestion and retrieval."""
         return self._settings_provider().enabled
+
+    @property
+    def notes_dir(self) -> Path | None:
+        """Where her own notes may be written, or ``None`` when this install has nowhere.
+
+        Read by the tool assembler: ``add_knowledge`` pointed at no directory can only
+        ever answer 「这台机器没给她留记笔记的地方」, which is the advertise-a-dead-end
+        mistake this project has already made twice with shell tools.
+        """
+        return self._notes_dir
 
     # -- ingestion ---------------------------------------------------------
 
@@ -177,6 +236,50 @@ class KnowledgeService:
             chunks=len(chunks),
             replaced=replaced,
         )
+
+    def ingest_text(self, title: str, text: str, *, source: str = "") -> IngestResult:
+        """Save one note she wrote herself and index it, so the corpus can grow by talking.
+
+        Why this exists: ``knowledge_search`` was the only knowledge tool and it is
+        read-only. Asked 「去查一下，回头记到你的资料里」 she could answer the question and
+        then had nowhere to put the answer — long-term memory holds one sentence *about*
+        a fact, not the page it came from. This is the write half, and it goes through
+        the same :meth:`ingest` a person triggers from the 加入知识库 button, so there is
+        one storage shape and one retrieval quality rather than a second-class one.
+
+        The file lands in ``notes_dir`` and nowhere else. Not under ``file_roots``:
+        a corpus she can rewrite by saving twice over is a corpus nobody can trust,
+        and 「记一下」 must not become a way to overwrite an imported manual.
+        """
+        if not self._started:
+            return self._failed("<笔记>", "知识库未启动")
+        if not self.enabled:
+            return self._failed("<笔记>", "知识库未启用（knowledge.enabled=false）")
+        if self._notes_dir is None:
+            return self._failed("<笔记>", "这台机器没给她留记笔记的地方（notes_dir 未注入）")
+        clean_title = " ".join(title.split())[:120] or "未命名"
+        body = text.strip()
+        if not body:
+            return self._failed(clean_title, "没有要存进知识库的内容")
+        path = self._notes_dir / f"{_note_stem(clean_title)}.md"
+        origin = source.strip()[:300] or "小夜自己记的"
+        page = "\n".join(
+            [
+                f"# {clean_title}",
+                "",
+                f"来源：{origin}",
+                f"记下时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                "",
+                body,
+            ]
+        )
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(page + "\n", encoding="utf-8")
+        except OSError as exc:
+            logger.warning("could not save note %s: %s", path, exc)
+            return self._failed(clean_title, f"笔记没能存下来（{type(exc).__name__}: {exc}）")
+        return self.ingest(path, force=True)
 
     def ingest_directory(
         self,
@@ -266,6 +369,17 @@ class KnowledgeService:
                 ),
             )
 
+        # Defence in depth, and the only thing that protects a database written by
+        # an older build: a hit whose chunk row is gone is deleted text, however
+        # well it matches.
+        live = self._repo.existing_chunk_ids(list(chunks))
+        dead = [key for key in list(chunks) if key not in live]
+        for key in dead:
+            chunks.pop(key, None)
+            scores.pop(key, None)
+        if dead:
+            logger.warning("检索剔除了 %d 条已经没有切片的旧向量命中", len(dead))
+
         ranked = sorted(chunks.values(), key=lambda chunk: scores[chunk.chunk_id], reverse=True)
         return [
             RetrievedChunk(
@@ -352,10 +466,12 @@ class KnowledgeService:
         """Remove a document, its chunks, and its vectors."""
         if not self._started:
             return False
-        chunk_ids = [str(row["chunk_id"]) for row in self._repo.chunks_of(doc_id)]
+        vector_ids = self._vector.record_ids(COLLECTION, metadata={"doc_id": doc_id})
+        chunks = self._repo.count_chunks(doc_id)
         removed = self._repo.delete_document(doc_id) > 0
-        if chunk_ids:
-            self._vector.forget(COLLECTION, chunk_ids)
+        if vector_ids:
+            self._vector.forget(COLLECTION, vector_ids)
+        logger.info("forgot %s: %d chunk(s), %d vector record(s)", doc_id, chunks, len(vector_ids))
         return removed
 
     def forget_all(self) -> int:
@@ -405,7 +521,12 @@ class KnowledgeService:
         # Drop the previous version's vectors first: the chunk ids are stable,
         # but a shorter new version would otherwise leave orphans behind that
         # still match queries and cite text that no longer exists.
-        self._vector.forget(COLLECTION, [chunk.chunk_id for chunk in chunks])
+        # Drop *everything this document ever indexed*, not just the chunks about to
+        # be written: a shorter new version has no chunk #4 to name the old chunk #4,
+        # and that orphan kept answering queries with deleted text.
+        stale = self._vector.record_ids(COLLECTION, metadata={"doc_id": document.doc_id})
+        if stale:
+            self._vector.forget(COLLECTION, stale)
         try:
             self._vector.index(
                 COLLECTION,

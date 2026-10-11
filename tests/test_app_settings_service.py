@@ -11,11 +11,14 @@ from __future__ import annotations
 import logging
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from jarvis.__main__ import _tuning_reader
 from jarvis.app.alerts import AlertService
+from jarvis.app.chat_service import ConversationTuning
 from jarvis.app.preferences import (
     LLM_BASE_URL,
     LLM_HIDDEN,
@@ -933,6 +936,132 @@ class TestAddedModelsSurviveARestart:
         assert restarted.selected_pair() == ("alpha", "alpha-1")
 
 
+class TestOneNewProviderCanCarrySeveralModels:
+    """用户报的第二条：添加那里只能填一个模型，可「看看它有哪些模型」拉回来的是好几个。
+
+    旧表单逼人一屏一次存一家，然后回到那一行里逐个再加 —— 三个模型就是三轮。
+    这里钉的是：清单能一次存进去、第一个当起始、重启还在、重名折叠、坏名字说得出是哪一个。
+    """
+
+    @staticmethod
+    def _restart(tmp_path: Path, env: dict[str, str]) -> SettingsService:
+        service, _, _ = _service(Preferences(tmp_path / "preferences.json"), env)
+        service.start()
+        return service
+
+    def test_a_draft_carrying_a_list_stores_every_model_in_it(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        service, fake_llm, _ = _service(prefs, env)
+
+        outcome = service.apply(
+            {
+                "add_model": {
+                    "name": "family",
+                    "base_url": "https://f.example/v1",
+                    "models": ["f-max", {"id": "f-mini", "label": "F Mini"}],
+                }
+            }
+        )
+
+        assert outcome["problems"] == {}
+        row = next(item for item in outcome["models"] if item["name"] == "family")
+        assert [entry["id"] for entry in row["models"]] == ["f-max", "f-mini"]
+        assert row["default_model"] == "f-max"
+        assert fake_llm.override is not None
+        assert [spec.id for spec in fake_llm.override.providers["family"].models] == [
+            "f-max",
+            "f-mini",
+        ]
+
+    def test_those_models_are_still_there_after_a_restart(
+        self, prefs: Preferences, env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """写进去的是清单，读回来的也只能是清单 —— 存储形状一错，重启就退化成"当前那一个"。"""
+        service, _, _ = _service(prefs, env)
+        service.apply(
+            {
+                "add_model": {
+                    "name": "family",
+                    "base_url": "https://f.example/v1",
+                    "models": ["f-max", "f-mini"],
+                }
+            }
+        )
+
+        row = next(
+            item
+            for item in self._restart(tmp_path, env).snapshot()["models"]
+            if item["name"] == "family"
+        )
+
+        assert [entry["id"] for entry in row["models"]] == ["f-max", "f-mini"]
+        assert row["default_model"] == "f-max"
+
+    def test_the_same_name_clicked_twice_stores_it_once(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        """清单是点出来的，点两下是手滑，不是"我要存两份"。"""
+        service, _, _ = _service(prefs, env)
+
+        outcome = service.apply(
+            {
+                "add_model": {
+                    "name": "family",
+                    "base_url": "https://f.example/v1",
+                    "models": ["f-max", "f-max"],
+                }
+            }
+        )
+
+        row = next(item for item in outcome["models"] if item["name"] == "family")
+        assert [entry["id"] for entry in row["models"]] == ["f-max"]
+
+    def test_a_bad_name_in_the_list_says_which_one(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        service, _, _ = _service(prefs, env)
+
+        outcome = service.apply(
+            {
+                "add_model": {
+                    "name": "family",
+                    "base_url": "https://f.example/v1",
+                    "models": ["f-max", "bad name"],
+                }
+            }
+        )
+
+        why = outcome["problems"]["add_model"]
+        assert "bad name" in why
+        assert "family" not in {entry["name"] for entry in service.snapshot()["models"]}
+
+    def test_an_empty_list_is_refused_instead_of_storing_a_silent_row(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        service, _, _ = _service(prefs, env)
+
+        outcome = service.apply(
+            {"add_model": {"name": "family", "base_url": "https://f.example/v1", "models": []}}
+        )
+
+        assert "至少写一个模型名" in outcome["problems"]["add_model"]
+
+    def test_the_older_single_model_draft_still_adds(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        """手机、CLI 和上一版页面发的都是这一种；新字段不能把它挤掉。"""
+        service, _, _ = _service(prefs, env)
+
+        outcome = service.apply(
+            {"add_model": {"name": "solo", "base_url": "https://s.example/v1", "model": "s-1"}}
+        )
+
+        row = next(item for item in outcome["models"] if item["name"] == "solo")
+        assert [entry["id"] for entry in row["models"]] == ["s-1"]
+        assert row["default_model"] == "s-1"
+
+
 class TestProviderLevelChoices:
     """The chat header's two dropdowns: a provider, then one of its models."""
 
@@ -1117,8 +1246,16 @@ class TestModelTuning:
         service.set_tuning(thinking="low", turns=4)
         service.choose_model("alpha", "alpha-1")
 
-        assert service.tuning_for("alpha", "alpha-1") == {"thinking": "high", "turns": 20}
-        assert service.tuning_for("beta", "beta-1") == {"thinking": "low", "turns": 4}
+        assert _knobs(service, "alpha", "alpha-1") == {
+            "thinking": "high",
+            "turns": 20,
+            "tools": True,
+        }
+        assert _knobs(service, "beta", "beta-1") == {
+            "thinking": "low",
+            "turns": 4,
+            "tools": True,
+        }
 
     def test_switching_a_model_carries_its_own_pair_into_the_listing(
         self, prefs: Preferences, env: dict[str, str]
@@ -1178,7 +1315,9 @@ class TestModelTuning:
 
         assert outcome["ok"] is False
         assert outcome["error"]
-        assert outcome["thinking"] == "medium", "the refusal must not move the knob"
+        # 出厂那份是「不思考 / 2048」：没单独设过的模型跟的是最后一次改动那两个全局镜像，
+        # 而全新安装的镜像就是关（r85 之前这里固定回 "medium"，面板却显示未勾选）。
+        assert outcome["thinking"] == "off", "the refusal must not move the knob"
 
     def test_a_turn_count_outside_the_advertised_bounds_is_refused(
         self, prefs: Preferences, env: dict[str, str]
@@ -1209,7 +1348,11 @@ class TestModelTuning:
         prefs.set(LLM_TUNING, {"alpha\x00alpha-1": {"thinking": "banana", "turns": "many"}})
         service, _, _ = _service(prefs, env)
 
-        assert service.tuning_for("alpha", "alpha-1") == {"thinking": "medium", "turns": 10}
+        assert _knobs(service, "alpha", "alpha-1") == {
+            "thinking": "medium",
+            "turns": 10,
+            "tools": True,
+        }
 
 
 class TestEditingTheModelList:
@@ -1874,3 +2017,532 @@ class TestPerProviderTimeout:
         options = snapshot["thinking_loader_options"]
         assert {option["id"] for option in options} == set(snapshot["thinking_loader_choices"])
         assert all(option["label"] for option in options)
+
+
+class TestTakingTheToolsAwayFromOneNamedPair:
+    """本地模型那一轮之后要记住的是**它**，不是"界面当前那一对"。
+
+    会话可以钉在另一个模型上；按"当前"写就会把精简记到别人头上，然后操作员看见
+    一格自己没勾过的勾，而真正装不下的那一行下一轮还是要先失败一次。
+    """
+
+    def test_it_writes_the_named_pair_and_keeps_the_other_two_knobs(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        service, _, _ = _service(prefs, env)
+        service.set_tuning(thinking="high", turns=30)
+
+        answer = service.remember_tools("alpha", "alpha-1", False)
+
+        assert answer["ok"] is True
+        assert _knobs(service, "alpha", "alpha-1") == {
+            "thinking": "high",
+            "turns": 30,
+            "tools": False,
+        }
+
+    def test_it_survives_a_restart_because_it_was_written_in_its_own_shape(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        """第二次读要读回同一个形状 —— 这是 r60 那一课，别再犯。"""
+        service, _, _ = _service(prefs, env)
+        service.remember_tools("alpha", "alpha-1", False)
+
+        again, _, _ = _service(prefs, env)
+
+        assert again.tuning_for("alpha", "alpha-1")["tools"] is False
+
+    def test_a_pair_nobody_touched_still_carries_tools(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        """没说过就是带：这格存在之前每一轮都带着工具表，老记录不能反过来拿走她的手。"""
+        service, _, _ = _service(prefs, env)
+
+        assert service.tuning_for("alpha", "alpha-1")["tools"] is True
+
+    def test_turning_one_pair_lean_leaves_the_others_alone(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        service, _, _ = _service(prefs, env)
+        service.remember_tools("alpha", "alpha-1", False)
+
+        assert service.tuning_for("alpha", "alpha-2")["tools"] is True
+
+    def test_the_pair_named_is_the_pair_written_even_when_another_is_current(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        """当前是 alpha，刚 overflow 的是 beta：记住的必须是 beta。
+
+        按「当前」写是这一格最容易写错的地方 —— 界面看着没动，下一轮 beta 还是先撞一次
+        400，而 alpha 莫名其妙少了那双手。
+        """
+        service, _, _ = _service(prefs, env)
+        assert service.selected_pair()[0] == "alpha"
+
+        service.remember_tools("beta", "beta-1", False)
+
+        assert service.tuning_for("beta", "beta-1")["tools"] is False
+        assert service.tuning_for("alpha", "alpha-1")["tools"] is True
+
+
+def _knobs(service: SettingsService, provider: str, model: str) -> dict[str, object]:
+    """只取调用方真正据以行动的三格。
+
+    ``tuning_for`` 还带回档位、精确预算、有没有单独设过（r85 加的），整字典相等会把
+    这几格也钉死 —— 断言想说清的是"这一对的核心三格是什么"，而不是字典长什么样。
+    """
+    row = service.tuning_for(provider, model)
+    return {"thinking": row["thinking"], "turns": row["turns"], "tools": row["tools"]}
+
+
+def _with_local(section: LlmSection) -> LlmSection:
+    from dataclasses import replace
+
+    from jarvis.config.schema import ModelSpec, ProviderSection
+
+    local = ProviderSection(
+        name="local",
+        base_url="http://127.0.0.1:28181/v1",
+        models=(ModelSpec("qwen2.5-7b", "自带·Qwen2.5-7B（离线）"),),
+        default_model="qwen2.5-7b",
+        api_key_env="",
+        key_optional=True,
+        timeout_seconds=300.0,
+        cost_input_per_1m=0.0,
+        cost_output_per_1m=0.0,
+    )
+    providers = dict(section.providers)
+    providers["local"] = local
+    return replace(section, providers=providers)
+
+
+def test_the_bundled_model_is_the_default_only_when_it_can_run(
+    prefs: Preferences, env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A buyer without the 4.36 GB weights must still get answers.
+
+    The YAML keeps the cloud row as the configured default; ``local`` becomes the default
+    only while :func:`local_server.plan` says this machine can actually run it.
+    """
+    from jarvis.llm import local_server
+
+    service, _, _ = _service(prefs, env, section=_with_local(_section()))
+    monkeypatch.setattr(local_server, "plan", lambda: local_server.Plan(False, "没找到权重"))
+
+    assert service.selected_pair()[0] != local_server.LOCAL_PROVIDER
+
+    monkeypatch.setattr(local_server, "plan", lambda: local_server.Plan(True, "", None, None, 9000))
+
+    assert service.selected_pair()[0] == local_server.LOCAL_PROVIDER
+
+
+def test_the_bundled_provider_points_at_the_port_that_is_answering(
+    prefs: Preferences, env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The yaml port is a guess; the live one is what the child bound."""
+    from jarvis.llm import local_server
+
+    service, _, _ = _service(prefs, env, section=_with_local(_section()))
+    monkeypatch.setattr(local_server, "endpoint", lambda: "http://127.0.0.1:29555/v1")
+
+    rows = service.model_choices()["providers"]
+    local = next(row for row in rows if row["name"] == local_server.LOCAL_PROVIDER)
+
+    assert local["base_url"] == "http://127.0.0.1:29555/v1"
+
+
+class TestBundledModelDials:
+    """What the shipped offline model costs is the buyer's machine's business, so they dial it.
+
+    Every tier note these tests assert on is a measured number (see
+    ``jarvis.llm.local_server.MEASURED_RESIDENT_MB``); if one of them drifts, the screen
+    is quoting a figure nobody loaded.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_dial(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from jarvis.llm import local_server
+        from jarvis.llm.local_server import Tuning
+
+        monkeypatch.setattr(local_server, "_TUNING", Tuning())
+
+    def test_a_fresh_install_ships_this_machines_measured_shape(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        from jarvis.llm import local_server
+
+        service, _, _ = _service(prefs, env)
+        snap = service.snapshot()
+
+        assert snap["local_context"] == local_server.DEFAULT_CONTEXT == 4096
+        assert snap["local_idle_minutes"] == local_server.DEFAULT_IDLE_MINUTES == 10
+        assert snap["local_eager"] is False
+        assert snap["local_tool_table_tokens"] == local_server.TOOL_TABLE_TOKENS == 4702
+        assert snap["local_needs_free_mb"] == 5200
+        assert [row["id"] for row in snap["local_context_options"]] == [2048, 4096, 8192, 16384]
+        assert [row["id"] for row in snap["local_idle_options"]] == [0, 2, 5, 10, 30]
+        assert [row["needs_free_mb"] for row in snap["local_context_options"]] == [
+            5072,
+            5200,
+            5456,
+            5968,
+        ], "每一档的门槛要各带各的：下拉框不许拿上次保存的那个数说话"
+
+    def test_moving_the_window_moves_what_the_llm_layer_will_spawn(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        from jarvis.llm import local_server
+
+        service, _, _ = _service(prefs, env)
+
+        problems = service.apply({"local_context": 16384})["problems"]
+
+        assert problems == {}, problems
+        assert local_server.tuning().context == 16384
+        assert service.snapshot()["local_needs_free_mb"] > 5200
+
+    def test_a_window_off_the_ladder_is_refused_and_changes_nothing(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        from jarvis.llm import local_server
+
+        service, _, _ = _service(prefs, env)
+
+        answer = service.apply({"local_context": 5000})
+
+        assert "5000" in answer["problems"]["local_context"], answer
+        assert local_server.tuning().context == 4096, "被拒的值不许把口径带跑"
+
+    def test_a_stored_value_that_is_not_a_tier_falls_back_instead_of_crashing(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        from jarvis.app.preferences import LOCAL_CONTEXT
+
+        service, _, _ = _service(prefs, env)
+        prefs.set(LOCAL_CONTEXT, 999)
+
+        assert service.snapshot()["local_context"] == 4096
+
+    def test_zero_idle_minutes_means_keep_it_loaded(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        from jarvis.llm import local_server
+
+        service, _, _ = _service(prefs, env)
+
+        assert service.apply({"local_idle_minutes": 0})["problems"] == {}
+        assert local_server.tuning().idle_seconds == 0.0
+        assert service.snapshot()["local_idle_minutes"] == 0
+
+    def test_the_tier_note_quotes_measured_numbers_for_both_kinds_of_machine(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        service, _, _ = _service(prefs, env)
+
+        notes = {row["id"]: row["note"] for row in service.snapshot()["local_context_options"]}
+
+        # r88: 4096 no longer means "只回答、不动手". The full 4702-token table still does
+        # not fit, but the routed pack does, so the honest sentence is the split one.
+        assert "4.9 GB" in notes[4096]
+        assert "装不下 4702 token 的完整工具清单" in notes[4096]
+        assert "1606 token" in notes[4096] and "都能动手" in notes[4096]
+        assert "只回答、不动手" not in notes[4096]
+        assert "没显卡的机器约 4.5 GB" in notes[2048], "纯 CPU 那个数也要在，不然没显卡的买家被误导"
+        assert "动手" in notes[8192] and "动手" in notes[16384]
+        assert "没显卡的机器约 5.3 GB" in notes[16384]
+
+    def test_the_bundled_model_says_its_thinking_budget_does_nothing(
+        self, prefs: Preferences, env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """r90 measured it: 32/128/512/2048 all thought ~850 characters on llama.cpp.
+
+        The row used to claim the number could be verified against the reply's
+        thinking-token count. On the shipped runtime it can't be verified because it
+        is not applied, so the snapshot has to carry which of the two stories to tell.
+        """
+        from jarvis.llm import local_server
+
+        service, _, _ = _service(prefs, env)
+
+        assert service.snapshot()["thinking_budget_honored"] is True
+
+        # The provider in view comes from the config section's default, not a pref --
+        # so switching to 自带 means building the service against a local-default section.
+        bundled, _, _ = _service(prefs, env, section=_section(default_provider="local"))
+        monkeypatch.setattr(
+            local_server,
+            "selected_card",
+            lambda: SimpleNamespace(thinking=True, label="Qwen3-4B"),
+        )
+        assert bundled.snapshot()["thinking_budget_honored"] is False
+
+        # A bundled weight with no thinking mode at all (Qwen2.5) is a different case:
+        # there the field is not "ignored", it simply never applies to either provider.
+        monkeypatch.setattr(
+            local_server,
+            "selected_card",
+            lambda: SimpleNamespace(thinking=False, label="Qwen2.5-7B"),
+        )
+        assert bundled.snapshot()["thinking_budget_honored"] is True
+
+
+class TestTheDialIsAppliedAtBoot:
+    """A stored dial has to be live before the first status read, not after the panel opens."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_dial(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from jarvis.llm import local_server
+        from jarvis.llm.local_server import Tuning
+
+        monkeypatch.setattr(local_server, "_TUNING", Tuning())
+
+    def test_starting_the_app_pushes_the_stored_window_into_the_llm_layer(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        from jarvis.app.preferences import LOCAL_CONTEXT
+        from jarvis.llm import local_server
+
+        prefs.set(LOCAL_CONTEXT, 16384)
+        service, _, _ = _service(prefs, env)
+
+        service.start()
+
+        assert local_server.tuning().context == 16384
+        assert local_server.shared_server().status()["context"] == 16384
+
+
+class TestDisplayName:
+    """The name on the screen is the operator's, not the build's."""
+
+    def test_the_shipped_name_shows_until_somebody_changes_it(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        service, _, _ = _service(prefs, env)
+
+        assert service.display_name() == "小夜"
+        assert service.snapshot()["display_name_default"] == "小夜"
+
+    def test_a_new_name_reaches_every_surface_that_asks(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        service, _, _ = _service(prefs, env)
+
+        assert service.apply({"display_name": "阿明"})["problems"] == {}
+
+        assert service.display_name() == "阿明"
+        assert service.snapshot()["display_name"] == "阿明"
+
+    def test_empty_hands_the_shipped_name_back(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        service, _, _ = _service(prefs, env)
+        service.apply({"display_name": "阿明"})
+
+        assert service.apply({"display_name": "   "})["problems"] == {}
+        assert service.display_name() == "小夜"
+
+    def test_a_name_long_enough_to_be_a_sentence_is_cut(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        service, _, _ = _service(prefs, env)
+
+        service.apply({"display_name": "十二个字的名称刚刚好再多就溢出"})
+
+        assert len(service.display_name()) == service.snapshot()["display_name_max"] == 12
+
+
+def _shown(service: SettingsService) -> Any:
+    """把桌面版真正接线的那份 reader 收窄成"必须有值"。
+
+    ``_tuning_reader`` 的返回类型是 ``ConversationTuning | None``：拿不到就是 None，
+    而 None 传进断言里 mypy 会一路报 union-attr，真机上则是"屏上那格空白"。
+    """
+    reader = _tuning_reader(service)
+
+    def one(session: str, model: str) -> ConversationTuning:
+        row = reader(session, model)
+        assert row is not None, f"{session}/{model} 那一行读不到，接线断了"
+        return row
+
+    return one
+
+
+class TestThePanelAndTheHeaderAreOneKnob:
+    """r85：设置 → 思考与上下文 那三格，必须就是对话区那几格用的同一个值。
+
+    用户拍图问"这两个地方都有上下文配置不会冲突吧"。查下去发现比冲突更糟：面板那三格
+    写的是两个全局副本，而每次请求读的是**每一对模型自己那一行** ——
+    实测面板显示「未勾选 / 2048 / 10 轮」，请求却带着 4096 token 的思考预算；
+    在面板把轮数改成 2 并保存，发出去还是 10 轮。三格全是摆设。
+
+    这里的判据一律走桌面版真正接线的那份 `_tuning_reader`，不另写一份翻译。
+    """
+
+    def test_a_fresh_install_shows_what_a_request_will_carry(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        service, _, _ = _service(prefs, env)
+
+        snapshot = service.snapshot()
+        sent = _shown(service)("alpha", "alpha-1")
+
+        assert snapshot["thinking_enabled"] is sent.thinking.enabled
+        assert snapshot["thinking_budget"] == sent.thinking.budget
+        assert snapshot["history_turns"] == sent.history_turns
+        assert snapshot["tuning_pinned"] is False
+        assert snapshot["tuning_pair"] == "alpha · alpha-1"
+
+    def test_a_save_in_the_panel_is_what_the_next_request_uses(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        service, _, _ = _service(prefs, env)
+        reader = _shown(service)
+
+        assert service.apply({"history_turns": 2, "thinking_enabled": False})["problems"] == {}
+
+        sent = reader("alpha", "alpha-1")
+        assert sent.history_turns == 2
+        assert sent.thinking.enabled is False
+        snapshot = service.snapshot()
+        assert (snapshot["history_turns"], snapshot["thinking_enabled"]) == (2, False)
+        assert snapshot["tuning_pinned"] is True
+
+    def test_a_change_in_the_chat_header_shows_up_in_the_panel(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        service, _, _ = _service(prefs, env)
+
+        service.set_tuning(thinking="high", turns=4)
+
+        snapshot = service.snapshot()
+        assert snapshot["thinking_enabled"] is True
+        assert snapshot["thinking_budget"] == 16000
+        assert snapshot["history_turns"] == 4
+
+    def test_the_panel_turns_knob_overrides_a_row_the_header_pinned(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        """顶栏把这一对钉过之后，面板改轮数必须改得动。
+
+        面板那格只写全局的话，已经存在的行会把它整个盖掉：屏上显示 2，发出去还是 4。
+        出厂没行的机器看不出来 —— 这一段是 r85 变异复查时补的。
+        """
+        service, _, _ = _service(prefs, env)
+        reader = _shown(service)
+        service.set_tuning(turns=4)
+
+        assert service.apply({"history_turns": 2})["problems"] == {}
+
+        assert reader("alpha", "alpha-1").history_turns == 2
+        assert service.snapshot()["history_turns"] == 2
+
+    def test_the_panel_thinking_knob_overrides_a_row_the_header_pinned(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        """同一格思考勾：顶栏钉过的高强度，面板关掉就得真的关掉。"""
+        service, _, _ = _service(prefs, env)
+        reader = _shown(service)
+        service.set_tuning(thinking="high")
+
+        assert service.apply({"thinking_enabled": False})["problems"] == {}
+
+        sent = reader("alpha", "alpha-1")
+        assert sent.thinking.enabled is False, "行还在，全局写什么都没用"
+        assert service.snapshot()["thinking_enabled"] is False
+
+    def test_a_pair_that_was_never_set_follows_the_last_change(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        """没单独设过的那一对跟的是**最后一次改动**，不是出厂的 medium。
+
+        这里以前固定回 "medium"：面板显示「未勾选」而请求带着 4096 —— 两个入口给两个答案。
+        """
+        service, _, _ = _service(prefs, env)
+        assert service.apply({"thinking_enabled": True, "thinking_budget": 8000})["problems"] == {}
+
+        row = service.tuning_for("beta", "beta-1")
+
+        assert row["stored"] is False, "beta 这一对确实没单独设过"
+        assert row["thinking_tokens"] == 8000, row
+        assert row["thinking_enabled"] is True
+
+    def test_the_panel_shows_the_pair_on_screen_not_the_last_global_write(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        """面板显示的是**屏幕上这一对**在用的值，不是全局副本。
+
+        两对模型把全局镜像拧过之后，副本和行就分家了 —— 这正是 r85 那条 bug 的形状。
+        """
+        service, _, _ = _service(prefs, env)
+        reader = _shown(service)
+        assert (
+            service.apply({"history_turns": 2, "thinking_enabled": True, "thinking_budget": 8000})[
+                "problems"
+            ]
+            == {}
+        )
+
+        # 另一对模型上走**面板**那条路（它会连带把全局镜像写一遍），于是副本和这一对那行分家
+        service.choose_model("beta", "beta-1")
+        assert service.apply({"history_turns": 7, "thinking_enabled": False})["problems"] == {}
+
+        service.choose_model("alpha", "alpha-1")
+
+        snapshot = service.snapshot()
+        assert snapshot["tuning_pair"] == "alpha · alpha-1"
+        assert snapshot["history_turns"] == 2, "屏上不能写全局那个 7"
+        assert snapshot["thinking_budget"] == 8000, "预算那格也一样：换过一次模型不该把它冲掉"
+        assert snapshot["thinking_enabled"] is True, "这一对是开着的"
+        assert reader("alpha", "alpha-1").history_turns == 2
+        assert reader("alpha", "alpha-1").thinking.enabled is True
+        assert reader("alpha", "alpha-1").thinking.budget == 8000
+
+    def test_an_exact_budget_typed_in_the_panel_is_what_goes_out(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        """「思考预算（token）」那一格是数字，不是四档里的一个：填 8000 就发 8000。"""
+        service, _, _ = _service(prefs, env)
+        reader = _shown(service)
+
+        assert service.apply({"thinking_enabled": True, "thinking_budget": 8000})["problems"] == {}
+
+        sent = reader("alpha", "alpha-1")
+        assert (sent.thinking.enabled, sent.thinking.budget) == (True, 8000)
+
+        listing = service.model_choices()
+        assert listing["thinking"] == "custom"
+        assert listing["thinking_custom_budget"] == 8000
+        assert "custom" in listing["thinking_levels"], "下拉挑不到它，屏上就像没设过"
+
+        # 在对话区改选一个预设 = 换成那一档的数，精确预算让位
+        service.set_tuning(thinking="low")
+        assert reader("alpha", "alpha-1").thinking.budget == 1024
+
+    def test_switching_thinking_off_keeps_the_number_for_next_time(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        service, _, _ = _service(prefs, env)
+        reader = _shown(service)
+        service.apply({"thinking_enabled": True, "thinking_budget": 8000})
+
+        service.apply({"thinking_enabled": False})
+
+        assert reader("alpha", "alpha-1").thinking.enabled is False
+        assert service.snapshot()["thinking_budget"] == 8000, "那一格留着重开时要用的数"
+
+        service.apply({"thinking_enabled": True})
+
+        sent = reader("alpha", "alpha-1")
+        assert (sent.thinking.enabled, sent.thinking.budget) == (True, 8000)
+
+    def test_a_model_nobody_touched_follows_the_last_change(
+        self, prefs: Preferences, env: dict[str, str]
+    ) -> None:
+        """没单独设过的模型跟最后一次改动 —— 面板里那句提示说的就是这个。"""
+        service, _, _ = _service(prefs, env)
+        reader = _shown(service)
+
+        service.apply({"history_turns": 2})
+
+        assert reader("beta", "beta-1").history_turns == 2
+        assert reader("beta", "beta-1").tools is True, "轮数改了不该顺手把工具也拿走"

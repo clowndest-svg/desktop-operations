@@ -97,8 +97,33 @@
             <data android:scheme="smsto" />
         </intent>
         <intent>
+            <action android:name="android.intent.action.SENDTO" />
+            <data android:scheme="mailto" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.SET_TIMER" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="geo" />
+        </intent>
+        <intent>
             <action android:name="android.intent.action.VIEW" />
             <data android:scheme="https" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="http" />
+        </intent>
+        <!--
+          分享到别的 App 走的是 ACTION_SEND + text/plain。少了这一条的后果不是报错，
+          而是 `queryIntentActivities` 查回来一张**空表**：界面上写着"没有能接文字的应用"，
+          而手机上明明装着微信。这条是写那份 `<queries>` 对照测试时才查出来的——
+          代码一行没错，能力就是没了。
+        -->
+        <intent>
+            <action android:name="android.intent.action.SEND" />
+            <data android:mimeType="text/plain" />
         </intent>
         <intent>
             <action android:name="android.intent.action.INSERT" />

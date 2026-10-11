@@ -191,3 +191,10 @@ class ScriptedAudioSource:
 
     def close(self) -> None:
         pass
+
+
+def json_object(value: object) -> dict[str, Any]:
+    """Validate the outer JSON shape; individual tests assert the heterogeneous fields."""
+    assert isinstance(value, dict), "expected a JSON object"
+    assert all(isinstance(key, str) for key in value)
+    return value

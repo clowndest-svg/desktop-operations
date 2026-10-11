@@ -78,7 +78,7 @@ _LABELS = {
     MODE_SINGLE: "单个模型",
     MODE_TABLE: "圆桌轮流",
     MODE_BOSS: "主管分发",
-    MODE_VOTE: "并行三答·互评投票",
+    MODE_VOTE: "独立作答·匿名互评",
 }
 
 LIMITS = {
@@ -133,9 +133,9 @@ def requests_for(mode: str, seats: int, rounds: int = 2) -> int:
         # 一次拆分 + (seats-1) 件活 + 一次汇总：主管自己不领活。
         return seats + 1
     if mode == MODE_VOTE:
-        return 2 * seats
+        return 1 if seats == 1 else 2 * seats
     if mode == MODE_TABLE:
-        return seats * (max(1, rounds) + 1)
+        return seats * min(3, max(1, rounds)) + 1
     return seats
 
 

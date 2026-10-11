@@ -295,9 +295,13 @@ async function copy(text: string): Promise<void> {
 .acts button {
   border: 0;
   background: none;
-  padding: 2px 6px;
+  /* 原来这里是 2px 6px / 11px 字，算下来一个按钮的可点区不到 20px 高。
+   * `--xy-tap` 是 44px，那是给主操作留的；这一排是次要操作，但 32px 是拇指
+   * 能稳定按中的下限——低于它，"复制"和"删除"就会互相按错，而按错的是删除。 */
+  min-height: 32px;
+  padding: 6px 10px;
   border-radius: var(--xy-r-xs);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--xy-text-3);
 }
 

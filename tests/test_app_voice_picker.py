@@ -16,9 +16,17 @@ from typing import Any, cast
 import pytest
 
 from jarvis.app.preferences import TTS_SPEED, TTS_VOICE, TTS_VOLUME, Preferences
-from jarvis.app.voice_picker import EDGE_VOICES, PREVIEW_TEXT, VoicePicker
+from jarvis.app.voice_library import VoiceLibrary
+from jarvis.app.voice_picker import (
+    ANSWER_TIMEOUT_SECONDS,
+    EDGE_VOICES,
+    PREVIEW_TEXT,
+    VoicePicker,
+)
 from jarvis.config.schema import TtsSection
+from jarvis.core.exceptions import TtsError
 from jarvis.tts.types import AudioChunk
+from tests._fakes import json_object
 
 
 def _section(engine: str = "edge_tts", voice: str = "zh-CN-XiaoxiaoNeural") -> TtsSection:
@@ -304,7 +312,7 @@ class TestEngineRouting:
         picker, _ = _picker(tmp_path)
         called: list[str] = []
 
-        def build(voice: str) -> tuple[object, str]:
+        def build(voice: str, *, budget: float = 0.0) -> tuple[object, str]:
             called.append(voice)
             return object(), ""
 
@@ -319,18 +327,143 @@ class TestEngineRouting:
         sentinel = object()
         calls: list[str] = []
 
-        def build(voice: str) -> tuple[object, str]:
+        seen: list[float] = []
+
+        def build(voice: str, *, budget: float = 0.0) -> tuple[object, str]:
             calls.append(voice)
+            seen.append(budget)
             return sentinel, ""
 
         monkeypatch.setattr(picker, "_engine_for_voice", build)
         assert picker.engine_for_voice("clone:104c7ef77bf5") is sentinel
         assert picker.engine_for_voice("clone:104c7ef77bf5") is sentinel
         assert calls == ["clone:104c7ef77bf5"], "第二句还要重建引擎的话，每句话都得等 45 秒加载"
+        # 回答用的是**回答的**上限（12 秒），不是试听那个 120 秒：等两分钟才出声的回答
+        # 不叫慢，叫没出声。
+        assert seen == [ANSWER_TIMEOUT_SECONDS]
 
     def test_a_clone_no_engine_can_speak_is_said_so_not_swallowed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         picker, _ = _picker(tmp_path)
-        monkeypatch.setattr(picker, "_engine_for_voice", lambda voice: (None, "离线语音不可用"))
+        monkeypatch.setattr(
+            picker, "_engine_for_voice", lambda voice, *, budget=0.0: (None, "离线语音不可用")
+        )
         assert picker.engine_for_voice("clone:104c7ef77bf5") is None
+
+
+class TestSelectingAVoiceThatCannotSpeak:
+    """点「选用」一个这台机器做不出来的音色，以前是**存下来**再弹一句原因。
+
+    存下来的后果在后面每一句：回答要去找一个不存在的引擎，于是"她回答了但没出声"。
+    操作者看到的是一台坏掉的助手，而不是一行灰掉的音色。
+    """
+
+    @staticmethod
+    def _library(tmp_path: Any) -> VoiceLibrary:
+        library = VoiceLibrary(tmp_path / "voices")
+        library.start()
+        library.add(
+            name="我的声音",
+            pcm=bytes(112_000),  # 16k 样 s16le 的黑静音
+            sample_rate=16_000,
+            prompt_text="今天天气不错，我们一起去公园走走吧。",
+        )
+        return library
+
+    def test_the_choice_is_refused_and_the_old_one_stays(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        library = self._library(tmp_path)
+        clone_id = library.voices()[0].voice_id
+        prefs = Preferences(tmp_path / "prefs.json")
+        prefs.set(TTS_VOICE, "zh-CN-XiaoxiaoNeural")
+        picker = VoicePicker(lambda: _section("edge_tts"), prefs, library=library)
+        monkeypatch.setattr(
+            picker,
+            "_engine_for_voice",
+            lambda voice, *, budget=0.0: (None, "找不到离线语音的工作进程"),
+        )
+
+        answer = picker.pick(clone_id)
+
+        assert "说不了" in str(answer["error"]) and "没改你的选择" in str(answer["error"])
+        assert prefs.text(TTS_VOICE) == "zh-CN-XiaoxiaoNeural", "被拒的选择不能留下痕迹"
+
+    def test_a_clone_something_can_speak_is_still_selectable(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """别把能用的那条路也一起堵死：云端复刻过的音色在这台机器上就该能选。"""
+        library = self._library(tmp_path)
+        clone_id = library.voices()[0].voice_id
+        prefs = Preferences(tmp_path / "prefs.json")
+        picker = VoicePicker(lambda: _section("edge_tts"), prefs, library=library)
+
+        class _Closeable:
+            closed = False
+
+            def close(self) -> None:
+                type(self).closed = True
+
+        engine = _Closeable()
+        monkeypatch.setattr(picker, "_engine_for_voice", lambda voice, *, budget=0.0: (engine, ""))
+
+        answer = picker.pick(clone_id)
+
+        assert answer["error"] == ""
+        assert prefs.text(TTS_VOICE) == clone_id
+        assert engine.closed is True, "探一下能不能说就把引擎留着，等于白占一个 worker"
+
+
+class TestAPreviewReportsWhatItCost:
+    """试听不能只回一句"太慢了" —— 慢到什么程度才是能判断的那个数。
+
+    这台机器实测离线复刻是 8.2~15.8 倍实时，"太慢"和"再等等就好"听起来一样，
+    但 15 倍实时意味着永远等不到，只有数字能分开这两种情况。
+    """
+
+    def test_a_failed_preview_carries_the_measured_cost(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        picker, _ = _picker(tmp_path, emit=lambda *args: True)
+
+        class _Dead:
+            def close(self) -> None:
+                return None
+
+            def synthesize(self, *args: object, **kwargs: object) -> Iterator[AudioChunk]:
+                raise TtsError("离线语音这次太慢了，超过了等待上限")
+
+        monkeypatch.setattr(picker, "_engine_for_voice", lambda voice, **kw: (_Dead(), ""))
+
+        answer = json_object(picker.preview("clone:25f32b03e146"))
+
+        assert answer["ok"] is False
+        assert "花了" in answer["error"] and "倍实时" not in answer["error"].split("（")[0]
+        assert answer["elapsed_ms"] >= 0 and answer["audio_ms"] == 0
+        assert "一毫秒音频都没做出来" in answer["error"]
+
+    def test_an_unexpected_preview_failure_still_reads_as_chinese(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """厂商那边断线时抛的是 ``ConnectionResetError(10054, ...)``。
+
+        此前屏上只有那句英文原文：用户读到的是"一个不懂的词"，不是"这条试听没走通、
+        换个音色或再点一次"。中文在前、原文留在后面供排查。
+        """
+        picker, _ = _picker(tmp_path, emit=lambda *args: True)
+
+        class _Boom:
+            def close(self) -> None:
+                return None
+
+            def synthesize(self, *args: Any, **kwargs: Any) -> Any:
+                raise ConnectionResetError(10054, "远程主机强迫关闭了一个现有的连接")
+
+        monkeypatch.setattr(picker, "_engine_for_voice", lambda voice, **kw: (_Boom(), ""))
+
+        answer = picker.preview("zh-CN-XiaoxiaoNeural")
+
+        assert answer["ok"] is False
+        assert str(answer["error"]).startswith("试听没走通"), answer["error"]
+        assert "10054" in str(answer["error"]), "原文不能丢"

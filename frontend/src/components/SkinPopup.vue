@@ -8,6 +8,7 @@
         <button class="hud-btn" type="button" @click="emit('close')">关闭</button>
       </header>
 
+      <div class="sk__body">
       <!--
         一屏看全，不用翻页：颜色这种东西要并排看才知道自己更喜欢哪个，"下一个"式的
         轮换把选择变成了一次次盲试。每张卡都拿该皮肤的三个色画一个迷你仪表盘示意，
@@ -37,9 +38,9 @@
       <p v-if="note" class="sk__note" :class="{ 'sk__note--bad': noteBad }">{{ note }}</p>
 
       <p class="sk__hint">
-        换皮肤会同时改仪表盘和她的颜色——桌面上的那个人也在内，立即生效，下次打开还是这个。
-        色号是固定的六套，语义色（告警红、完成绿、琥珀）不跟着变。
+        换皮肤会同时改仪表盘和她的颜色——桌面上的那个人也在内，立即生效，下次打开还是这个。色号是固定的六套，语义色（告警红、完成绿、琥珀）不跟着变。
       </p>
+      </div>
     </section>
   </div>
 </template>
@@ -123,13 +124,23 @@ async function choose(id: string): Promise<void> {
   /* The card grid grows with the number of skins, and this box had neither a height limit
      nor a scroller: past the viewport edge the last row was simply unreachable. */
   max-height: 84vh;
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
   padding: 16px 20px 14px;
   border: 1px solid var(--hud-line);
   border-top: 1px solid var(--hud-rim);
   border-radius: var(--hud-radius);
   background: linear-gradient(180deg, rgba(10, 24, 40, 0.96), rgba(4, 8, 14, 0.98));
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+}
+
+/* 关闭 is a child of the head, so the head has to stay outside whatever scrolls. */
+.sk__body {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .sk__head {

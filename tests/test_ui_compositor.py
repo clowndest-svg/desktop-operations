@@ -741,6 +741,20 @@ class TestTheCardFollowsHerSkin:
         plain = build_thinking_frames("dots", DEFAULT_BUBBLE)
         assert _body(frames[0].url, frames[0].width) != _body(plain[0].url, plain[0].width)
 
+    @pytest.mark.parametrize("kind", ["dots", "ring", "bars", "matrix"])
+    def test_every_loader_kind_really_paints_every_frame(self, kind: str) -> None:
+        """四种类型都要**真画出来**：设置里能选到的东西，不能只在一种上测过。
+
+        "点阵"这一格在真机上把宠物气泡整条打崩过 —— ``ImageDraw.rectangle`` 只收一个
+        box，传两个元组时第二个抢到了 ``fill`` 上，报 "multiple values for argument
+        'fill'"，而 `_sync_thinking` 把它吞成一条 warning 反复刷。只测 dots/ring 是
+        看不见这个的。
+        """
+        frames = build_thinking_frames(kind, DEFAULT_BUBBLE)
+        assert len(frames) == THINKING_FRAMES
+        assert all(frame.url.startswith("data:image/png;base64,") for frame in frames)
+        assert len({frame.url for frame in frames}) > 1, f"{kind} 八帧一模一样，那不是动效"
+
     def test_swapping_back_to_a_worn_skin_reuses_the_pictures(self) -> None:
         """换肤要重画，来回换不该每次都重画 —— 八张小 PNG 是全部成本。"""
         first = build_thinking_frames("dots", AMBER)

@@ -14,8 +14,11 @@ from __future__ import annotations
 import base64
 import struct
 import zlib
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from jarvis.app.model_probe import ModelCaps, ModelProber, ProbeResult, probe, red_png_data_url
 from jarvis.app.preferences import LLM_CAPS, Preferences
@@ -33,22 +36,26 @@ class ProbedClient:
         picture: str | Exception = "红色",
         provider: str = "testai",
         model: str = "test-model",
+        reasoning: str = "",
     ) -> None:
         self._text = text
         self._picture = picture
+        self._reasoning = reasoning
         self.provider_name = provider
         self.model = model
         self.asked: list[ChatMessage] = []
+        self.options: list[Any] = []
 
     def complete(self, messages: Any, *, options: Any = None) -> ChatResponse:
         message = messages[-1]
         self.asked.append(message)
+        self.options.append(options)
         if message.images:
             if isinstance(self._picture, Exception):
                 raise self._picture
             return ChatResponse(content=self._picture, model=self.model, usage=Usage(30, 2))
         if not self._text:
-            return ChatResponse(content="", model=self.model)
+            return ChatResponse(content="", reasoning=self._reasoning, model=self.model)
         return ChatResponse(content=self._text, model=self.model, usage=Usage(9, 2))
 
     def stream(self, messages: Any, *, options: Any = None) -> Any:
@@ -128,6 +135,68 @@ class TestTheProbe:
         saving it quietly would leave the operator with a blank bubble and no reason.
         """
         assert probe(ProbedClient(text="")).ok is False
+
+    def test_a_model_that_only_thought_says_so_rather_than_nothing_came_back(self) -> None:
+        """24 个 token 全花在思考上 ≠ 没回消息。两种处置完全不同，屏上必须分开。"""
+        result = probe(ProbedClient(text="", reasoning="我先想一想这个问题"))
+
+        assert result.ok is False
+        assert "思考" in result.detail, result.detail
+        assert "一个字也没回" not in result.detail
+
+    def test_the_bundled_probe_turns_the_template_thinking_off(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """「测一下」必须走对话那条路同样的请求形状。
+
+        自带那份 Qwen3 默认先思考：探针只给 24 个 token，全落在 reasoning 上、`content`
+        是空的，于是屏上出现「连不上：连接通了，但它一个字也没回」—— 而同一个模型在
+        对话里答得好好的（对话那条会发 ``chat_template_kwargs.enable_thinking=false``）。
+        用户就是照这张图来问的。
+        """
+        from jarvis.llm import local_server
+
+        monkeypatch.setattr(
+            local_server,
+            "selected_card",
+            lambda: replace(local_server.NO_MODEL_CARD, thinking=True),
+        )
+        client = ProbedClient(provider="local", model="qwen3-0.6b")
+
+        assert probe(client).ok is True
+        assert client.options[0].template_kwargs == {"enable_thinking": False}
+
+    def test_a_cloud_probe_does_not_invent_that_switch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`chat_template_kwargs` 是 llama.cpp 自己的字段，发给别家就是猜。"""
+        from jarvis.llm import local_server
+
+        monkeypatch.setattr(
+            local_server,
+            "selected_card",
+            lambda: replace(local_server.NO_MODEL_CARD, thinking=True),
+        )
+        client = ProbedClient()
+
+        assert probe(client).ok is True
+        assert client.options[0].template_kwargs is None
+
+    def test_a_bundled_model_that_thinks_by_default_is_left_alone(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """卡上没标"默认会思考"的（比如 Qwen2.5）不该被我们替它关掉思考。"""
+        from jarvis.llm import local_server
+
+        monkeypatch.setattr(
+            local_server,
+            "selected_card",
+            lambda: replace(local_server.NO_MODEL_CARD, thinking=False),
+        )
+        client = ProbedClient(provider="local", model="qwen2.5-7b")
+
+        assert probe(client).ok is True
+        assert client.options[0].template_kwargs is None
 
     def test_a_provider_that_refuses_the_picture_is_reported_as_blind_not_broken(self) -> None:
         client = ProbedClient(picture=LlmRequestError("this model does not accept images"))

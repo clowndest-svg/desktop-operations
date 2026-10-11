@@ -229,3 +229,51 @@ class TestAuditLog:
         cleaner.delete(_exact(tree["temp"] / "loose.log"), confirmed=True)
 
         assert log.is_file()
+
+
+def test_dot_segments_cannot_bypass_protected_roots(tmp_path: Path) -> None:
+    protected = tmp_path / "private"
+    protected.mkdir()
+    harmless = tmp_path / "scratch"
+    harmless.mkdir()
+    keep = protected / "keep.txt"
+    keep.write_text("private", encoding="utf-8")
+    cleaner = DiskCleaner(tmp_path / "audit.jsonl", sources={}, protected_dirs=(protected,))
+    result = cleaner.delete(_exact(harmless / ".." / "private" / "keep.txt"), confirmed=True)
+    assert keep.exists()
+    assert not result.deleted
+
+
+def test_scanner_refuses_a_linked_root(tmp_path: Path) -> None:
+    target = tmp_path / "private"
+    target.mkdir()
+    (target / "keep.txt").write_text("private", encoding="utf-8")
+    link = tmp_path / "alias"
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError:
+        pytest.skip("creating a test symlink is not permitted on this host")
+    cleaner = DiskCleaner(tmp_path / "audit.jsonl", sources={"test": (link,)})
+    assert not cleaner.scan().groups
+
+
+def test_scanner_refuses_an_ntfs_junction(tmp_path: Path) -> None:
+    import importlib
+    import sys
+
+    if sys.platform != "win32":
+        pytest.skip("NTFS junction test")
+    winapi = importlib.import_module("_winapi")
+    target = tmp_path / "private"
+    target.mkdir()
+    keep = target / "keep.txt"
+    keep.write_text("private fixture", encoding="utf-8")
+    junction = tmp_path / "alias"
+    winapi.CreateJunction(str(target), str(junction))
+    try:
+        assert junction.is_junction()
+        cleaner = DiskCleaner(tmp_path / "audit.jsonl", sources={"test": (junction,)})
+        assert not cleaner.scan().groups
+        assert keep.exists()
+    finally:
+        junction.rmdir()  # Remove only the verified fixture junction, never its target.

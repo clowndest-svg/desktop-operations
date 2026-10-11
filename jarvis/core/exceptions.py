@@ -17,6 +17,7 @@ Guidelines:
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import ClassVar
 
 
 class JarvisError(Exception):
@@ -66,7 +67,14 @@ class DangerousOperationRejectedError(SecurityError):
 
 
 class LlmError(JarvisError):
-    """LLM provider failure (network, auth, rate limit, bad response)."""
+    """LLM provider failure (network, auth, rate limit, bad response).
+
+    ``kind`` is a stable token for the interface. The next step differs by failure -- a
+    refused key is fixed in 设置, a refused connection is not -- and reading it out of the
+    English message would break the day somebody rewords that message.
+    """
+
+    kind: ClassVar[str] = "llm"
 
 
 class PromptError(JarvisError):

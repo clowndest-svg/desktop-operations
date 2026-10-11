@@ -113,7 +113,7 @@ const VISEME_PRESETS: readonly Viseme[] = VISEMES
  * so the lines on the far side of the head were drawn as brightly as the near ones,
  * ~40 of them per pixel, and the figure came out as a white blob with arms.
  */
-function lineInk(palette: Skin): THREE.MeshBasicMaterial {
+export function lineInk(palette: Skin): THREE.MeshBasicMaterial {
   return new THREE.MeshBasicMaterial({
     color: palette.line,
     wireframe: true,
@@ -129,7 +129,7 @@ function lineInk(palette: Skin): THREE.MeshBasicMaterial {
  * on the far side. ``polygonOffset`` pushes it a hair behind its own wireframe so the
  * two surfaces that occupy exactly the same space do not flicker over each other.
  */
-function bodyInk(palette: Skin): THREE.MeshBasicMaterial {
+export function bodyInk(palette: Skin): THREE.MeshBasicMaterial {
   return new THREE.MeshBasicMaterial({
     color: palette.fill,
     transparent: true,

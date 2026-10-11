@@ -57,6 +57,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import * as THREE from 'three'
 import { createCharacter, type Character, type Mood } from '@/avatar/character'
 import { loadVrmCharacter } from '@/avatar/vrm'
+import { loadChosenCharacter } from '@/avatar/silhouette'
 import { FaceDriver } from '@/avatar/driver'
 import { levels, startAudioChannel, stopAudioChannel, talking } from '@/audio/channel'
 import { pushPetFrame, reportPetArrived, reportPetGrip, setPetDragging, togglePet } from '@/api/bridge'
@@ -428,6 +429,20 @@ async function swapFigure(stage: THREE.Scene): Promise<void> {
   character = built
   resize()
 
+  // The chosen figure -- a shipped model or one traced from a photograph -- wins
+  // over a dropped-in VRM: the operator named it in the picker, and two models in
+  // one window is not a thing.
+  const generated = await loadChosenCharacter()
+  if (generated && scene === stage && character) {
+    stage.remove(character.root)
+    character.dispose()
+    generated.reframe(FULL_BODY)
+    stage.add(generated.root)
+    character = generated
+    resize()
+    return
+  }
+
   const dropped = await loadVrmCharacter()
   if (!dropped || scene !== stage || !character) return
   stage.remove(character.root)
@@ -459,6 +474,12 @@ function installPetCommand(): void {
       startLoop(talking.value ? FRAME_MS_TALKING : FRAME_MS_IDLE)
     } else if (command === 'sleep') {
       asleep = true
+    } else if (command === 'figure') {
+      // The picker swapped her: pull the new polygon and rebuild. Nothing is passed
+      // in the cue because the page has to ask anyway -- a figure chosen while this
+      // window was closed still has to arrive on the next open.
+      const stage = scene
+      if (stage) void swapFigure(stage)
     } else if (command === 'alpha') {
       // The compositor is up: stop painting a panel, start shipping frames. The
       // handle is the shell's hit target now, so it has to be in the frame.

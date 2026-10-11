@@ -18,15 +18,21 @@ from __future__ import annotations
 import json
 import logging
 import os
+import queue
+import re
+import threading
 import time
 from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 
 from jarvis.core.events import UsageEvent
 from jarvis.llm.errors import (
     LlmAuthError,
     LlmConnectionError,
+    LlmContextOverflowError,
     LlmError,
+    LlmPermissionError,
     LlmRateLimitError,
     LlmRequestError,
     LlmResponseError,
@@ -59,6 +65,62 @@ _CHAT_COMPLETIONS_PATH = "/chat/completions"
 _STREAM_DONE_SENTINEL = "[DONE]"
 _RETRYABLE_ERRORS = (LlmRateLimitError, LlmServerError, LlmTimeoutError, LlmConnectionError)
 
+"""What each vendor says when the prompt does not fit (all measured or quoted from their
+own error bodies): llama.cpp's server, Ollama, vLLM, OpenAI and Anthropic all phrase it
+differently, and every one of them is a 400 that looks like "bad request" to the panel."""
+_OVERFLOW_MARKERS: tuple[str, ...] = (
+    "exceed_context_size_error",
+    "exceeds the available context size",
+    "context length exceeded",
+    "maximum context length",
+    "exceeded max context length",
+    "exceeds the context window",
+    "exceeds the model's context",
+    "token context window",
+    "prompt is too long",
+)
+
+"""A rejection that is not about the *shape* of the request. These must not be counted as
+"this provider cannot stream" -- that flag is sticky, and one unrelated 400 would leave
+every later answer arriving in one block with no way to interrupt it."""
+_NOT_A_STREAMING_PROBLEM: frozenset[str] = frozenset(
+    {"overflow", "auth", "forbidden", "quota", "timeout", "network"}
+)
+
+
+_LOOPBACK = re.compile(r"^https?://(?:127\.0\.0\.1|localhost|\[::1\])(?::(\d+))?", re.I)
+
+
+def _local_endpoint_hint(base_url: str) -> str:
+    """连的是本机却没连上：把端口写进报错，并说清她自带那个模型在哪个端口。
+
+    只在本机地址上说这些 —— 云端那一家连不上，扯自带模型只会把人带偏。
+    自带模型那一行读的是它自己那份状态，**不会**因为这次报错去起进程。
+    """
+    mine = _LOOPBACK.match(base_url or "")
+    if not mine:
+        return ""
+    asked = mine.group(1) or "80"
+    try:
+        from jarvis.llm import local_server
+
+        running = local_server.shared_server().endpoint() or ""
+    except Exception:
+        running = ""
+    hit = _LOOPBACK.match(running)
+    theirs = (hit.group(1) or "80") if hit else ""
+    if theirs and theirs != asked:
+        return (
+            f"（这一行连的是 127.0.0.1:{asked}，她自带那个模型在 127.0.0.1:{theirs} 上在跑 —— "
+            "两个不是同一个地址；要用自带那个，把上面那行模型换成它）"
+        )
+    if theirs == asked:
+        return (
+            f"（这一行连的就是她自带那个模型的端口 127.0.0.1:{asked}，可它连不上 —— "
+            "那个进程大概已经不在了：设置 · 自带模型 点「停掉」再点「现在加载」）"
+        )
+    return f"（这一行连的是 127.0.0.1:{asked}，本机现在没有东西在听这个端口）"
+
 
 @dataclass(frozen=True, slots=True)
 class _StreamOutcome:
@@ -71,6 +133,10 @@ class _StreamOutcome:
 
     response: ChatResponse | None
     error: str = ""
+    kind: str = ""
+    """The rejection's taxonomy token, kept alongside the text so the caller can tell
+    "this endpoint cannot stream" from "this prompt does not fit" -- both arrive as a 400
+    before the first chunk, and only one of them is about the streaming shape."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +158,8 @@ class OpenAiCompatSettings:
 
     key_optional: bool = False
     """Send the request without an ``Authorization`` header when no key is configured."""
+    bundled: bool = False
+    """这一发是发给"她自己带的那个离线模型"的：请求在飞时不许被空闲看门狗关掉。"""
 
 
 class OpenAiCompatClient:
@@ -179,6 +247,13 @@ class OpenAiCompatClient:
         about, and reading it off ambient state would be shared by every concurrent turn.
         """
         started = time.perf_counter()
+        with self._held_for_request():
+            yield from self._iter_chunks(payload, task_id, started)
+
+    def _iter_chunks(
+        self, payload: Mapping[str, object], task_id: str, started: float
+    ) -> Generator[StreamChunk, None, None]:
+        """真正读流那一段。空闲记账在外层那个生成器里，别在这里重复记。"""
         lines = self._open_stream_with_retry(payload)
         usage: Usage | None = None
         try:
@@ -246,6 +321,12 @@ class OpenAiCompatClient:
             # ways that happens and they need different answers, so both are tried --
             # each only once, and remembered, because re-probing per turn would be a
             # failed request in front of every answer.
+            if result.kind in _NOT_A_STREAMING_PROBLEM:
+                # Measured: a local server answered this same 400 for a prompt that did
+                # not fit its 4096-token window, and the old code concluded "this provider
+                # does not stream" -- a sticky flag that then cost every later answer its
+                # 停止 button. The request is what was wrong here, so say that instead.
+                return self.complete(messages, options=options)
             if include_usage:
                 include_usage = False
                 self._include_usage = False
@@ -285,9 +366,24 @@ class OpenAiCompatClient:
         model = self._settings.model
         finish: str | None = None
         cancelled = False
-        stream = self._stream_chunks(payload, task_id)
+        pump = _ChunkPump(self._stream_chunks(payload, task_id))
         try:
-            for chunk in stream:
+            while True:
+                kind, item = pump.take(_STOP_POLL_SECONDS)
+                if kind == "pending":
+                    if stop():
+                        cancelled = True
+                        break
+                    continue
+                if kind == "done":
+                    break
+                if kind == "error":
+                    if isinstance(item, BaseException):
+                        raise item
+                    raise LlmError("流式响应异常中断")
+                if kind != "chunk" or not isinstance(item, StreamChunk):
+                    break
+                chunk = item
                 if chunk.model:
                     model = chunk.model
                 if chunk.usage is not None:
@@ -310,11 +406,11 @@ class OpenAiCompatClient:
         except LlmError as exc:
             if parts or thoughts or slots:
                 raise
-            return _StreamOutcome(None, str(exc))
+            return _StreamOutcome(None, str(exc), exc.kind)
         finally:
-            # Explicitly closed rather than left to the collector: abandoning the loop is
-            # how a cancelled turn stops reading the socket.
-            stream.close()
+            # Closed rather than left to the collector: abandoning the loop is how a
+            # cancelled turn stops reading the socket.
+            pump.close()
         if cancelled:
             finish = "cancelled"
         return _StreamOutcome(
@@ -324,7 +420,10 @@ class OpenAiCompatClient:
                 finish_reason=finish,
                 usage=usage,
                 tool_calls=_assemble_tool_calls(slots),
-                reasoning="\n\n".join(part for part in thoughts if part),
+                # 和上面 `content` 一样是**增量流**，拼回去当然也不许加分隔符：
+                # 这里以前用 "\n\n" 串起来，于是屏上"思考过程"每行只有一两个字
+                # （一个 token 一行），而回答那一段是正常的 —— 同一次请求两种排版。
+                reasoning="".join(thoughts),
             ),
             "",
         )
@@ -393,6 +492,10 @@ class OpenAiCompatClient:
                 # problem, not ours, and the alternative is a knob that can only be
                 # set together with another one.
                 payload["thinking_budget"] = options.thinking_budget
+            if options.template_kwargs:
+                # llama.cpp's own switch for Qwen3-style hybrid thinking. Sent only when a
+                # caller put something here, which today means the bundled server.
+                payload["chat_template_kwargs"] = dict(options.template_kwargs)
             if options.tools:
                 payload["tools"] = [dict(tool) for tool in options.tools]
                 payload["tool_choice"] = options.tool_choice or "auto"
@@ -400,7 +503,30 @@ class OpenAiCompatClient:
 
     # -- retry policy ----------------------------------------------------------
 
+    @contextmanager
+    def _held_for_request(self) -> Iterator[None]:
+        """自带模型那一行：这一发没打完之前，空闲看门狗不许把她关掉。
+
+        实测（用户机器，r83）：Qwen3-4B 在 8K + 工具表那一句答了 120 秒还没完，看门狗那份
+        从"加载完成"起算的表到点就把进程收了 —— 屏幕上只剩 WinError 10054。
+        """
+        if not self._settings.bundled:
+            yield
+            return
+        from jarvis.llm import local_server
+
+        server = local_server.shared_server()
+        server.begin_request()
+        try:
+            yield
+        finally:
+            server.end_request()
+
     def _post_with_retry(self, payload: Mapping[str, object]) -> Mapping[str, object]:
+        with self._held_for_request():
+            return self._post_once(payload)
+
+    def _post_once(self, payload: Mapping[str, object]) -> Mapping[str, object]:
         attempt = 0
         while True:
             try:
@@ -421,13 +547,15 @@ class OpenAiCompatClient:
         """Open the SSE stream, retrying only until the first line arrives."""
         attempt = 0
         while True:
-            iterator = self._transport.post_sse(
-                self._endpoint,
-                headers=self._headers(),
-                payload=payload,
-                timeout=self._settings.timeout_seconds,
-            )
             try:
+                # A transport may fail while constructing its iterator or on its
+                # first next(). Both are pre-stream failures and share retry policy.
+                iterator = self._transport.post_sse(
+                    self._endpoint,
+                    headers=self._headers(),
+                    payload=payload,
+                    timeout=self._settings.timeout_seconds,
+                )
                 first = next(iterator)
             except StopIteration:
                 return iter(())
@@ -482,18 +610,38 @@ class OpenAiCompatClient:
             return LlmTimeoutError(f"request to '{provider}' timed out", details=details)
         if isinstance(exc, TransportNetworkError):
             return LlmConnectionError(
-                f"cannot reach '{provider}': {exc}",
+                f"cannot reach '{provider}': {exc}{_local_endpoint_hint(self._settings.base_url)}",
                 details=details,
             )
         if isinstance(exc, TransportStatusError):
             details["status"] = exc.status
             details["body"] = exc.body[:500]
-            if exc.status in (401, 403):
+            if exc.status == 401:
                 return LlmAuthError(f"'{provider}' rejected the API key", details=details)
+            if exc.status == 403:
+                # 403 with a working key is almost always "this token may not use this
+                # model" (measured: a gateway answers 403 with 该令牌无权访问模型 gpt-6.1-sol),
+                # so the wording and the panel's advice must not send them to re-paste it.
+                return LlmPermissionError(
+                    f"'{provider}' refused this model for the key it was given",
+                    details=details,
+                )
             if exc.status == 429:
                 return LlmRateLimitError(f"'{provider}' rate limit hit", details=details)
             if exc.status >= 500:
                 return LlmServerError(f"'{provider}' server error {exc.status}", details=details)
+            overflow = _overflow_of(exc.body)
+            if overflow is not None:
+                asked, holds = overflow
+                details["prompt_tokens"] = asked
+                details["context_tokens"] = holds
+                measured = f" (asked {asked} tokens, it holds {holds})" if asked and holds else ""
+                return LlmContextOverflowError(
+                    f"'{provider}' has no room left for this prompt{measured}",
+                    details=details,
+                    prompt_tokens=asked,
+                    context_tokens=holds,
+                )
             return LlmRequestError(
                 f"'{provider}' rejected the request (HTTP {exc.status})",
                 details=details,
@@ -623,6 +771,39 @@ class OpenAiCompatClient:
         if rate_in <= 0 and rate_out <= 0:
             return None
         return (usage.prompt_tokens * rate_in + usage.completion_tokens * rate_out) / 1_000_000
+
+
+def _overflow_of(body: str) -> tuple[int | None, int | None] | None:
+    """``(asked, holds)`` when this error body is a context-overflow complaint, else None.
+
+    The two numbers come from the fields the server itself printed (llama.cpp answers
+    with ``n_prompt_tokens`` / ``n_ctx``); they are never guessed out of the sentence's
+    digits, because the vendors put them in different orders -- llama.cpp says "request
+    (5011) exceeds ... (4096)" while OpenAI says "maximum context length is 4096 ...
+    you requested 5011". A pair of ``None``s still means overflow: the panel's advice
+    keys off the kind, and the server's own wording is shown in the fold.
+    """
+    if not body or not any(marker in body.lower() for marker in _OVERFLOW_MARKERS):
+        return None
+    try:
+        parsed: object = json.loads(body)
+    except (ValueError, TypeError):
+        return (None, None)
+    row = parsed.get("error") if isinstance(parsed, Mapping) else None
+    if not isinstance(row, Mapping):
+        row = parsed if isinstance(parsed, Mapping) else {}
+    asked = _int_of(row, "n_prompt_tokens", "prompt_tokens")
+    holds = _int_of(row, "n_ctx", "context_tokens", "max_context")
+    return (asked, holds)
+
+
+def _int_of(row: Mapping[str, object], *keys: str) -> int | None:
+    """The first of ``keys`` that is really an int in this mapping."""
+    for key in keys:
+        value = row.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return None
 
 
 def _serialize_message(message: ChatMessage) -> dict[str, object]:
@@ -756,6 +937,57 @@ def _string_of(value: object) -> str:
     tool-call name must not turn into a crash in the middle of a streamed answer.
     """
     return value if isinstance(value, str) else ""
+
+
+class _ChunkPump:
+    """Pull the next chunk on a helper thread so a stop can be seen while waiting.
+
+    ``next()`` on a streaming HTTP body blocks for as long as the server likes, and a
+    model that is thinking emits *nothing* until it decides -- which is why 停止 used to
+    only take effect once another chunk happened to arrive. Waiting on a queue with a
+    short timeout instead costs one extra thread per streamed turn and buys a cancel
+    that answers in milliseconds.
+
+    The thread is not killed on the way out: Python has no safe way to do that, and the
+    abandoned read ends by itself at the request timeout. What *is* guaranteed is that
+    the caller stops consuming, and the generator gets closed when it can be.
+    """
+
+    def __init__(self, source: Generator[StreamChunk, None, None]) -> None:
+        self._source = source
+        self._queue: queue.Queue[tuple[str, BaseException | StreamChunk | None]] = queue.Queue(
+            maxsize=1
+        )
+        self._thread = threading.Thread(target=self._run, name="llm-stream-pump", daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        try:
+            for chunk in self._source:
+                self._queue.put(("chunk", chunk))
+        except BaseException as exc:  # relayed to the consumer verbatim, then re-raised
+            self._queue.put(("error", exc))
+        else:
+            self._queue.put(("done", None))
+        finally:
+            with suppress(Exception):  # may be mid-read in this very thread's generator
+                self._source.close()
+
+    def take(self, wait: float) -> tuple[str, BaseException | StreamChunk | None]:
+        """``("chunk" | "error" | "done", payload)``, or ``("pending", None)`` on timeout."""
+        try:
+            return self._queue.get(timeout=wait)
+        except queue.Empty:
+            return ("pending", None)
+
+    def close(self) -> None:
+        """Ask the source to finish; never raise on the way out of a cancelled turn."""
+        with suppress(Exception):
+            self._source.close()
+
+
+_STOP_POLL_SECONDS: float = 0.1
+"""How long to wait for a chunk before re-checking the stop flag."""
 
 
 def _never() -> bool:

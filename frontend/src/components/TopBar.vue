@@ -2,7 +2,7 @@
   <header class="bar">
     <div class="bar__brand">
       <span class="bar__mark">◈</span>
-      <span class="bar__name">小夜</span>
+      <span class="bar__name">{{ info.name }}</span>
       <span class="hud-label bar__ver">v{{ info.version }} · {{ info.engine }}{{ info.built ? ' · 构建 ' + info.built : '' }}</span>
     </div>
 
@@ -39,15 +39,20 @@
         One number for both kinds of trouble, and the tooltip says which is which: this
         chip's job is "look over there", and two chips competing for that glance are two
         chips the eye learns to skip. A critical alert tints it red.
+
+        它是个**按钮**：上一版这里是 <span>，只带一个 title —— 用户点了没反应，因为
+        确实没有东西可点（r99 那版用户实拍报的）。红点的意思就是"现在给我看是哪几条"。
       -->
-      <span
+      <button
         v-if="alertLines.length"
-        class="hud-chip"
+        class="hud-chip al__chip"
         :class="anyCritical ? 'hud-chip--bad' : 'hud-chip--warn'"
-        :title="alertLines.join('\n')"
+        type="button"
+        title="点开看是哪几条、现在多少、线在哪"
+        @click="emit('alerts')"
       >
         <span class="hud-label">告警 {{ alertLines.length }}</span>
-      </span>
+      </button>
 
       <span class="hud-chip">
         <span class="hud-label">运行</span>
@@ -82,6 +87,32 @@
         @click="emit('phone')"
       >
         手机{{ phoneLabel ? ` · ${phoneLabel}` : '' }}
+      </button>
+      <!--
+        投屏 carries no live label on purpose. The bar's other entries read a socket
+        or a switch that Python already knows; this one would have to run ``adb
+        devices`` on the bar's timer to say 连着 1 台, and a subprocess on the poll
+        path is how the window starts stuttering. The count lives inside the dialog.
+      -->
+      <button
+        class="hud-btn bar__entry"
+        type="button"
+        title="把手机画面投到这台电脑（scrcpy）"
+        @click="emit('mirror')"
+      >
+        投屏
+      </button>
+      <!--
+        生图和投屏同一行：它是一个"要不要现在画一张"的决定，不是一个设置项 ——
+        放在设置里就会变成第 38 轮那次一样的"用户以为没这个功能"。
+      -->
+      <button
+        class="hud-btn bar__entry"
+        type="button"
+        title="一句话画一张图（本机 ComfyUI 或云端 API）"
+        @click="emit('images')"
+      >
+        生图
       </button>
       <!--
         带一个当前色的圆点：一排按钮里，「皮肤」是唯一一个"现在是什么"看不出来的，
@@ -162,8 +193,11 @@ const store = useSystemStore()
 const emit = defineEmits<{
   (e: 'settings'): void
   (e: 'activity'): void
+  (e: 'alerts'): void
   (e: 'access'): void
   (e: 'phone'): void
+  (e: 'mirror'): void
+  (e: 'images'): void
   (e: 'assistant'): void
   (e: 'skin'): void
 }>()
@@ -284,13 +318,28 @@ async function refreshPhone(): Promise<void> {
   }
 }
 
+async function onSettingsSaved(): Promise<void> {
+  try {
+    info.value = await fetchAppInfo()
+    document.title = info.value.name
+  } catch {
+    /* the previous name stays on screen; the next save or launch fixes it */
+  }
+}
+
 onMounted(async () => {
   tickClock()
   timer = setInterval(tickClock, 1000)
   document.addEventListener('visibilitychange', onVisibility)
   window.addEventListener('resize', onResize)
   window.addEventListener('jarvis-phone-changed', onPhoneSwitched)
+  // 「她叫什么」 lives on this bar too: after a save the brand has to be re-read,
+  // or the panel says 保存成功 while the corner keeps calling her the old name.
+  window.addEventListener('jarvis-settings-saved', onSettingsSaved)
   info.value = await fetchAppInfo()
+  // The document title is what a browser tab shows and what the
+  // webview may sync its caption from -- it must not stay on the shipped name.
+  document.title = info.value.name
   void refreshWindowState()
   void refreshPet()
   void refreshPhone()
@@ -306,6 +355,7 @@ onBeforeUnmount(() => {
   document.removeEventListener('visibilitychange', onVisibility)
   window.removeEventListener('resize', onResize)
   window.removeEventListener('jarvis-phone-changed', onPhoneSwitched)
+  window.removeEventListener('jarvis-settings-saved', onSettingsSaved)
 })
 </script>
 
@@ -389,5 +439,25 @@ onBeforeUnmount(() => {
   letter-spacing: 0.06em;
   min-width: 88px;
   justify-content: center;
+}
+
+/*
+  这颗 chip 是个按钮，所以两件事要补：``<button>`` 的 UA 字体/颜色会把 chip 的样子打掉
+  （按回继承），以及**留一个点得动的证据** —— 一个和旁边指示灯长得一模一样、悬停也没
+  任何反应的按钮，用户只会认为它跟指示灯一样是给人看的。上一版它就是这样的。
+*/
+.al__chip {
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color 0.16s, box-shadow 0.16s, transform 0.08s;
+}
+
+.al__chip:hover {
+  border-color: rgba(77, 216, 255, 0.5);
+  box-shadow: 0 0 14px rgba(77, 216, 255, 0.18);
+}
+
+.al__chip:active {
+  transform: translateY(1px);
 }
 </style>

@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -56,9 +57,13 @@ from jarvis.app.conversation import (
     STATUS_IDLE,
     Conversation,
 )
+from jarvis.app.preferences import DEFAULT_DISPLAY_NAME
 from jarvis.app.round_table import Seat, Speech, refuse_pictures
+from jarvis.app.tool_routing import classify_tool_intent, select_tool_names
 from jarvis.core.exceptions import JarvisError
+from jarvis.llm import local_server
 from jarvis.llm.client import StreamingClient
+from jarvis.llm.errors import LlmContextOverflowError
 from jarvis.llm.types import ChatMessage, ChatResponse, GenerationOptions, Role
 from jarvis.prompt import render_prompt
 from jarvis.prompt.templates import HUD_ASSISTANT
@@ -146,6 +151,14 @@ class ConversationTuning:
 
     thinking: ThinkingRequest | None = None
     history_turns: int | None = None
+    tools: bool | None = None
+    """Whether this pair gets the tool table at all.
+
+    ``None`` means "nobody said", which is on. The knob exists because the table is
+    measured, not estimated, to be the whole request: 34 schemas cost 4639 of the 4702
+    prompt tokens a two-character question produced on a local llama.cpp server, so an
+    endpoint with a 4096-token window cannot be asked anything at all while it travels.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +179,11 @@ class _Pair:
     @property
     def label(self) -> str:
         return f"{self.provider}/{self.model}" if self.provider else self.model
+
+
+def _is_bundled(pair: _Pair | None) -> bool:
+    """Is this turn going to the llama.cpp we ship? Only that endpoint gets template kwargs."""
+    return pair is not None and pair.provider == local_server.LOCAL_PROVIDER
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,6 +230,17 @@ def _never() -> bool:
     return False
 
 
+def _error_kind(exc: BaseException) -> str:
+    """The token the page draws its advice from, off the exception's own class.
+
+    Read as an attribute rather than mapped by ``isinstance`` here so the taxonomy stays
+    where it is written -- :mod:`jarvis.llm.errors` -- and a new subclass carries its kind
+    without anybody remembering to edit a lookup table in a different layer. Empty means
+    "no advice", which the page shows as the reason and nothing else.
+    """
+    return str(getattr(type(exc), "kind", "") or "")
+
+
 def _sum_or_none(values: Sequence[int | None]) -> int | None:
     """Total tokens thought, or ``None`` when not one round reported a number.
 
@@ -234,6 +263,35 @@ class ChatReply:
 
     tools_used: tuple[str, ...] = ()
     """Tools the model actually invoked while answering."""
+
+    without_tools: bool = False
+    """This answer came back only after the tool table had been dropped.
+
+    Reported rather than quietly fixed: the model answered, so there is no failure card
+    to hang it on, but "she can open apps for you" is a claim this turn cannot support.
+    """
+
+    tool_pack: str = ""
+    """Which capability pack went out with this request, e.g. ``runtime+system``.
+
+    Empty means the whole table. The bundled local model gets a pack because the table
+    measured 3945 tokens against its own tokenizer and it is commonly run at 4096 --
+    the table alone leaves no room for the question.
+    """
+
+    tool_count: int = 0
+    """How many tools the request actually carried. Zero is a fact about the request,
+    not an opinion about the model."""
+
+    degraded: str = ""
+    """Why the turn has fewer hands than the panel advertises.
+
+    ``""`` (nothing given up), ``"overflow"`` (the window refused the table),
+    ``"policy"`` (tools switched off in configuration), ``"model"`` (a table went out
+    and the model answered without using it). Shown on the page: a silent narrowing
+    reads as the model being stupid, which is the wrong diagnosis often enough that it
+    used to be the only one on offer.
+    """
 
     sources: tuple[str, ...] = ()
     """Knowledge-base citations, e.g. ``手册.pdf 第 3 段``."""
@@ -294,6 +352,12 @@ class ChatReply:
         ``model``/``conversation``/``cancelled`` are the new ones, and they are here
         because the page cannot reconstruct them: three tabs and a round table all
         answer into the same panel.
+
+        ``tools`` is one nested dict rather than four loose keys, for the same reason
+        ``reasoning`` is one string: everything in it describes *this request*, and the
+        page has no way to invent a tool count it was not told. Before it existed, a
+        turn that carried no tools at all looked identical on screen to one that
+        carried thirty-five.
         """
         return {
             "question": self.question,
@@ -306,6 +370,12 @@ class ChatReply:
             "conversation": self.conversation,
             "task_id": self.task_id,
             "cancelled": self.cancelled,
+            "tools": {
+                "count": self.tool_count,
+                "used": list(self.tools_used),
+                "pack": self.tool_pack,
+                "degraded": self.degraded,
+            },
         }
 
 
@@ -352,6 +422,28 @@ def _clean_attachments(raw: Sequence[Mapping[str, object]]) -> tuple[dict[str, o
             clean["data"] = data
         kept.append(clean)
     return tuple(kept)
+
+
+def _tool_name(spec: Mapping[str, object]) -> str:
+    """The name inside one OpenAI-shaped tool entry.
+
+    Read defensively because the shape comes from ``ToolSpec.to_openai_schema`` and a
+    registry that hands back something else should show up as a tool nobody selected,
+    not as a ``KeyError`` in the middle of answering.
+    """
+    inner = spec.get("function")
+    return str(inner.get("name") or "") if isinstance(inner, Mapping) else ""
+
+
+def _is_machine_question(intents: Sequence[str]) -> bool:
+    """Whether this sentence is about the machine or the web rather than the corpus.
+
+    Used to decide whether to mention 资料库 at all. The word is the problem: a small
+    model handed 「资料库里没检索到，再查一次」 inside the user turn will answer that
+    sentence instead of the question above it, which is how 「打开记事本」 came back as
+    「资料库里没有关于“打开记事本”相关的内容」 five times in a row.
+    """
+    return bool(intents) and "memory" not in intents
 
 
 def _images_of(attachments: Sequence[Mapping[str, object]]) -> tuple[str, ...]:
@@ -402,6 +494,42 @@ def _with_attachment_note(
             note += " · 图片已随本条消息附上，请按画面内容回答"
         lines.append(note)
     return "\n".join(lines)
+
+
+_INVALID_ESCAPE = re.compile(r"\\(?![\"\\/bfnrtu])")
+"""A backslash that JSON itself would refuse: ``C:\\Windows`` written as ``C:\\Windows``."""
+
+
+def _load_tool_arguments(raw: str) -> tuple[dict[str, object] | None, str]:
+    """Parse one tool call's arguments, forgiving the one mistake small models make.
+
+    A 4B asked to run something in ``C:\\Windows`` emits a *single* backslash, which is
+    not a legal JSON escape, and the whole call used to die as 「参数不是合法 JSON」 --
+    measured in the r89 acceptance, where the assistant had a working PowerShell tool
+    and could not hand it a path. Only escapes that JSON itself rejects get doubled, and
+    only after a hard failure, so a well-formed call is parsed exactly as before.
+
+    Not a general JSON repairer, on purpose: it does not add missing braces, quote bare
+    words, or touch ``\\n`` / ``\\t`` -- those are valid escapes that a real path can
+    also legitimately contain, and guessing there would corrupt good input.
+    """
+    text = raw.strip()
+    if not text:
+        return {}, ""
+    try:
+        parsed: object = json.loads(text)
+    except json.JSONDecodeError as first:
+        if first.msg != "Invalid \\escape":
+            return None, f"工具参数不是合法 JSON：{text[:120]}"
+        repaired = _INVALID_ESCAPE.sub(r"\\\\", text)
+        try:
+            parsed = json.loads(repaired)
+        except json.JSONDecodeError:
+            return None, f"工具参数不是合法 JSON：{text[:120]}"
+        logger.info("repaired unescaped backslashes in a tool call's arguments")
+    if not isinstance(parsed, dict):
+        return None, "工具参数必须是 JSON 对象"
+    return {str(key): value for key, value in parsed.items()}, ""
 
 
 class ChatService:
@@ -469,6 +597,9 @@ class ChatService:
         # ``None`` means "whatever the registry currently says", which is what
         # lets a config override take effect without rebuilding the service.
         self._system_prompt = system_prompt
+        # What the screen calls her. The shipped persona says the shipped name; leaving
+        # it alone after a rename makes the panel and the answer disagree out loud.
+        self._persona_name = ""
         self._memory_provider = memory_provider
         self._knowledge_provider = knowledge_provider
         self._tool_provider = tool_provider
@@ -493,6 +624,11 @@ class ChatService:
         pairs, which is the same thing ``client_for`` was handed, and a chat service that
         constructed one would be a service that always carries a second way to reach the
         network.
+        """
+        """Called with (provider, model) after a turn had to be answered without the tool
+        table, so the next one does not have to fail first. The service owns the asking;
+        remembering is the settings layer's job, and it is handed a callback rather than a
+        preferences object because that is the shape every other knob here takes.
         """
         self._conversations: dict[str, Conversation] = {}
         self._guard = threading.Lock()
@@ -770,12 +906,12 @@ class ChatService:
             client = self._client_for_pair(pair)
         except JarvisError as exc:
             logger.error("chat has no model client: %s", exc)
-            chat.end_turn(status=STATUS_FAILED, error=str(exc))
+            chat.end_turn(status=STATUS_FAILED, error=str(exc), kind=_error_kind(exc))
             return ChatReply(question, "", str(exc), conversation=chat.id, task_id=task_id)
         except Exception as exc:  # a provider bug must still reach the page
             logger.exception("chat could not read the model client")
             detail = f"{type(exc).__name__}: {exc}"
-            chat.end_turn(status=STATUS_FAILED, error=detail)
+            chat.end_turn(status=STATUS_FAILED, error=detail, kind="crash")
             return ChatReply(
                 question,
                 "",
@@ -789,27 +925,61 @@ class ChatService:
         try:
             system = self._build_system_prompt()
             images = self._attachable(_images_of(kept), pair)
+            intents = classify_tool_intent(question)
+            # Tools first, then the wording: whether she may be told "go search the
+            # corpus again" depends on whether ``knowledge_search`` is actually going
+            # out with this request, and on a narrowed local pack it often is not.
+            tools, pack = self._tool_schemas(pair, intents)
             user_content, sources = self._build_user_message(
-                _with_attachment_note(question, kept, sees_images=bool(images))
+                _with_attachment_note(question, kept, sees_images=bool(images)),
+                intents=intents,
+                can_requery=any(_tool_name(spec) == "knowledge_search" for spec in tools),
             )
             messages = self._initial_messages(system, user_content, chat=chat, history=remembered)
             if messages and images:
                 messages[-1] = _dataclass_replace(messages[-1], images=images)
-            tools = self._tool_schemas()
-            turn = self._run(
-                client,
-                messages,
-                tools,
-                chat=chat,
-                pair=pair,
-                task_id=task_id,
-                on_delta=on_delta,
-                on_phase=on_phase,
-                should_stop=should_stop,
-            )
+            lean = False
+
+            def drive(carried: Sequence[Mapping[str, object]]) -> _Turn:
+                return self._run(
+                    client,
+                    messages,
+                    carried,
+                    chat=chat,
+                    pair=pair,
+                    task_id=task_id,
+                    on_delta=on_delta,
+                    on_phase=on_phase,
+                    should_stop=should_stop,
+                )
+
+            try:
+                turn = drive(tools)
+            except LlmContextOverflowError as exc:
+                if not tools:
+                    # Nothing left to give up: the question and the remembered history
+                    # alone do not fit, so a second request would only cost another
+                    # round trip before the same 400.
+                    raise
+                # Answer this turn without the table, and say so -- but do not *remember*
+                # it. The old path called ``remember_lean`` here, which wrote
+                # ``tools=False`` onto the pair for good: one oversized question was
+                # enough to take her hands off permanently, while the 带工具 box stayed
+                # ticked and every later request quietly omitted the table. A window that
+                # overflowed once on a 30-turn history will hold a tool table next time.
+                logger.warning(
+                    "%s cannot hold this prompt with %d tool(s) (%s); answering this turn "
+                    "without it",
+                    pair.label,
+                    len(tools),
+                    exc,
+                )
+                turn = drive(())
+                lean = True
+                pack = ""
         except JarvisError as exc:
             logger.error("chat turn failed: %s", exc)
-            chat.end_turn(status=STATUS_FAILED, error=str(exc))
+            chat.end_turn(status=STATUS_FAILED, error=str(exc), kind=_error_kind(exc))
             return ChatReply(
                 question,
                 "",
@@ -822,7 +992,7 @@ class ChatService:
         except Exception as exc:
             logger.exception("chat turn failed unexpectedly")
             detail = f"{type(exc).__name__}: {exc}"
-            chat.end_turn(status=STATUS_FAILED, error=detail)
+            chat.end_turn(status=STATUS_FAILED, error=detail, kind="crash")
             return ChatReply(
                 question,
                 "",
@@ -835,7 +1005,7 @@ class ChatService:
 
         answer = turn.text.strip()
         if not answer and not turn.cancelled:
-            chat.end_turn(status=STATUS_FAILED, error="模型没有返回内容")
+            chat.end_turn(status=STATUS_FAILED, error="模型没有返回内容", kind="empty")
             return ChatReply(
                 question,
                 "",
@@ -848,16 +1018,29 @@ class ChatService:
         if remembered and answer:
             self._remember(chat, question, answer)
             self._record_answer(chat, answer, model=pair.model, task_id=task_id)
-            self._observe(chat.id, question, answer)
+            self._observe(
+                chat.id,
+                question,
+                answer,
+                client=client,
+                extract=not turn.cancelled and not (should_stop is not None and should_stop()),
+            )
         chat.end_turn(
             status=STATUS_DONE if answer else STATUS_IDLE,
             error="已中断" if turn.cancelled and not answer else "",
+            note="no_tools" if lean else "",
             sources=sources,
         )
         return ChatReply(
             question,
             answer,
             tools_used=turn.tools_used,
+            without_tools=lean,
+            tool_pack=pack,
+            tool_count=len(tools),
+            degraded=self._degrade_reason(
+                lean=lean, tools=tools, intents=intents, used=turn.tools_used, pair=pair
+            ),
             sources=sources,
             grounded=bool(sources),
             reasoning=turn.reasoning,
@@ -920,12 +1103,15 @@ class ChatService:
         note = refuse_pictures(chosen[0], _images_of(kept))
         if note:
             logger.info("round table refused %d picture(s): %s", len(kept), note)
-            chat.end_turn(status=STATUS_FAILED, error=note)
+            chat.end_turn(status=STATUS_FAILED, error=note, kind="pictures")
             return ChatReply(question, "", note, conversation=chat.id, task_id=task_id)
         if remembered:
             self._record_question(chat, question, kept)
 
-        asked, sources = self._build_user_message(question)
+        # Same suppression as a normal turn: a seat asked to open Notepad should not be
+        # handed a sentence about the 资料库 first. ``can_requery`` stays at its default
+        # because a round table carries no tool table, so that half is unchanged here.
+        asked, sources = self._build_user_message(question, intents=classify_tool_intent(question))
         host = _Pair(chosen[0].provider, chosen[0].model, True)
         history = chat.replay(limit=self._history_limit(host)) if remembered else ()
         result = self._collaboration.run(
@@ -945,7 +1131,9 @@ class ChatService:
         if remembered and answer:
             self._remember(chat, question, answer)
             self._record_answer(chat, answer, model=chosen[0].model, task_id=task_id)
-            self._observe(chat.id, question, answer)
+            # Collaboration does not silently call a fourth/global model for
+            # extraction after the promised table has finished. Keep the transcript.
+            self._observe(chat.id, question, answer, extract=False)
         chat.end_turn(
             status=STATUS_DONE if answer else STATUS_FAILED if result.error else STATUS_IDLE,
             error=result.error or ("已中断" if result.stopped else ""),
@@ -1257,6 +1445,10 @@ class ChatService:
     # Prompt assembly
     # ------------------------------------------------------------------
 
+    def set_persona_name(self, name: str) -> None:
+        """Call her by this name in the persona, and so in her own answers."""
+        self._persona_name = (name or "").strip()
+
     def _build_system_prompt(self) -> str:
         """Persona plus whatever is known about this user.
 
@@ -1265,6 +1457,8 @@ class ChatService:
         a model starts replying like a database.
         """
         base = self._system_prompt or render_prompt("hud_assistant")
+        if self._persona_name and self._persona_name != DEFAULT_DISPLAY_NAME:
+            base = base.replace(DEFAULT_DISPLAY_NAME, self._persona_name)
         memory = self._memory_provider() if self._memory_provider else None
         if memory is None:
             return base
@@ -1275,7 +1469,13 @@ class ChatService:
             return base
         return f"{base}\n\n{block}" if block else base
 
-    def _build_user_message(self, question: str) -> tuple[str, tuple[str, ...]]:
+    def _build_user_message(
+        self,
+        question: str,
+        *,
+        intents: Sequence[str] = (),
+        can_requery: bool = True,
+    ) -> tuple[str, tuple[str, ...]]:
         """Attach retrieved evidence to the question itself.
 
         The context goes into the user turn rather than the system prompt on
@@ -1288,6 +1488,16 @@ class ChatService:
         retrieval term is the user's own sentence, so "接着上次那个说" matched nothing
         and the model, seeing no evidence, concluded there was none. Now it can re-query
         with a keyword it picks itself.
+
+        That pointer is now conditional in two ways, because as an unconditional line it
+        was the single biggest cause of 「资料库里没有关于“打开记事本”」:
+
+        * ``can_requery`` -- only say "search the corpus again" when
+          ``knowledge_search`` is actually going out with this request. Telling a model
+          to use a tool it was not given reads as the tool existing and failing.
+        * ``intents`` -- a sentence about this machine, a webpage or a file is not a
+          question about the user's imported documents, and the word 资料库 in the turn
+          is enough for a small model to answer the framing instead of the question.
 
         The citations come back as the second half of the tuple instead of being filed
         on the service: two turns in flight used to read each other's sources, and the
@@ -1312,7 +1522,7 @@ class ChatService:
                 f"\n\n问题：{question}",
                 sources,
             )
-        if self._has_corpus(knowledge):
+        if self._has_corpus(knowledge) and can_requery and not _is_machine_question(intents):
             return (
                 f"{question}\n\n"
                 "（按这句原话在资料库里没检索到片段。如果答案可能在导入的资料里，"
@@ -1351,11 +1561,89 @@ class ChatService:
         messages.append(ChatMessage.user(user_content))
         return messages
 
-    def _tool_schemas(self) -> list[dict[str, object]]:
+    def _tool_schemas(
+        self,
+        pair: _Pair | None = None,
+        intents: Sequence[str] = (),
+    ) -> tuple[list[dict[str, object]], str]:
+        """The tool table for one request, and the name of the pack it came from.
+
+        Read per pair rather than once per process because the table is not a preference
+        of the assistant's -- it is a limit of the endpoint. A hosted model with a 128k
+        window should keep her hands; a 4096-token local one has nothing else to give up.
+
+        For the bundled model the table is narrowed to what this sentence could need.
+        Measured on the shipped tokenizer: 35 tools is 3945 tokens, which is most of a
+        4096 window before the question, the history and the persona are counted. A
+        six-tool pack is a few hundred, and a 4B model reads six relevant descriptions
+        better than thirty-five it has to wade through -- so the narrowing is about
+        what fits *and* about what gets used, and it is reported on screen either way.
+
+        Returns ``([], "")`` when nothing goes out: an empty pack label is what tells
+        the page "no hands this turn", and inferring it from a zero count would also
+        be true of a build that has no tools registered at all.
+        """
         tools = self._tool_provider() if self._tool_provider else None
         if tools is None or not tools.enabled:
-            return []
-        return tools.to_openai_tools()
+            return [], ""
+        if pair is not None and not self._carries_tools(pair):
+            return [], ""
+        full = tools.to_openai_tools()
+        if pair is None or not _is_bundled(pair):
+            return full, ""
+        names = select_tool_names(intents, [_tool_name(spec) for spec in full])
+        if not names:
+            return [], "general"
+        allowed = set(names)
+        return [spec for spec in full if _tool_name(spec) in allowed], "+".join(
+            intents or ("general",)
+        )
+
+    def _carries_tools(self, pair: _Pair) -> bool:
+        """Whether the tool table goes out with this pair's next request."""
+        if self._tuning_for is None or not (pair.provider and pair.model):
+            return True
+        try:
+            tuning = self._tuning_for(pair.provider, pair.model)
+        except Exception:
+            logger.exception("could not read the tool setting for %s", pair.label)
+            return True
+        return True if tuning is None or tuning.tools is None else tuning.tools
+
+    def _degrade_reason(
+        self,
+        *,
+        lean: bool,
+        tools: Sequence[Mapping[str, object]],
+        intents: Sequence[str],
+        used: Sequence[str],
+        pair: _Pair,
+    ) -> str:
+        """Why this turn carried fewer tools than the panel implies, or ``""``.
+
+        Only ever reports something the request already knows: the count and the pack
+        come from what was built, the non-use from what came back. Nothing here is a
+        guess about the model's capabilities -- those read as insults and are wrong at
+        least as often as they are right.
+        """
+        if lean:
+            return "overflow"
+        if not tools:
+            # Nothing to give up is not a degradation. A pair with 带工具 unticked, or a
+            # build with no registry, is a choice the operator can see in the checkbox.
+            return ""
+        if intents and not used:
+            # A table went out, the sentence asked for something in it, and the answer
+            # came back without touching it. That is the one case where "资料库里没有"
+            # is not the model being lazy but a call nobody can otherwise audit.
+            logger.info(
+                "%s was handed %d tool(s) for %s and answered without calling any",
+                pair.label,
+                len(tools),
+                "+".join(intents),
+            )
+            return "model"
+        return ""
 
     # ------------------------------------------------------------------
     # The tool-calling loop
@@ -1519,7 +1807,33 @@ class ChatService:
         # when thinking happened would report the cheaper half of the work as the whole
         # bill.
         base = _dataclass_replace(options or GenerationOptions(), task_id=task_id)
-        if request is None or not request.enabled:
+        enabled = request is not None and request.enabled
+
+        if _is_bundled(pair) and local_server.selected_card().thinking:
+            # ``chat_template_kwargs`` is the only door llama.cpp actually has.
+            # Measured r90 against the shipped build (11425): a top-level
+            # ``enable_thinking`` is ignored outright -- 865 characters of thinking with
+            # it set to false, the same as sending nothing at all -- and so is
+            # ``thinking_budget``, at 32 / 128 / 512 / 2048 alike (~850 characters every
+            # time, while the ``max_tokens`` control on the same prompt scaled 93 / 382 /
+            # 853). So the budget number this pair carries is dropped rather than sent:
+            # a knob that moves nothing should say so, not quietly do nothing.
+            #
+            # Tools are no longer exempt. r77 caught Qwen3-1.7B writing the tool call as
+            # plain text once thinking was off, and this branch answered by leaving the
+            # template alone -- which made 「不思考」 a checkbox that does nothing on
+            # exactly the turns where thinking costs the most. Re-measured r90 on 1.7B
+            # and on the shipped 4B: tools are called identically either way, and
+            # thinking off is about ten times faster -- 3.4s against 32.2s for
+            # 「检查本机 JDK 版本」 on the 4B, 0.9s against 7.7s on the 1.7B.
+            return _dataclass_replace(
+                base,
+                template_kwargs={"enable_thinking": enabled},
+                thinking=None,
+                thinking_budget=None,
+            )
+
+        if not enabled:
             # Off means "send nothing at all", which is exactly what every request
             # looked like before this setting existed -- and it is the measured state:
             # the qwen endpoint returns no ``reasoning_content`` when the flag is absent.
@@ -1527,10 +1841,11 @@ class ChatService:
             # every provider, and a strict OpenAI-compatible one can 400 on a parameter
             # it does not know. Not worth the risk for a distinction nothing observed.
             return base
+        budget = request.budget if request is not None else 0
         return _dataclass_replace(
             base,
             thinking=True,
-            thinking_budget=max(1, int(request.budget)) if request.budget > 0 else None,
+            thinking_budget=max(1, int(budget)) if budget > 0 else None,
             task_id=task_id,
         )
 
@@ -1565,13 +1880,11 @@ class ChatService:
         tools = self._tool_provider() if self._tool_provider else None
         if tools is None:
             return f"工具 {name} 不可用：工具服务未启用"
-        try:
-            arguments = json.loads(raw_arguments) if raw_arguments.strip() else {}
-        except json.JSONDecodeError:
-            logger.warning("tool %s got unparsable arguments: %r", name, raw_arguments[:120])
-            return f"工具 {name} 的参数不是合法 JSON：{raw_arguments[:120]}"
-        if not isinstance(arguments, dict):
-            return f"工具 {name} 的参数必须是 JSON 对象"
+        arguments, problem = _load_tool_arguments(raw_arguments)
+        if problem:
+            logger.warning("tool %s got bad arguments: %s", name, problem[:160])
+            return f"工具 {name} 的{problem}"
+        assert arguments is not None  # narrowed by ``problem`` being empty
         try:
             result = tools.invoke(name, arguments)
         except JarvisError as exc:  # pragma: no cover - invoke does not raise
@@ -1582,7 +1895,15 @@ class ChatService:
     # Memory
     # ------------------------------------------------------------------
 
-    def _observe(self, conversation_id: str, question: str, answer: str) -> None:
+    def _observe(
+        self,
+        conversation_id: str,
+        question: str,
+        answer: str,
+        *,
+        client: LlmClient | None = None,
+        extract: bool = True,
+    ) -> None:
         """Record the turn and mine it for durable memories.
 
         Called after the reply exists, never before: memory extraction must not
@@ -1592,7 +1913,7 @@ class ChatService:
         if memory is None:
             return
         try:
-            memory.observe_turn(conversation_id, question, answer)
+            memory.observe_turn(conversation_id, question, answer, client=client, extract=extract)
         except JarvisError as exc:
             logger.warning("could not record the turn: %s", exc)
         except Exception:  # pragma: no cover - memory must never break chat

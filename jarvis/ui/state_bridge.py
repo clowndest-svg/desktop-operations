@@ -20,7 +20,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 from jarvis.core.events import (
@@ -125,6 +125,16 @@ class ChatTurn:
     replayed into every later question would be the largest thing in the request.
     """
 
+    tools: Mapping[str, object] = field(default_factory=dict)
+    """What this answer's request actually carried: count, pack, tools used, why not.
+
+    A dict rather than four loose fields because it is one fact with four parts, and
+    the page renders it as one line. Empty on a user turn, on a spoken turn, and on
+    anything reloaded from the transcript -- which is the honest reading: those rows
+    are not claims about a request, and drawing 「本次带 0 个工具」 under a question
+    would be exactly the kind of confident wrong detail this field exists to remove.
+    """
+
 
 @dataclass(frozen=True, slots=True)
 class QueuedQuestion:
@@ -162,6 +172,17 @@ class ConversationCard:
     active: bool = False
     task_id: str = ""
     error: str = ""
+    error_kind: str = ""
+    """What sort of failure :attr:`error` is, so the page can name the next step.
+
+    Alongside the message rather than instead of it: the words are what somebody pastes to
+    their vendor, and the token is what tells them that a refused key is not a dead network.
+    """
+    note: str = ""
+    """Something this turn did that the answer does not show -- ``no_tools`` when the
+    request had to drop the tool table to fit the model's context. Not a failure, so it is
+    not drawn as one; just not something to leave out, either.
+    """
     queued: tuple[QueuedQuestion, ...] = ()
     """What this conversation still has to ask, in the order it was typed."""
 
@@ -184,6 +205,8 @@ class ConversationCard:
             active=bool(row.get("active")),
             task_id=str(row.get("task_id") or ""),
             error=str(row.get("error") or ""),
+            error_kind=str(row.get("error_kind") or ""),
+            note=str(row.get("note") or ""),
             queued=_row_queue(row.get("queued")),
         )
 
@@ -199,6 +222,8 @@ class ConversationCard:
             "active": self.active,
             "task_id": self.task_id,
             "error": self.error,
+            "error_kind": self.error_kind,
+            "note": self.note,
             "queued": [question.to_dict() for question in self.queued],
         }
 
@@ -299,6 +324,7 @@ class UiState:
                     "reasoning": turn.reasoning,
                     "model": turn.model,
                     "record": turn.record,
+                    "tools": dict(turn.tools),
                 }
                 for turn in self.history
             ],
@@ -383,7 +409,13 @@ class StateBridge:
             self._interrupted = False
 
     def add_turn(
-        self, role: str, text: str, reasoning: str = "", model: str = "", record: str = ""
+        self,
+        role: str,
+        text: str,
+        reasoning: str = "",
+        model: str = "",
+        record: str = "",
+        tools: Mapping[str, object] | None = None,
     ) -> None:
         """Append one message that did not come from the microphone.
 
@@ -395,7 +427,7 @@ class StateBridge:
         round table: three models writing into one log need their rows labelled.
         """
         with self._lock:
-            self._add_turn(role, text, reasoning, model, record)
+            self._add_turn(role, text, reasoning, model, record, tools)
             snapshot = self._build()
         self._notify(snapshot)
 
@@ -566,12 +598,25 @@ class StateBridge:
         # Unknown kinds are ignored but still recorded in ``last_event``.
 
     def _add_turn(
-        self, role: str, text: str, reasoning: str = "", model: str = "", record: str = ""
+        self,
+        role: str,
+        text: str,
+        reasoning: str = "",
+        model: str = "",
+        record: str = "",
+        tools: Mapping[str, object] | None = None,
     ) -> None:
         if not text:
             return
         self._history.append(
-            ChatTurn(role=role, text=text, reasoning=reasoning, model=model, record=record)
+            ChatTurn(
+                role=role,
+                text=text,
+                reasoning=reasoning,
+                model=model,
+                record=record,
+                tools=dict(tools or {}),
+            )
         )
         limit = self._max_history * 2
         if len(self._history) > limit:

@@ -34,8 +34,12 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from typing import Any
 
+from jarvis.app import local_advice
+from jarvis.app.image_gen import IMAGE_KEY_ENV
 from jarvis.app.preferences import (
     CHAT_HISTORY_TURNS,
+    DEFAULT_DISPLAY_NAME,
+    DISPLAY_NAME,
     LLM_BASE_URL,
     LLM_EXTRAS,
     LLM_HIDDEN,
@@ -45,6 +49,10 @@ from jarvis.app.preferences import (
     LLM_THINKING,
     LLM_THINKING_BUDGET,
     LLM_TUNING,
+    LOCAL_CONTEXT,
+    LOCAL_EAGER,
+    LOCAL_IDLE_MINUTES,
+    LOCAL_MODEL,
     SETTINGS_AI_EDITED,
     TELEMETRY_INTERVAL_MS,
     THINKING_LOADER,
@@ -53,13 +61,21 @@ from jarvis.app.preferences import (
     VOICE_AUTO_SPEAK_TYPED,
     WAKE_GREETING,
     Preferences,
+    display_name,
     thinking_loader,
 )
 from jarvis.app.wake_greeting import DEFAULT_GREETING, MAX_GREETING_CHARS
 from jarvis.config.schema import LlmSection, ModelSpec, ProviderSection
+from jarvis.llm import local_server
+from jarvis.llm.local_server import CONTEXT_TIERS, IDLE_TIERS, LOCAL_PROVIDER, Tuning
 from jarvis.llm.service import LlmService
 
 logger = logging.getLogger("jarvis.app.settings_service")
+
+MAX_NAME_CHARS = 12
+"""How long a name the interface can carry: the brand sits in a slim top bar and in a
+tray tooltip, and anything longer is a sentence rather than a name.
+"""
 
 CLOUD_VOICE_PROVIDER = "voice_cloud"
 """The pseudo-provider name that identifies the cloud-voice key in a patch.
@@ -71,6 +87,9 @@ as any other key, because a secret belongs in the environment and not in
 """
 
 CLOUD_VOICE_KEY_ENV = "DASHSCOPE_API_KEY"
+
+IMAGE_KEY_TARGET = "image"
+"""设置页里那格"云端生图的钥匙"的名字：作为 ``key_for`` 传进来，决定写哪个变量。"""
 """Must match :data:`jarvis.tts.cloud.DEFAULT_KEY_ENV`. Asserted in the tests --
 the panel writes a name and the client reads a name, and two spellings of one
 variable is a key that silently never takes effect."""
@@ -199,6 +218,11 @@ class SettingsService:
         """
         self._prefs = preferences
         self._llm = llm_service
+        self._ask_brief: Callable[[str], str] | None = None
+        """How to ask one short question of the model the user is actually using.
+        Wired late by ``set_advice_ask`` because the chat service does not exist yet
+        when this one is constructed. Without it the advice button still answers --
+        from the rule engine, and it says so."""
         self._section_provider = section_provider
         self._alerts = alerts
         """The alert centre, when one is wired. Its thresholds are settings like any other,
@@ -223,6 +247,11 @@ class SettingsService:
         """Re-apply whatever the operator saved last time, before any client exists."""
         self._migrate_global_overrides()
         self._apply_override()
+        # Including the bundled model's dials. Without this the first read of
+        # ``model_server_status`` answers from the module default, so a buyer who set
+        # 8K yesterday saw 「上下文 4096」 on the row until they opened the panel --
+        # measured in the packaged build, not theorised.
+        self.tune_local()
 
     def _migrate_global_overrides(self) -> None:
         """Fold the old single-row override into the per-provider map, once.
@@ -271,7 +300,14 @@ class SettingsService:
         """
         section = self._effective_section()
         provider_name = section.default_provider
-        provider = section.providers.get(provider_name)
+        # 一行只问一次：自带那一行的模型名现在由「选哪个离线模型」决定，三个字段各问一遍
+        # 就成了三次读，中途换选择器会让同一行同时出现两个名字（r79 定下的那条规矩）。
+        shown = {name: _follows_picker(name, row) for name, row in section.providers.items()}
+        provider = shown.get(provider_name)
+        pair_model = provider.model_spec(self._prefs.text(LLM_MODEL)).id if provider else ""
+        # 这三格显示的是**当前这一对模型真实在用的值**，不是某个全局副本：以前它们读全局，
+        # 而每次请求读的是每一对自己那一行 —— 面板写着 2 轮、发出去却是 10 轮（r85 实测）。
+        pair = self.tuning_for(provider_name, pair_model)
         variable = provider.api_key_env if provider is not None else ""
         configured = set(self._safe_section().providers)
         overrides = self._overrides()
@@ -293,8 +329,11 @@ class SettingsService:
                     "source": "配置文件" if name in configured else "界面添加",
                     "edited": name in overrides,
                     "current": name == provider_name,
+                    # 界面据此把「加模型 / 删」这两枚按钮按下去：能让用户点的按钮点了必须有效，
+                    # 而这一行的模型表由「选哪个离线模型」决定，在这里加完也会被盖掉。
+                    "models_locked": name == LOCAL_PROVIDER,
                 }
-                for name, row in sorted(section.providers.items())
+                for name, row in sorted(shown.items())
             ],
             "provider": provider_name,
             "hidden_models": self._hidden_rows(section),
@@ -304,15 +343,27 @@ class SettingsService:
             "api_key_set": bool(self._environ.get(variable, "").strip()),
             "cloud_voice_key_variable": CLOUD_VOICE_KEY_ENV,
             "cloud_voice_key_set": bool(self._environ.get(CLOUD_VOICE_KEY_ENV, "").strip()),
+            "image_key_set": bool(self._environ.get(IMAGE_KEY_ENV, "").strip()),
+            "image_key_variable": IMAGE_KEY_ENV,
             "overrides_active": self._override_summary(),
             "voice_auto_arm": self._prefs.flag(VOICE_AUTO_ARM, default=False),
             "auto_speak_typed": self._prefs.flag(VOICE_AUTO_SPEAK_TYPED, default=True),
             "telemetry_interval_ms": self._prefs.number(TELEMETRY_INTERVAL_MS, default=1500),
-            "thinking_enabled": self.thinking_enabled(),
-            "thinking_budget": self.thinking_budget(),
+            "thinking_enabled": pair["thinking_enabled"],
+            "thinking_budget": pair["thinking_tokens"],
             "thinking_budget_bounds": list(THINKING_BUDGET_BOUNDS),
-            "history_turns": self.history_turns(),
+            # 随包那个 llama.cpp 不认「思考预算」这个字段（r90 实测：32/128/512/2048
+            # 想出来的字数一样，都是 ~850；同一句拿 max_tokens 当标尺是 93/382/853）。
+            # 所以这一格在本地那一家是"只关得掉、调不了深浅"，面板必须这么说，
+            # 不能继续写"能和回答里的数对上，所以不是摆设"。
+            "thinking_budget_honored": not (
+                provider_name == local_server.LOCAL_PROVIDER
+                and local_server.selected_card().thinking
+            ),
+            "history_turns": pair["turns"],
             "history_turns_bounds": list(HISTORY_TURNS_BOUNDS),
+            "tuning_pair": f"{provider_name} · {pair_model}" if pair_model else provider_name,
+            "tuning_pinned": pair["stored"],
             "ai_edited": self.ai_edited(),
             "wake_greeting": self.wake_greeting(),
             "wake_greeting_default": DEFAULT_GREETING,
@@ -326,6 +377,10 @@ class SettingsService:
                 {"id": kind, "label": LOADER_LABELS.get(kind, f"其它：{kind}")}
                 for kind in THINKING_LOADERS
             ],
+            "display_name": self.display_name(),
+            "display_name_default": DEFAULT_DISPLAY_NAME,
+            "display_name_max": MAX_NAME_CHARS,
+            **self.local_section(),
             "alerts": self._alerts.settings() if self._alerts is not None else {},
             **(self._wake_words.settings() if self._wake_words is not None else {}),
         }
@@ -342,9 +397,10 @@ class SettingsService:
         """
         section = self._effective_section()
         provider_name = section.default_provider
-        provider = section.providers.get(provider_name)
-        if provider is None:
+        original = section.providers.get(provider_name)
+        if original is None:
             return provider_name, ""
+        provider = _follows_picker(provider_name, original)
         return provider_name, provider.model_spec(self._prefs.text(LLM_MODEL)).id
 
     def model_choices(self) -> dict[str, Any]:
@@ -363,7 +419,8 @@ class SettingsService:
         """
         section = self._effective_section()
         provider_name = section.default_provider
-        provider = section.providers.get(provider_name)
+        shown = {name: _follows_picker(name, row) for name, row in section.providers.items()}
+        provider = shown.get(provider_name)
         model_id = provider.model_spec(self._prefs.text(LLM_MODEL)).id if provider else ""
         tuning = self.tuning_for(provider_name, model_id)
         return {
@@ -380,58 +437,211 @@ class SettingsService:
                     "timeout_seconds": row.timeout_seconds,
                     "current": name == provider_name,
                 }
-                for name, row in sorted(section.providers.items())
+                for name, row in sorted(shown.items())
             ],
             "provider": provider_name,
             "model": model_id,
             "thinking": tuning["thinking"],
+            # 面板里填过精确预算时，档位下拉多一项「自定义 8000」—— 否则那个 select
+            # 会挑不到任何 option，屏上看着像"没设过"。
+            "thinking_custom_budget": tuning["thinking_budget"],
+            "thinking_levels": (
+                [*THINKING_LEVEL_ORDER, "custom"]
+                if tuning["thinking"] == "custom"
+                else list(THINKING_LEVEL_ORDER)
+            ),
             "turns": tuning["turns"],
-            "thinking_levels": list(THINKING_LEVEL_ORDER),
+            "tools": tuning["tools"],
             "turns_bounds": list(HISTORY_TURNS_BOUNDS),
         }
 
     # -- per-model tuning: thinking level and context size -------------------
 
     def tuning_for(self, provider: str, model: str) -> dict[str, Any]:
-        """The thinking level and context size remembered for one provider/model.
+        """The thinking level, context size and tool table remembered for one pair.
 
         Read through a stored table rather than one key per setting because the pair
         is the identity: the answer to "how hard should this model think" is only
         meaningful next to the model it is about.
+
+        This is also **the** answer the settings panel shows: the three fields in
+        设置 → 思考与上下文 used to read globals that the per-pair row always shadowed,
+        so the panel displayed one number while the request carried another (r85).
+        ``stored`` says whether this pair has a row of its own, and
+        ``thinking_budget`` carries an exact token count typed in the panel -- the
+        header's four levels are presets, not the only values there are.
         """
         stored = self._prefs.get(LLM_TUNING)
         row = stored.get(_tuning_key(provider, model)) if isinstance(stored, dict) else None
         if not isinstance(row, dict):
-            return {"thinking": DEFAULT_THINKING_LEVEL, "turns": self.history_turns()}
+            # 没单独设过的模型：跟最后一次改动（``_write_tuning`` 每次都把这两个全局
+            # 镜像写一遍），出厂那份是「不思考 / 2048」。以前这里固定回 "medium"，
+            # 于是面板显示"未勾选"而每条请求都带着 4096 的思考预算。
+            tokens = self.thinking_budget()
+            enabled = self.thinking_enabled()
+            label = _nearest_level(tokens) if enabled else "off"
+            return {
+                "thinking": label,
+                "level": label,
+                "thinking_budget": None,
+                "thinking_enabled": enabled,
+                "thinking_tokens": tokens,
+                "turns": self.history_turns(),
+                "tools": True,
+                "stored": False,
+            }
         level = str(row.get("thinking") or "").strip()
         if level not in THINKING_LEVELS:
             level = DEFAULT_THINKING_LEVEL
+        budget = row.get("thinking_budget")
+        if isinstance(budget, bool) or not isinstance(budget, int):
+            budget = None
+        else:
+            low, high = THINKING_BUDGET_BOUNDS
+            budget = budget if low <= budget <= high else None
         try:
             turns = int(row.get("turns", self.history_turns()))
         except (TypeError, ValueError):
             turns = self.history_turns()
-        low, high = HISTORY_TURNS_BOUNDS
-        return {"thinking": level, "turns": max(low, min(high, turns))}
+        low_turns, high_turns = HISTORY_TURNS_BOUNDS
+        # Absent means "never said", which is on: a request that carries the tool table
+        # is what every model was answering with before this knob existed, and a row
+        # written by an older version must not quietly take her hands away.
+        tools = row.get("tools")
+        enabled, tokens = _thinking_tokens(level, budget)
+        return {
+            "thinking": _thinking_label(level, budget),
+            "level": level,
+            "thinking_budget": budget,
+            "thinking_enabled": enabled,
+            "thinking_tokens": tokens,
+            "turns": max(low_turns, min(high_turns, turns)),
+            "tools": tools if isinstance(tools, bool) else True,
+            "stored": True,
+        }
 
-    def set_tuning(self, thinking: object = None, turns: object = None) -> dict[str, Any]:
-        """Remember a thinking level and/or context size for the current model.
+    def set_tuning(
+        self,
+        thinking: object = None,
+        turns: object = None,
+        tools: object = None,
+    ) -> dict[str, Any]:
+        """Remember a thinking level, context size and/or tool table for the current model.
 
-        Writes only what it was given: the two knobs live in the chat header next to
+        Writes only what it was given: the knobs live in the chat header next to
         each other, and a caller changing one must not silently reset the other to
         its default.
         """
         section = self._effective_section()
-        provider_name = section.default_provider
-        provider = section.providers.get(provider_name)
-        model_id = provider.model_spec(self._prefs.text(LLM_MODEL)).id if provider else ""
-        current = self.tuning_for(provider_name, model_id)
-        level = current["thinking"]
+        return self._write_tuning(
+            section.default_provider,
+            self._current_model(section),
+            tools,
+            thinking,
+            turns,
+        )
+
+    def _current_model(self, section: LlmSection) -> str:
+        """The model id the chat is on. For the bundled row that is the picker's, not the YAML's.
+
+        ``set_tuning`` writes the 思考档/上下文 under this name; if it disagreed with the
+        name actually sent, the knob would be filed where nothing ever reads it.
+        """
+        provider = section.providers.get(section.default_provider)
+        if provider is None:
+            return ""
+        provider = _follows_picker(section.default_provider, provider)
+        return provider.model_spec(self._prefs.text(LLM_MODEL)).id
+
+    def _current_pair(self) -> tuple[str, str]:
+        """The provider/model the panel's 思考与上下文 fields are about."""
+        section = self._effective_section()
+        return section.default_provider, self._current_model(section)
+
+    def _set_thinking_enabled(self, value: object) -> str | None:
+        """The panel's checkbox -- the same value as the header's 思考 dropdown.
+
+        It used to write a global switch that every per-pair row silently shadowed: the
+        panel said 未勾选 while the request carried a 4096-token thinking budget (r85).
+        """
+        provider, model = self._current_pair()
+        if bool(value):
+            kept = self.tuning_for(provider, model)["thinking_budget"]
+            level = _nearest_level(kept) if kept else "medium"
+            answer = self._write_tuning(provider, model, thinking=level, thinking_budget=kept)
+        else:
+            answer = self._write_tuning(provider, model, thinking="off")
+        return None if answer["ok"] else str(answer["error"])
+
+    def _set_thinking_budget(self, value: object) -> str | None:
+        """The panel's number: this pair's exact budget (the level is only its name)."""
+        provider, model = self._current_pair()
+        answer = self._write_tuning(provider, model, thinking_budget=value)
+        return None if answer["ok"] else str(answer["error"])
+
+    def _set_history_turns(self, value: object) -> str | None:
+        """The panel's turn count: this pair's row, and the global default follows it."""
+        provider, model = self._current_pair()
+        answer = self._write_tuning(provider, model, turns=value)
+        return None if answer["ok"] else str(answer["error"])
+
+    def remember_tools(self, provider: str, model: str, enabled: bool) -> dict[str, Any]:
+        """Take the tool table away from (or back to) one named pair.
+
+        Explicit pair rather than "the current one", because the caller is the chat
+        service reacting to a model that just refused a prompt: the pair that overflowed
+        is not necessarily the one the window is showing -- a pinned tab answers from its
+        own model.
+        """
+        return self._write_tuning(provider, model, enabled)
+
+    def _write_tuning(
+        self,
+        provider: str,
+        model: str,
+        tools: object = None,
+        thinking: object = None,
+        turns: object = None,
+        thinking_budget: object = None,
+    ) -> dict[str, Any]:
+        """One pair's knobs, written back in the shape they are stored in.
+
+        ``thinking`` takes a level name or ``"custom"`` (which leaves an exact budget
+        alone); ``thinking_budget`` writes that exact number and labels it with the
+        nearest preset. Picking a preset **clears** an exact budget -- otherwise the
+        dropdown would say 中度思考 while the request still carried 8000.
+        """
+        current = self.tuning_for(provider, model)
+        level = str(current["level"])
+        budget: int | None = current["thinking_budget"]
         if thinking is not None:
             candidate = str(thinking or "").strip()
-            if candidate not in THINKING_LEVELS:
+            if candidate != "custom" and candidate not in THINKING_LEVELS:
                 return {"ok": False, "error": f"未知的思考强度：{candidate}", **current}
-            level = candidate
-        budget = current["turns"]
+            if candidate != "custom":
+                level = candidate
+                # 「不思考」是关掉，不是换个数：留着预算，重新打开时还用它。
+                if candidate != "off":
+                    budget = None
+        if thinking_budget is not None:
+            if isinstance(thinking_budget, bool) or not isinstance(
+                thinking_budget, (int, float, str)
+            ):
+                return {"ok": False, "error": "思考预算必须是整数", **current}
+            try:
+                wanted = int(thinking_budget)
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "思考预算必须是整数", **current}
+            low_budget, high_budget = THINKING_BUDGET_BOUNDS
+            if not low_budget <= wanted <= high_budget:
+                return {
+                    "ok": False,
+                    "error": f"思考预算需在 {low_budget}–{high_budget} 之间",
+                    **current,
+                }
+            budget = wanted
+            level = _nearest_level(wanted)
+        count = current["turns"]
         if turns is not None:
             # Typed before it is converted: the value arrives from a spinner in the
             # page, so it is ``object`` here, and mypy is right that ``int()`` on an
@@ -440,21 +650,47 @@ class SettingsService:
             if isinstance(turns, bool) or not isinstance(turns, (int, float, str)):
                 return {"ok": False, "error": "上下文轮数必须是整数", **current}
             try:
-                budget = int(turns)
+                count = int(turns)
             except (TypeError, ValueError):
                 return {"ok": False, "error": "上下文轮数必须是整数", **current}
             low, high = HISTORY_TURNS_BOUNDS
-            if not low <= budget <= high:
+            if not low <= count <= high:
                 return {"ok": False, "error": f"上下文轮数需在 {low}–{high} 之间", **current}
+        carry = current["tools"]
+        if tools is not None:
+            if not isinstance(tools, bool):
+                return {"ok": False, "error": "带工具只能是要么带、要么不带", **current}
+            carry = tools
         stored = self._prefs.get(LLM_TUNING)
         table = dict(stored) if isinstance(stored, dict) else {}
-        table[_tuning_key(provider_name, model_id)] = {"thinking": level, "turns": budget}
+        row: dict[str, Any] = {"thinking": level, "turns": count, "tools": carry}
+        if budget is not None:
+            row["thinking_budget"] = budget
+        table[_tuning_key(provider, model)] = row
         self._prefs.set(LLM_TUNING, table)
-        # The chat service reads the level per turn, so the next question is already
-        # answered with the new one -- no restart, which is the whole point of a
-        # dropdown next to the input box.
-        self._apply_thinking(level)
-        return {"ok": True, "error": "", "thinking": level, "turns": budget}
+        # The chat service reads this per turn, so the next question is already answered
+        # with the new value -- no restart, which is the whole point of a dropdown next
+        # to the input box. The globals are mirrored too: they are what a model nobody
+        # has touched falls back to, and a panel that stopped speaking for the whole
+        # window after the first edit would be its own kind of lie.
+        enabled, tokens = _thinking_tokens(level, budget)
+        self._prefs.set_flag(LLM_THINKING, enabled)
+        self._prefs.set(LLM_THINKING_BUDGET, tokens)
+        self._prefs.set(CHAT_HISTORY_TURNS, count)
+        return {
+            "ok": True,
+            "error": "",
+            "provider": provider,
+            "model": model,
+            "thinking": _thinking_label(level, budget),
+            "level": level,
+            "thinking_budget": budget,
+            "thinking_enabled": enabled,
+            "thinking_tokens": tokens,
+            "turns": count,
+            "tools": carry,
+            "stored": True,
+        }
 
     def choose_model(self, provider_name: object, model_id: object = None) -> dict[str, Any]:
         """Point the assistant at another provider and/or model.
@@ -468,7 +704,7 @@ class SettingsService:
         provider = section.providers.get(name)
         if provider is None:
             return {"ok": False, "error": f"没有这个服务商：{name}", "provider": "", "model": ""}
-        spec = provider.model_spec(str(model_id or ""))
+        spec = _follows_picker(name, provider).model_spec(str(model_id or ""))
         self._prefs.set(LLM_PROVIDER, name)
         self._prefs.set(LLM_MODEL, spec.id)
         self._apply_override()
@@ -494,6 +730,8 @@ class SettingsService:
         provider = section.providers.get(name)
         if provider is None:
             return {"ok": False, "error": f"没有这个服务商：{name}", "models": []}
+        if name == LOCAL_PROVIDER:
+            return {"ok": False, "error": _LOCAL_ROW_IS_READONLY, "models": []}
         specs = list(provider.models)
         if any(spec.id == candidate for spec in specs):
             return {"ok": False, "error": f"这个服务商里已经有 {candidate} 了", "models": []}
@@ -519,6 +757,8 @@ class SettingsService:
         provider = section.providers.get(name)
         if provider is None:
             return {"ok": False, "error": f"没有这个服务商：{name}", "models": []}
+        if name == LOCAL_PROVIDER:
+            return {"ok": False, "error": _LOCAL_ROW_IS_READONLY, "models": []}
         specs = tuple(spec for spec in provider.models if spec.id != target)
         if len(specs) == len(provider.models):
             return {"ok": False, "error": f"这个服务商里没有 {target}", "models": []}
@@ -704,24 +944,37 @@ class SettingsService:
         if key == "telemetry_interval_ms":
             return self._set_interval(value)
         if key == "thinking_enabled":
-            self._prefs.set(LLM_THINKING, bool(value))
-            return None
+            return self._set_thinking_enabled(value)
         if key == "thinking_budget":
-            return self._set_in_range(
-                LLM_THINKING_BUDGET,
-                value,
-                THINKING_BUDGET_BOUNDS,
-                "思考预算",
-                "token",
-            )
+            return self._set_thinking_budget(value)
         if key == "history_turns":
-            return self._set_in_range(
-                CHAT_HISTORY_TURNS, value, HISTORY_TURNS_BOUNDS, "上下文轮数", "轮"
-            )
+            return self._set_history_turns(value)
         if key == "wake_greeting":
             return self._set_greeting(value)
         if key == "thinking_loader":
             return self._set_loader(value)
+        if key == "display_name":
+            return self._set_display_name(value)
+        if key == "local_context":
+            problem = self._set_local_choice(
+                LOCAL_CONTEXT, value, CONTEXT_TIERS, "上下文窗口", "token"
+            )
+            if problem is None:
+                self._note_local_window()
+            return problem
+        if key == "local_idle_minutes":
+            problem = self._set_local_choice(
+                LOCAL_IDLE_MINUTES, value, IDLE_TIERS, "空闲自动关", "分钟"
+            )
+            if problem is None:
+                local_server.shared_server().rearm_idle()
+            return problem
+        if key == "local_eager":
+            self._prefs.set(LOCAL_EAGER, bool(value))
+            self.tune_local()
+            return None
+        if key == "local_model":
+            return self._set_local_model(value)
         if key in ("alerts_rules", "alerts_cooldown_minutes", "alerts_speak_critical"):
             return self._apply_alerts(key, value)
         if key == "wake_keywords":
@@ -730,6 +983,206 @@ class SettingsService:
             verdict: str | None = self._wake_words.apply(value)
             return verdict
         return "未知设置项"
+
+    # -- the bundled model's dials ---------------------------------------------
+
+    def tune_local(self) -> Tuning:
+        """Push the dialed window / idle wait / eager flag into the llm layer.
+
+        :mod:`jarvis.llm.local_server` may not read preferences (the layer guard says
+        so), so every reader of the bundled model goes through here first -- otherwise a
+        dial moved in the panel would be ignored by the next spawn.
+        """
+        context = self._choice(LOCAL_CONTEXT, CONTEXT_TIERS, local_server.DEFAULT_CONTEXT)
+        minutes = self._choice(LOCAL_IDLE_MINUTES, IDLE_TIERS, local_server.DEFAULT_IDLE_MINUTES)
+        dial = Tuning(
+            context=context,
+            idle_seconds=float(minutes) * 60.0,
+            eager=self._prefs.flag(LOCAL_EAGER, default=False),
+            model=self._prefs.text(LOCAL_MODEL, default=local_server.MODEL_AUTO),
+        )
+        local_server.configure(dial)
+        return dial
+
+    def _choice(self, key: str, tiers: tuple[int, ...], fallback: int) -> int:
+        """A stored tier, or the shipped one when what is stored is not a tier."""
+        value = int(self._prefs.number(key, default=fallback))
+        return value if value in tiers else fallback
+
+    def local_section(self) -> dict[str, object]:
+        """The bundled model's dials, with the measured cost of each tier attached."""
+        dial = self.tune_local()
+        card = local_server.card_for(local_server.model_file())
+        return {
+            "local_context": dial.context,
+            "local_model": dial.model,
+            "local_model_label": card.label,
+            "local_models": local_server.bundled_catalog(),
+            "local_context_options": [
+                {
+                    "id": tier,
+                    "label": f"{tier // 1024}K",
+                    "note": self._tier_note(tier),
+                    # The gate for *this* tier **of the model actually picked**: the dropdown
+                    # must not keep quoting 7B numbers when the 0.6B is loaded, nor the
+                    # numbers of whatever was saved last.
+                    "needs_free_mb": local_server.gate_mb(card, tier),
+                }
+                for tier in CONTEXT_TIERS
+            ],
+            "local_idle_minutes": int(dial.idle_seconds // 60),
+            "local_idle_options": [
+                {
+                    "id": minutes,
+                    "label": "不自动关（一直占内存）" if minutes == 0 else f"{minutes} 分钟",
+                }
+                for minutes in IDLE_TIERS
+            ],
+            "local_eager": dial.eager,
+            "local_needs_free_mb": dial.needed_free_mb,
+            "local_free_mb": local_server.free_memory_mb(),
+            "local_tool_table_tokens": local_server.TOOL_TABLE_TOKENS,
+            "local_pack_tokens": local_server.PACK_TABLE_TOKENS,
+        }
+
+    def _tier_note(self, tier: int) -> str:
+        """What this window costs *on the model that is picked*, and what it lets her do.
+
+        The numbers are per-model measurements (``MODEL_CARDS``); an unmeasured file says
+        so instead of borrowing the 7B's figures.
+        """
+        card = local_server.card_for(local_server.model_file())
+        tools = local_server.TOOL_TABLE_TOKENS
+        pack = local_server.PACK_TABLE_TOKENS
+        gpu, cpu = card.resident(tier)
+        if not card.measured:
+            cost = f"这个文件没实测过，按大小估要约 {card.gate_base_mb / 1024:.1f} GB 空闲内存"
+        else:
+            cost = f"本机常驻约 {gpu / 1024:.1f} GB（没显卡的机器约 {cpu / 1024:.1f} GB）"
+        if tier < pack:
+            return f"{cost}；连 {pack} token 的最小工具包都装不下，这一档她只回答、不动手"
+        if tier < tools:
+            return (
+                f"{cost}；装不下 {tools} token 的完整工具清单，"
+                f"但装得下按问题挑出来的那一小包（最多 {pack} token）。"
+                "r88 起她先只带用得上那几个，问本机、查版本、联网、开程序都能动手"
+            )
+        if not card.acts_verified:
+            return (
+                f"{cost}；装得下那份 {tools} token 的工具清单，"
+                "但**这台机器上还没见过它真调成一次工具**"
+            )
+        return f"{cost}；装得下那份 {tools} token 的工具清单，实测见过它一边答一边动手"
+
+    def _set_local_choice(
+        self, key: str, value: Any, tiers: tuple[int, ...], what: str, unit: str
+    ) -> str | None:
+        """Store one of the bundled model's enumerated dials, refusing a value off the list."""
+        try:
+            number = int(str(value).strip())
+        except (TypeError, ValueError):
+            return f"{what}得是个数字"
+        if number not in tiers:
+            options = "、".join(str(tier) for tier in tiers)
+            return f"{what}没有「{number} {unit}」这一档，可选：{options}"
+        self._prefs.set(key, number)
+        self.tune_local()
+        return None
+
+    def _set_local_model(self, value: Any) -> str | None:
+        """Pick which weights file she loads. Only the chosen one ever reaches memory."""
+        name = str(value or "").strip()
+        if name not in (local_server.MODEL_AUTO, local_server.MODEL_NONE):
+            rows = {str(row["file"]): row for row in local_server.bundled_catalog()}
+            row = rows.get(name)
+            if row is None:
+                options = "、".join(sorted(rows)) or "（包里没有权重文件）"
+                return f"没有「{name}」这个离线模型，可选：{options}"
+            if not row["present"]:
+                return f"「{name}」的文件不在「{local_server.MODEL_DIRNAME}」目录里，选不了"
+        self._prefs.set(LOCAL_MODEL, name)
+        self.tune_local()
+        server = local_server.shared_server()
+        if server.phase is local_server.ModelPhase.RUNNING:
+            logger.info("离线模型换选了，但还在按上一个跑：停掉再加载才换上新的")
+        return None
+
+    def _note_local_window(self) -> None:
+        """A window moved while the model is loaded cannot resize it -- say so, don't lie."""
+        server = local_server.shared_server()
+        if server.phase is not local_server.ModelPhase.RUNNING:
+            return
+        logger.info("自带模型还在按旧的上下文窗口跑，停掉再加载才换成新的")
+
+    def set_advice_ask(self, ask: Callable[[str], str]) -> None:
+        """Wire the one-shot question the advice button asks."""
+        self._ask_brief = ask
+
+    def recommend_local(self) -> dict[str, object]:
+        """One look at this machine, one answer: which model, which window, how long idle.
+
+        The model gets first say because that is what the button promises. When it cannot
+        be reached -- no key, the offline model refused by this very machine -- the rule
+        engine answers instead and ``source`` says which one it was. A button that goes
+        quiet is worse than a button that admits it is a calculator.
+        """
+        machine = local_advice.read_machine()
+        catalog = local_server.bundled_catalog()
+        fallback = local_advice.rule_advice(machine, catalog)
+        if self._ask_brief is None:
+            return {**fallback.as_row(), "note": "没接到模型，这一套是本地规则算的"}
+        try:
+            advice = local_advice.ai_advice(machine, catalog, self._ask_brief)
+        except Exception as err:  # 任何失败都回落，但要留一行日志
+            logger.info("AI 建议没拿到（%s），这一套是本地规则算的", err)
+            return {**fallback.as_row(), "note": f"模型那一路没走通（{err}），这是本地规则算的"}
+        return {**advice.as_row(), "note": ""}
+
+    def apply_local_advice(self, payload: Mapping[str, object]) -> str | None:
+        """Apply an advice card the page sent back. Re-validated here, never trusted.
+
+        The round trip goes through the DOM, and the enumerated dials are exactly the
+        thing that must not accept a value off the list -- so this walks the same
+        setters the settings rows use.
+        """
+        problems: list[str] = []
+        model = str(payload.get("model") or "")
+        if model:
+            problem = self._set_local_model(model)
+            if problem:
+                problems.append(problem)
+        if "context" in payload:
+            # 走界面上那三格同一个校验入口：建议卡是从 DOM 绕回来的，
+            # 不在档位里的值必须被拒，不能因为"是建议"就放行。
+            problem = self._set_local_choice(
+                LOCAL_CONTEXT, payload["context"], CONTEXT_TIERS, "上下文窗口", "token"
+            )
+            if problem:
+                problems.append(problem)
+            else:
+                self._note_local_window()
+        if "idle_minutes" in payload:
+            problem = self._set_local_choice(
+                LOCAL_IDLE_MINUTES, payload["idle_minutes"], IDLE_TIERS, "空闲自动关", "分钟"
+            )
+            if problem:
+                problems.append(problem)
+            else:
+                local_server.shared_server().rearm_idle()
+        if "eager" in payload:
+            self._prefs.set(LOCAL_EAGER, bool(payload["eager"]))
+            self.tune_local()
+        return "；".join(problems) if problems else None
+
+    def display_name(self) -> str:
+        """What the interface calls her."""
+        return display_name(self._prefs.text(DISPLAY_NAME, default=""))
+
+    def _set_display_name(self, value: Any) -> str | None:
+        """Store the name. Empty is a real answer: it means the shipped one."""
+        text = str(value or "").strip()[:MAX_NAME_CHARS]
+        self._prefs.set(DISPLAY_NAME, text)
+        return None
 
     def _apply_alerts(self, key: str, value: Any) -> str | None:
         """Hand the alert section to the engine that owns its validation.
@@ -877,16 +1330,19 @@ class SettingsService:
         pending: list[dict[str, Any]] = []
         for item in rows:
             if not isinstance(item, dict):
-                return "新增模型需要一个 {name, base_url, model} 对象"
+                return "新增模型需要一个 {name, base_url, models} 对象"
             name = str(item.get("name") or "").strip()
             base_url = str(item.get("base_url") or "").strip()
-            model = str(item.get("model") or "").strip()
             if not _valid_name(name):
                 return "模型名字只能是小写字母、数字、- 和 _，1-32 位"
             if not _valid_url(base_url):
                 return f"{name}：地址必须以 http:// 或 https:// 开头"
-            if not _valid_model(model):
-                return f"{name}：模型名不能含空格且不超过 150 字符"
+            specs = _draft_models(item)
+            if not specs:
+                return f"{name}：至少写一个模型名"
+            bad = next((spec.id for spec in specs if not _valid_model(spec.id)), "")
+            if bad:
+                return f"{name}：模型名 {bad[:30]!r} 不能含空格且不超过 150 字符"
             if name in known:
                 return f"已经有叫 {name!r} 的模型；要改它就在那一行上改"
             known.add(name)
@@ -897,7 +1353,12 @@ class SettingsService:
                 {
                     "name": name,
                     "base_url": base_url,
-                    "model": model,
+                    # The list shape the rest of this file reads back. One endpoint usually
+                    # serves a family of models, and the 看看它有哪些模型 button has just
+                    # listed them all -- making the operator save once per model was the
+                    # dialog telling them to reopen it for the thing they can already see.
+                    "models": _serialise_models(specs),
+                    "default_model": specs[0].id,
                     "key_env": key_env_for(name),
                     "timeout_seconds": timeout,
                     # A local server (Ollama / LM Studio / llama.cpp) has no credential,
@@ -990,6 +1451,10 @@ class SettingsService:
         text = str(value or "")
         if target == CLOUD_VOICE_PROVIDER:
             variable = CLOUD_VOICE_KEY_ENV
+        elif target == IMAGE_KEY_TARGET:
+            # 云端生图的钥匙。和上面那条同一个落点：进程环境变量 + 用户级环境变量，
+            # 配置文件里一个字节都不留，界面也永不回显它的值。
+            variable = IMAGE_KEY_ENV
         else:
             section = self._effective_section()
             name = target or section.default_provider
@@ -1152,10 +1617,43 @@ class SettingsService:
                 timeout_seconds=row.get("timeout_seconds", existing.timeout_seconds),
                 default_model=_default_of(specs, row.get("default_model", existing.default_model)),
             )
+        providers = self._with_local_endpoint(providers)
         saved = self._prefs.text(LLM_PROVIDER)
-        default_provider = saved if saved in providers else base.default_provider
+        if saved not in providers:
+            saved = ""
+        default_provider = saved or self._default_name(providers, base.default_provider)
         providers = self._without_hidden(providers, keep=default_provider)
         return replace(base, providers=providers, default_provider=default_provider)
+
+    def _with_local_endpoint(
+        self, providers: dict[str, ProviderSection]
+    ) -> dict[str, ProviderSection]:
+        """Point the bundled provider at the port llama.cpp actually answered on.
+
+        The YAML carries a fixed port so a hand-written config still makes sense, but a
+        second llama.cpp on the machine (the standalone ``start.ps1`` deployment uses
+        28080, this one prefers 28181) means the real port is only known once the child
+        is up. Reading settings must never start a process -- this is a read path -- so
+        it reports the port the server is listening on *now*, or the preferred one.
+        """
+        local = providers.get(local_server.LOCAL_PROVIDER)
+        if local is None or local.base_url == local_server.endpoint():
+            return providers
+        fresh = replace(local, base_url=local_server.endpoint())
+        return {**providers, local_server.LOCAL_PROVIDER: fresh}
+
+    def _default_name(self, providers: dict[str, ProviderSection], configured: str) -> str:
+        """The bundled model is the default **when it can actually run here**.
+
+        A buyer without the 4.36 GB weights, or with 3 GB of free RAM, must not get an
+        assistant that cannot answer -- so the fallback is the YAML's cloud default, and
+        the settings row says which of the two is in effect and why.
+        """
+        if local_server.LOCAL_PROVIDER not in providers or not local_server.plan().can_run:
+            return configured
+        if configured == local_server.LOCAL_PROVIDER:
+            return configured
+        return local_server.LOCAL_PROVIDER
 
     def _without_hidden(
         self, providers: dict[str, ProviderSection], *, keep: str
@@ -1324,11 +1822,60 @@ def _stored_models(fields: Mapping[str, object]) -> tuple[ModelSpec, ...]:
     return _parse_models(fields.get("models"), fallback=str(fields.get("model") or ""))
 
 
+def _draft_models(fields: Mapping[str, object]) -> tuple[ModelSpec, ...]:
+    """The models one **add** row carries: ``models`` as a list, or the older ``model``.
+
+    Duplicates are folded rather than refused: the list usually came from clicking the
+    endpoint's own 模型清单, and clicking one twice is a slip of the finger, not a
+    disagreement about what should be stored. Order is kept, because the first one is
+    the 起始模型 the row will answer with until somebody picks another.
+    """
+    raw = fields.get("models")
+    specs: list[ModelSpec] = []
+    if isinstance(raw, list):
+        for entry in raw:
+            if isinstance(entry, Mapping):
+                ident = str(entry.get("id") or "").strip()
+                label = str(entry.get("label") or "").strip()
+            else:
+                ident, label = str(entry or "").strip(), ""
+            if ident:
+                specs.append(ModelSpec(id=ident, label=label))
+    else:
+        single = str(fields.get("model") or "").strip()
+        if single:
+            specs.append(ModelSpec(id=single, label=""))
+    kept: list[ModelSpec] = []
+    seen: set[str] = set()
+    for spec in specs:
+        if spec.id in seen:
+            continue
+        seen.add(spec.id)
+        kept.append(spec)
+    return tuple(kept)
+
+
 def _default_of(specs: tuple[ModelSpec, ...], wanted: object) -> str:
     """Which of ``specs`` is the default: the named one when present, else the first."""
     name = str(wanted or "").strip()
     ids = [spec.id for spec in specs]
     return name if name in ids else (ids[0] if ids else "")
+
+
+_LOCAL_ROW_IS_READONLY = "自带模型这一行用哪个模型，由上面「选哪个离线模型」决定，这里不加也不删"
+
+
+def _follows_picker(name: str, row: ProviderSection) -> ProviderSection:
+    """自带模型那一行不再自己决定用哪个模型 —— 它显示的就是「选哪个离线模型」选中的那个。
+
+    之前这一行永远写着 defaults.yaml 里的 qwen2.5-7b，而实际加载的是 Qwen3-4B：同一个设置
+    出现两处、各说一套，用户照着那一行去找模型就找不到（r84 实拍）。
+    """
+    if name != LOCAL_PROVIDER:
+        return row
+    card = local_server.selected_card()
+    spec = ModelSpec(id=card.alias, label=f"自带·{card.label}（离线）")
+    return replace(row, models=(spec,), default_model=card.alias)
 
 
 def _serialise_models(specs: tuple[ModelSpec, ...]) -> list[dict[str, str]]:
@@ -1344,6 +1891,35 @@ def _tuning_key(provider: str, model: str) -> str:
     ``a`` + ``b/c``.
     """
     return f"{provider}\x00{model}"
+
+
+def _nearest_level(budget: int) -> str:
+    """Which preset best describes an exact budget (used only to label it)."""
+    if budget <= 0:
+        return "off"
+    presets = {name: tokens for name, tokens in THINKING_LEVELS.items() if tokens > 0}
+    return min(presets, key=lambda name: abs(presets[name] - budget))
+
+
+def _thinking_label(level: str, budget: int | None) -> str:
+    """What the picker shows: the level, or ``custom`` when the number is not a preset."""
+    if level == "off" or budget is None:
+        return level
+    return level if THINKING_LEVELS.get(level) == budget else "custom"
+
+
+def _thinking_tokens(level: str, budget: int | None) -> tuple[bool, int]:
+    """``(enabled, tokens)`` -- what one pair's row means on the wire.
+
+    An exact budget wins over the level's preset; ``off`` means no thinking at all, and
+    the number that travels with it is only what to put back when it is switched on
+    again.
+    """
+    if level == "off":
+        return False, budget if budget is not None else DEFAULT_THINKING_BUDGET
+    if budget is not None:
+        return True, budget
+    return True, THINKING_LEVELS.get(level, DEFAULT_THINKING_BUDGET)
 
 
 def key_env_for(name: str) -> str:

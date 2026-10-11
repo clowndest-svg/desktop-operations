@@ -20,6 +20,7 @@
         </div>
       </header>
 
+      <div class="assistant__body">
       <!-- ======================================================= 提醒 -->
       <template v-if="tab === 'reminders'">
         <p v-if="notice" class="assistant__note" :class="{ 'assistant__note--bad': noticeBad }">{{ notice }}</p>
@@ -216,6 +217,7 @@
           </ol>
         </div>
       </template>
+      </div>
     </section>
   </div>
 </template>
@@ -544,12 +546,24 @@ onMounted(() => {
   position: relative;
   width: min(880px, 92vw);
   max-height: 82vh;
-  overflow: auto;
+  display: flex;
+  flex-direction: column;
   padding: 12px 14px 16px;
   border: 1px solid var(--hud-line);
   border-radius: var(--hud-radius);
   background: linear-gradient(rgba(9, 22, 38, 0.985), rgba(3, 7, 13, 0.99));
   box-shadow: var(--hud-elev-2);
+}
+
+/*
+ * The tab row and 关闭 are in the head, which this sits beside rather than under, so
+ * they stay reachable however far the list is scrolled. Block flow is deliberate: the
+ * four tabs space themselves with adjacent margins, which a flex column would sum.
+ */
+.assistant__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .assistant__head {

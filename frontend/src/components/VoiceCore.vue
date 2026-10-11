@@ -189,6 +189,16 @@ const listening = computed(() => voice.phase === 'running')
 const readingBusy = ref(false)
 const switchProblem = ref('')
 
+/**
+ * Whether she has an engine that could make a sound at all.
+ *
+ * 「麦克风已释放」 still counts: the read-aloud lives in the same stack as the capture
+ * thread, and releasing the ears deliberately keeps the mouth. What does *not* count is
+ * off / loading / failed -- there the backend takes the text and returns ``False``, so a
+ * switch that lit up with nothing said about it read as a broken feature.
+ */
+const hasVoiceEngine = computed(() => voice.phase === 'running' || voice.phase === 'muted')
+
 async function toggleListening(): Promise<void> {
   switchProblem.value = ''
   if (listening.value) {
@@ -214,6 +224,12 @@ async function toggleReading(): Promise<void> {
     }
     const problem = snapshot.problems?.auto_speak_typed
     if (problem) switchProblem.value = String(problem)
+    else if (voice.speaksTyped && !hasVoiceEngine.value) {
+      // The switch is a preference; the engine is the thing that can obey it. A lit
+      // 「朗读」 with no stack behind it reads as a broken feature while the backend is
+      // correctly refusing -- so say which of the two this is.
+      switchProblem.value = '朗读已经记下了，但语音引擎还没装好：先点「启用语音」（加载约 30 秒），之后打字的答案才会念出来'
+    }
   } catch (err) {
     switchProblem.value = err instanceof Error ? err.message : String(err)
   } finally {

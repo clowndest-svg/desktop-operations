@@ -54,6 +54,22 @@ llm:
   # chat panel starts on; every entry may be a bare string, or a mapping
   # `{id, label}` when the display name should differ from the wire name.
   providers:
+    # The model that ships with the program: a llama.cpp server this process starts on
+    # demand and stops after ten idle minutes. No key, no account, no upload -- and it
+    # only appears as the default when the runtime and the .gguf are really on disk
+    # (see jarvis/llm/local_server.py). 4096 tokens of context is what fits a 16 GB
+    # machine. It is under the size of the *whole* tool list (3945 tokens measured), but
+    # since r88 she only sends the handful a sentence could need (largest pack 849), so
+    # 4096 does drive the computer now -- measured on the shipped Qwen3-4B: check JDK
+    # version, read CPU/memory, launch Notepad, search the web. Raise the dial to 8192
+    # only if you want all thirty-six advertised on every request.
+    local:
+      base_url: http://127.0.0.1:28181/v1
+      key_optional: true
+      timeout_seconds: 300
+      models:
+        - id: qwen2.5-7b
+          label: 自带·Qwen2.5-7B（离线）
     deepseek:
       base_url: https://api.deepseek.com/v1
       models:

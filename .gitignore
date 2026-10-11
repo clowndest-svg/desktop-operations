@@ -59,6 +59,10 @@ pelican_bicycle_animation.html
 frontend/public/avatar/
 assets-src/*.vrm
 
+# 内置宠物模型同理（11 个 .glb 共 ~12 MB）。要重建它们跑
+# scripts/fetch_gallery_models.py —— 它从 CC0 原包取、重打包成 .glb、按 md5 核对。
+frontend/public/models/
+
 # 每轮验收抓的窗口截图（docs/desktop-operations.md 按文件名引用它们）。
 # 它们是"当时那一屏"的证据，不是界面素材，所以留在磁盘不进仓库。
 /r[0-9]*-*.png
@@ -73,4 +77,14 @@ keystore.properties
 # 公开分支那条配方只按名字排除 commercial/（docs/分发与分享.md §9），
 # 所以这个目录一旦被 git 捡走，就会被同步推到公网 —— 里面是我的报价策略。
 闲鱼展示内容/
+
+# 随包分发的第三方二进制：llama.cpp 运行时（91 MB）和 4.36 GB 的 Qwen2.5 权重。
+# 都不进 git —— 权重由 scripts/place_bundled_model.py 从作者原始文件硬链接或拷进来，
+# 运行时随仓库的 vendor 目录走，打包时由 jarvis.spec 的 datas 收进 _internal。
+jarvis/vendor/
+/模型/
+
+# Release audit evidence and historical verification scratch
+/.r[0-9]*/
+/.audit/
 commercial/

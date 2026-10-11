@@ -152,8 +152,15 @@ class ComputerAccess:
             return {**self.levels(), "error": f"档位不是数字：{value!r}"}
         if not any(entry[0] == tier for entry in TIERS):
             return {**self.levels(), "error": f"没有这一档：{tier}"}
-        self._prefs.set(COMPUTER_TIER, tier)
+        persisted = self._prefs.set(COMPUTER_TIER, tier)
         logger.warning("desktop control level set to %d (%s)", tier, self.current()["label"])
+        if not persisted:
+            # Same rule as 命令行档位: the change is live now, but a restart would read
+            # the old tier back off the disk, so the panel must not report a save.
+            return {
+                **self.levels(),
+                "error": "这一档已经生效，但没写进磁盘——重启会回到原来那档，请检查数据目录是否可写",
+            }
         return {"error": "", **self.levels()}
 
 

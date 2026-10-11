@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Final
 
@@ -90,12 +91,51 @@ _CLOUD_ENGINE = "edge_tts"
 
 
 SYNTH_TIMEOUT_SECONDS = 120.0
-"""One synthesis request's ceiling.
+"""One *preview* request's ceiling.
 
 The sidecar used to inherit a 900 s default: a stuck clone synthesis then pinned a
 4 GB worker at full CPU for a quarter of an hour while the button said 合成中.
 Two minutes is longer than any real sentence and short enough to notice.
 """
+
+ANSWER_TIMEOUT_SECONDS = 12.0
+"""One *spoken answer's* ceiling on a cloned voice -- deliberately much shorter.
+
+Measured on the developer's machine (GTX 1650 4 GB): the offline CosyVoice worker
+loads in 25.8–38.4 s and then runs at **rtf 8.2–15.8** (one second of audio costs
+eight to sixteen seconds of compute). A two-minute ceiling therefore does not make
+her answer slowly -- it makes her answer *after the conversation moved on*, which
+is what "用了她就不出声" actually was. Twelve seconds is roughly one spoken sentence
+of slack; past that the answer is spoken by the working voice and the reason is logged
+(:meth:`jarvis.tts.service.TtsService.synthesize`).
+"""
+
+
+def _cost(started: float, audio_bytes: int, rate: int) -> dict[str, float]:
+    """How one synthesis attempt actually went, in the two units that matter.
+
+    ``realtime_factor`` is the number that decides whether a recorded voice is usable
+    on this machine: 1.0 means "as fast as speaking", and the developer's GPU measured
+    **8.2–15.8** for the offline engine. Anything above ~3 means she will answer long
+    after the sentence stopped being relevant.
+    """
+    elapsed_ms = (time.monotonic() - started) * 1000.0
+    # s16le mono: two bytes per sample. Both shipped engines hand back decoded PCM.
+    audio_ms = (audio_bytes * 1000.0) / (2 * rate) if rate and audio_bytes else 0.0
+    return {
+        "elapsed_ms": round(elapsed_ms),
+        "audio_ms": round(audio_ms),
+        "realtime_factor": round(elapsed_ms / audio_ms, 1) if audio_ms else 0.0,
+    }
+
+
+def _cost_note(measured: dict[str, float]) -> str:
+    """The same numbers in one line of Chinese, for the panel and the log."""
+    spent = measured["elapsed_ms"] / 1000.0
+    made = measured["audio_ms"] / 1000.0
+    if not made:
+        return f"花了 {spent:.1f} 秒，一毫秒音频都没做出来"
+    return f"花了 {spent:.1f} 秒做 {made:.1f} 秒音频（{measured['realtime_factor']} 倍实时）"
 
 
 class VoicePicker:
@@ -302,15 +342,34 @@ class VoicePicker:
             known |= {entry.voice_id for entry in self._library.voices()}
         if voice not in known:
             return {**listing, "error": f"不认识的音色：{voice or '（空）'}"}
-        if self._library_is_clone(voice) and not self.cloning_state()[0]:
-            # Allowed to be *selected* -- losing the choice because a package
-            # went missing is worse than choosing it and hearing the reason
-            # when she next speaks.
-            self._prefs.set(TTS_VOICE, voice)
-            return {**self.voices(), "error": self.cloning_state()[1]}
+        if self._library_is_clone(voice):
+            can_speak, why = self._clone_can_speak(voice)
+            if not can_speak:
+                # Refused *here*, at the click, and the previous choice is left alone.
+                # It used to save the selection and return the reason as a toast -- so
+                # every later answer went looking for a voice this machine cannot make,
+                # and "她回答了但没出声" was the result the operator could see.
+                return {
+                    **self.voices(),
+                    "error": f"这个音色现在说不了：{why}（没改你的选择，还是用现在这个）",
+                }
         self._prefs.set(TTS_VOICE, voice)
         logger.info("tts voice switched to %s", voice)
         return {"error": "", **self.voices()}
+
+    def _clone_can_speak(self, voice: str) -> tuple[bool, str]:
+        """Whether *something* can say this recorded voice right now.
+
+        Asked of the same rule the preview and the answer use (`_engine_for_voice`,
+        which splits cloud from offline via ``resolves_to_cloud``), because a gate that
+        disagrees with the engine is a gate that either blocks a working voice or
+        approves a silent one. Building the handle starts nothing.
+        """
+        engine, error = self._engine_for_voice(voice, budget=ANSWER_TIMEOUT_SECONDS)
+        if engine is None:
+            return False, error
+        engine.close()
+        return True, ""
 
     # -- hearing one before choosing ---------------------------------------
 
@@ -330,23 +389,45 @@ class VoicePicker:
         if not self._preview_lock.acquire(blocking=False):
             engine.close()
             return {"ok": False, "error": "上一条试听还没播完", "voice": voice}
+        started = time.monotonic()
+        measured = {"elapsed_ms": 0.0, "audio_ms": 0.0, "realtime_factor": 0.0}
         try:
             # Chunks go straight to the page as they arrive, so the preview starts
             # speaking while the rest is still being synthesised -- buffering the
             # whole sentence first would add a silent pause to every 试听.
             sent = 0
+            audio_bytes = 0
+            rate = 0
             for chunk in self._stream_preview(engine, voice):
                 if isinstance(chunk, str):
-                    return {"ok": False, "error": chunk, "voice": voice}
+                    measured = _cost(started, audio_bytes, rate)
+                    return {
+                        "ok": False,
+                        "error": f"{chunk}（{_cost_note(measured)}）",
+                        "voice": voice,
+                        **measured,
+                    }
                 sent += 1
+                audio_bytes += len(chunk.audio)
+                rate = chunk.sample_rate
                 if not self._emit(chunk.audio, chunk.sample_rate, chunk.is_final):
                     return {"ok": False, "error": "页面没有接收音频", "voice": voice}
         finally:
             self._preview_lock.release()
             engine.close()
+        measured = _cost(started, audio_bytes, rate)
         if sent == 0:
-            return {"ok": False, "error": "合成没有产出任何音频", "voice": voice}
-        return {"ok": True, "error": "", "voice": voice, "chunks": sent}
+            return {
+                "ok": False,
+                "error": f"合成没有产出任何音频（{_cost_note(measured)}）",
+                "voice": voice,
+                **measured,
+            }
+        # The cost is logged on the way that *worked*, too: "试听点得出声但慢得离谱"
+        # is otherwise indistinguishable from a working feature, and the number is
+        # the only thing that tells the operator which machine they are on.
+        logger.info("试听 %s：%s", voice, _cost_note(measured))
+        return {"ok": True, "error": "", "voice": voice, "chunks": sent, **measured}
 
     def preview_pcm(self, voice_id: object, text: str | None = None) -> dict[str, object]:
         """Synthesise one sentence and **return** the PCM instead of playing it.
@@ -388,7 +469,9 @@ class VoicePicker:
             "sample_rate": rate,
         }
 
-    def _engine_for_voice(self, voice: str) -> tuple[SpeechSynthesizer | None, str]:
+    def _engine_for_voice(
+        self, voice: str, *, budget: float = SYNTH_TIMEOUT_SECONDS
+    ) -> tuple[SpeechSynthesizer | None, str]:
         """Pick the engine a preview of ``voice`` must run on, or explain why none can.
 
         Which engine runs depends on the *voice*, not on ``tts.engine``: a
@@ -440,7 +523,7 @@ class VoicePicker:
                 CosyVoiceSidecar(
                     section.model,
                     reference=resolve,
-                    timeout=SYNTH_TIMEOUT_SECONDS,
+                    timeout=budget,
                 ),
                 "",
             )
@@ -462,6 +545,9 @@ class VoicePicker:
 
         Engines are cached per voice: the sidecar's worker takes ~45 s to load weights,
         and a reply path that rebuilt it per sentence would spend every answer waiting.
+        The cached one is built with the *answer* budget, not the preview's: a reply that
+        cannot start being audible inside twelve seconds is not a slow answer, it is a
+        silent one, and the caller falls back at that point.
         """
         voice = str(voice_id or "").strip()
         if not voice or not voice.startswith(CLONE_PREFIX):
@@ -469,7 +555,7 @@ class VoicePicker:
         cached = self._engine_cache.get(voice)
         if cached is not None:
             return cached
-        engine, error = self._engine_for_voice(voice)
+        engine, error = self._engine_for_voice(voice, budget=ANSWER_TIMEOUT_SECONDS)
         if engine is None:
             logger.warning("没有引擎能说 %s：%s", voice, error)
             return None
@@ -501,7 +587,7 @@ class VoicePicker:
             yield str(exc)
         except Exception as exc:  # a network failure must read as a refusal, not a crash
             logger.exception("voice preview failed unexpectedly")
-            yield f"{type(exc).__name__}: {exc}"
+            yield f"试听没走通（厂商那边没返回声音）· {type(exc).__name__}: {exc}"
 
 
 __all__ = ["EDGE_VOICES", "PREVIEW_TEXT", "VoicePicker"]

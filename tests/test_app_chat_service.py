@@ -20,12 +20,29 @@ from jarvis.app.chat_service import (
     MAX_IMAGE_DATA_CHARS,
     ChatReply,
     ChatService,
+    ConversationTuning,
 )
 from jarvis.app.transcript_service import TranscriptService
 from jarvis.core.exceptions import LlmError
 from jarvis.database import SqliteStore
+from jarvis.llm.errors import (
+    LlmAuthError,
+    LlmConnectionError,
+    LlmContextOverflowError,
+    LlmPermissionError,
+    LlmRateLimitError,
+    LlmRequestError,
+    LlmResponseError,
+    LlmServerError,
+    LlmTimeoutError,
+)
 from jarvis.llm.openai_compat import _serialize_message
-from jarvis.llm.types import ChatMessage, Role
+from jarvis.llm.types import (
+    ChatMessage,
+    ChatResponse,
+    GenerationOptions,
+    Role,
+)
 from tests._fakes import FakeLlmClient
 
 
@@ -185,6 +202,69 @@ class TestFailuresStayOrdinaryReturns:
         assert service.ask("你好").error == "没有配置 API Key"
 
 
+class TestAFailedTurnNamesItsFailure:
+    """The card is what the panel reads. A reason that only reaches the log is a silent failure.
+
+    These assert the *kind* as much as the sentence: the interface offers a different next
+    step for a refused key than for a dead address, and it can only do that from a token the
+    error class carries. If the label is missing, the card falls back to showing the words
+    with no advice -- which is the failure mode worth a test.
+    """
+
+    @pytest.mark.parametrize(
+        ("raised", "kind"),
+        [
+            (LlmAuthError("'ag' rejected the API key"), "auth"),
+            (LlmPermissionError("'ag' refused this model"), "forbidden"),
+            (LlmRateLimitError("'ag' rate limit hit"), "quota"),
+            (LlmTimeoutError("request to 'ag' timed out"), "timeout"),
+            (LlmConnectionError("cannot reach 'ag'"), "network"),
+            (LlmServerError("'ag' server error 503"), "server"),
+            (LlmRequestError("'ag' rejected the request"), "request"),
+            (LlmResponseError("'ag' answered something unreadable"), "malformed"),
+        ],
+    )
+    def test_every_kind_of_provider_failure_arrives_labelled(
+        self, raised: Exception, kind: str
+    ) -> None:
+        service = _service(ExplodingClient(raised))
+
+        service.ask("你好")
+
+        card = service.conversations()[0]
+        assert card["status"] == "failed"
+        assert str(raised) in str(card["error"])
+        assert card["error_kind"] == kind
+
+    def test_a_model_that_answered_nothing_says_so(self) -> None:
+        service = _service(FakeLlmClient("   "))
+
+        reply = service.ask("你好")
+
+        card = service.conversations()[0]
+        assert reply.error == "模型没有返回内容"
+        assert card["error"] == "模型没有返回内容"
+        assert card["error_kind"] == "empty"
+
+    def test_our_own_crash_is_labelled_as_ours(self) -> None:
+        service = _service(ExplodingClient(RuntimeError("socket closed")))
+
+        service.ask("你好")
+
+        card = service.conversations()[0]
+        assert "RuntimeError" in str(card["error"])
+        assert card["error_kind"] == "crash"
+
+    def test_an_answered_turn_does_not_carry_a_failure_label(self) -> None:
+        service = _service(FakeLlmClient("今天是星期六"))
+
+        service.ask("今天星期几")
+
+        card = service.conversations()[0]
+        assert card["error_kind"] == ""
+        assert card["error"] == ""
+
+
 class TestPayloadShape:
     def test_to_dict_carries_exactly_what_the_page_renders(self) -> None:
         payload = ChatReply("问", "答").to_dict()
@@ -200,6 +280,7 @@ class TestPayloadShape:
             "task_id": "",
             "cancelled": False,
             "record": "",
+            "tools": {"count": 0, "used": [], "pack": "", "degraded": ""},
         }
 
     def test_the_thinking_chain_reaches_the_page_and_nothing_else_does(self) -> None:
@@ -243,6 +324,7 @@ class TestPayloadShape:
             "task_id",
             "cancelled",
             "record",
+            "tools",
         }
 
     def test_the_persona_does_not_claim_unperformed_actions(self) -> None:
@@ -733,3 +815,154 @@ class TestThePageShrinksWhatItSends:
         mobile = _number_in(_page("mobile/api.ts"), r"export const MAX_DATA_CHARS = ([\d_]+)")
         desktop = _number_in(_page("api/thumbnail.ts"), r"export const MAX_DATA_CHARS = ([\d_]+)")
         assert mobile == desktop, "两边的余量要对得上，否则一边压完另一边还是要丢"
+
+
+class _RefusesTheToolTable:
+    """一个本地端点：带着 34 个 schema 就 400，扔掉工具表就答。
+
+    数字是实测的（llama.cpp，n_ctx=4096，一句「你好」4702 token，其中 4639 是工具表），
+    不是编来凑测试的。
+    """
+
+    enabled = True
+
+    def to_openai_tools(self) -> list[dict[str, object]]:
+        return [{"type": "function", "function": {"name": f"tool_{slot}"}} for slot in range(34)]
+
+    def invoke(self, name: str, arguments: object, *, confirmed: bool = False) -> Any:
+        raise AssertionError(f"这一桌根本没走到工具：{name}")
+
+
+class _OverflowingClient(FakeLlmClient):
+    """Records how many tools each request carried, and refuses the fat ones."""
+
+    def __init__(self, reply: str = "装下了") -> None:
+        super().__init__(reply)
+        self.carried: list[int] = []
+
+    def complete(self, messages: Any, *, options: GenerationOptions | None = None) -> ChatResponse:
+        count = len(options.tools) if options is not None and options.tools else 0
+        self.carried.append(count)
+        if count:
+            raise LlmContextOverflowError(
+                "'bendi-qwen' has no room left for this prompt (asked 4702 tokens, it holds 4096)",
+                prompt_tokens=4702,
+                context_tokens=4096,
+            )
+        return super().complete(messages, options=options)
+
+
+class TestAPromptThatDoesNotFit:
+    """The local-model round: 一个 4096 上下文的模型，第一句就该答得上来。"""
+
+    def test_it_asks_again_without_the_tool_table_and_says_so(self) -> None:
+        """One oversized turn costs that turn, not every turn after it.
+
+        r87 claimed to fix this and shipped only a comment -- the call that wrote
+        ``tools=False`` onto the pair was still there, so one question that did not
+        fit took her hands off for good while 带工具 stayed ticked on screen. The
+        mechanism is now gone, not merely unused.
+        """
+        client = _OverflowingClient()
+        service = _service(
+            client,
+            tool_provider=lambda: _RefusesTheToolTable(),
+            pair_provider=lambda: ("bendi-qwen", "qwen2.5-7b"),
+        )
+
+        reply = service.ask("你好")
+
+        assert reply.answer == "装下了"
+        assert reply.error == ""
+        assert client.carried == [34, 0]
+        assert reply.without_tools is True
+        assert reply.degraded == "overflow"
+        assert not hasattr(ChatService, "_remember_lean")
+        assert not hasattr(ChatService, "_lean_for_pair")
+
+    def test_the_turn_that_leaned_says_so_on_the_card(self) -> None:
+        """答上了就不是失败 —— 但"这一轮她没有那双手"不能不说。"""
+        service = _service(
+            _OverflowingClient(),
+            tool_provider=lambda: _RefusesTheToolTable(),
+            pair_provider=lambda: ("bendi-qwen", "qwen2.5-7b"),
+        )
+
+        service.ask("你好")
+
+        assert service.conversation().snapshot()["note"] == "no_tools"
+
+    def test_the_next_turn_does_not_have_to_fail_first(self) -> None:
+        """记住了就不再撞第二次：省下的是一次注定失败的请求，每一轮都是。"""
+        client = _OverflowingClient()
+        service = _service(
+            client,
+            tool_provider=lambda: _RefusesTheToolTable(),
+            pair_provider=lambda: ("bendi-qwen", "qwen2.5-7b"),
+            tuning_for=lambda provider, model: ConversationTuning(tools=False),
+        )
+
+        reply = service.ask("你好")
+
+        assert client.carried == [0]
+        assert reply.without_tools is False
+        assert service.conversation().snapshot()["note"] == ""
+
+    def test_a_pair_that_still_does_not_fit_reports_the_number(self) -> None:
+        """扔掉工具表还是装不下时，别再问第二遍 —— 报错要上屏，带 kind。"""
+        client = _AlwaysOverflowingClient()
+        service = _service(
+            client,
+            tool_provider=lambda: _RefusesTheToolTable(),
+            pair_provider=lambda: ("bendi-qwen", "qwen2.5-7b"),
+            tuning_for=lambda provider, model: ConversationTuning(tools=False),
+        )
+
+        reply = service.ask("把这一整本手册念一遍")
+
+        assert reply.answer == ""
+        assert client.carried == [0]
+        card = service.conversation().snapshot()
+        assert card["error_kind"] == "overflow"
+        assert "4702" in str(card["error"])
+
+
+class _AlwaysOverflowingClient(_OverflowingClient):
+    """Refuses even the lean request: the question and the history alone are too big."""
+
+    def complete(self, messages: Any, *, options: GenerationOptions | None = None) -> ChatResponse:
+        count = len(options.tools) if options is not None and options.tools else 0
+        self.carried.append(count)
+        raise LlmContextOverflowError(
+            "'bendi-qwen' has no room left for this prompt (asked 4702 tokens, it holds 4096)",
+            prompt_tokens=4702,
+            context_tokens=4096,
+        )
+
+
+def test_renaming_her_reaches_the_persona_she_is_asked_to_play() -> None:
+    """The name on the bar and the name in the system prompt are one setting, not two.
+
+    Otherwise the panel says 阿明 while she keeps introducing herself as 小夜 -- the kind of
+    disagreement nobody reports, because both halves look correct on their own.
+    """
+    service = ChatService(lambda: FakeLlmClient())
+    service.start()
+
+    shipped = service._build_system_prompt()
+    service.set_persona_name("阿明")
+    renamed = service._build_system_prompt()
+
+    assert "小夜" in shipped
+    assert "阿明" in renamed
+    assert "小夜" not in renamed, "改了名字还自称旧的，等于没改"
+
+
+def test_the_default_name_does_not_rewrite_the_persona_every_turn() -> None:
+    service = ChatService(lambda: FakeLlmClient())
+    service.start()
+    before = service._build_system_prompt()
+
+    service.set_persona_name("小夜")
+
+    assert service._build_system_prompt() == before

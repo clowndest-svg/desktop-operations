@@ -61,6 +61,15 @@ interface VolumeReply {
   ok?: boolean
   percent?: number
   max?: number
+  stream?: string
+  error?: string
+}
+
+interface StorageReply {
+  ok?: boolean
+  freeGb?: number
+  totalGb?: number
+  percent?: number
   error?: string
 }
 
@@ -76,6 +85,7 @@ interface FlagReply {
   ms?: number
   on?: boolean
   chars?: number
+  minutes?: number
 }
 
 interface PhotoRow {
@@ -100,13 +110,17 @@ interface PhotoReply extends FlagReply {
 interface XyActionPlugin {
   capability(): Promise<Record<string, unknown>>
   battery(): Promise<BatteryReply>
-  volume(): Promise<VolumeReply>
-  setVolume(options: { percent: number }): Promise<FlagReply>
+  storage(): Promise<StorageReply>
+  volume(options?: { stream?: string }): Promise<VolumeReply>
+  setVolume(options: { percent: number; stream?: string }): Promise<VolumeReply>
   vibrate(options: { ms?: number }): Promise<FlagReply>
   torch(options: { on: boolean }): Promise<FlagReply>
   setAlarm(options: { hour: number; minute: number; label: string }): Promise<FlagReply>
+  setTimer(options: { minutes: number; label: string }): Promise<FlagReply>
   dial(options: { number: string }): Promise<FlagReply>
   composeSms(options: { number: string; body: string }): Promise<FlagReply>
+  sendEmail(options: { to: string; subject: string; body: string }): Promise<FlagReply>
+  navigateTo(options: { query: string }): Promise<FlagReply>
   addCalendar(options: { title: string; inMinutes: number; spanMinutes: number }): Promise<FlagReply>
   openUrl(options: { url: string }): Promise<FlagReply>
   openSettings(options: { page: string }): Promise<FlagReply>
@@ -132,13 +146,17 @@ const XyAction = registerPlugin<XyActionPlugin>('XyAction', {
   web: {
     capability: async () => ({ native: false, reason: '浏览器里没有手机的手' }),
     battery: async () => ({ ok: false, error: refused.text }),
+    storage: async () => ({ ok: false, error: refused.text }),
     volume: async () => ({ ok: false, error: refused.text }),
     setVolume: async () => ({ ok: false, error: refused.text }),
     vibrate: async () => ({ ok: false, error: refused.text }),
     torch: async () => ({ ok: false, error: refused.text }),
     setAlarm: async () => ({ ok: false, error: refused.text }),
+    setTimer: async () => ({ ok: false, error: refused.text }),
     dial: async () => ({ ok: false, error: refused.text }),
     composeSms: async () => ({ ok: false, error: refused.text }),
+    sendEmail: async () => ({ ok: false, error: refused.text }),
+    navigateTo: async () => ({ ok: false, error: refused.text }),
     addCalendar: async () => ({ ok: false, error: refused.text }),
     openUrl: async () => ({ ok: false, error: refused.text }),
     openSettings: async () => ({ ok: false, error: refused.text }),
@@ -176,6 +194,15 @@ function str(value: unknown, fallback = ''): string {
   return value === undefined || value === null || value === '' ? fallback : String(value)
 }
 
+/**
+ * 声道只认这三个。模型编一个别的出来（"通话音量"、"notification"）就退回 media，
+ * 而不是把错字符串递给原生层让它回一句报错——用户要的是"调了"，不是"你写错了"。
+ */
+function pickStream(value: unknown): string {
+  const which = str(value).toLowerCase()
+  return which === 'ring' || which === 'alarm' ? which : 'media'
+}
+
 export const ACTIONS: PhoneAction[] = [
   {
     name: 'battery',
@@ -192,21 +219,42 @@ export const ACTIONS: PhoneAction[] = [
     },
   },
   {
-    name: 'get_volume',
-    label: '看音量',
-    desc: '读这台手机当前的媒体音量（百分比）。',
+    name: 'get_storage',
+    label: '看剩余空间',
+    desc: '读这台手机还剩多少存储空间。只读，不改任何东西。',
     args: [],
     needsConfirm: false,
     leavesDevice: false,
     run: async () => {
-      const reply = await XyAction.volume()
-      return reply.ok ? { ok: true, text: `媒体音量 ${reply.percent ?? '?'}%` } : { ok: false, text: text(reply, '读不到音量') }
+      const reply = await XyAction.storage()
+      return reply.ok
+        ? {
+            ok: true,
+            text:
+              `还剩 ${reply.freeGb ?? '?'} GB（总共 ${reply.totalGb ?? '?'} GB，空余 ${reply.percent ?? '?'}%）。` +
+              '这是应用能用的那一块，比厂商标的容量小一截',
+          }
+        : { ok: false, text: text(reply, '读不到剩余空间') }
+    },
+  },
+  {
+    name: 'get_volume',
+    label: '看音量',
+    desc: '读这台手机某条声道的音量（百分比）。不说哪条就是媒体声道。',
+    args: [{ name: 'stream', type: 'string', desc: '哪条声道，不填是 media', enum: ['media', 'ring', 'alarm'] }],
+    needsConfirm: false,
+    leavesDevice: false,
+    run: async (args) => {
+      const reply = await XyAction.volume({ stream: pickStream(args.stream) })
+      return reply.ok
+        ? { ok: true, text: `${reply.stream ?? '媒体'}音量 ${reply.percent ?? '?'}%` }
+        : { ok: false, text: text(reply, '读不到音量') }
     },
   },
   {
     name: 'set_volume',
     label: '调音量',
-    desc: '把媒体音量调到指定的百分比（0 到 100）。随时可以再调回来。',
+    desc: '把某条声道的音量调到指定百分比（0 到 100）。不说哪条就是媒体声道。随时可以再调回来。',
     args: [
       {
         name: 'percent',
@@ -214,14 +262,18 @@ export const ACTIONS: PhoneAction[] = [
         desc: '目标音量，0 到 100 的整数',
         required: true,
       },
+      { name: 'stream', type: 'string', desc: '哪条声道，不填是 media', enum: ['media', 'ring', 'alarm'] },
     ],
     needsConfirm: false,
     leavesDevice: false,
     run: async (args) => {
       const percent = Math.max(0, Math.min(100, Math.round(num(args.percent, -1))))
       if (percent < 0) return { ok: false, text: '要说调到百分之多少' }
-      const reply = await XyAction.setVolume({ percent })
-      return reply.ok ? { ok: true, text: `音量调到 ${percent}%` } : { ok: false, text: text(reply, '音量没调成') }
+      const reply = await XyAction.setVolume({ percent, stream: pickStream(args.stream) })
+      // 报回去的是原生**调完读回来**的那个数：勿扰模式会把请求吃掉，只有回读才知道真到了哪儿。
+      return reply.ok
+        ? { ok: true, text: `${reply.stream ?? '媒体'}音量调到 ${reply.percent ?? percent}%` }
+        : { ok: false, text: text(reply, '音量没调成') }
     },
   },
   {
@@ -334,6 +386,27 @@ export const ACTIONS: PhoneAction[] = [
     },
   },
   {
+    name: 'set_timer',
+    label: '定倒计时',
+    desc:
+      '在系统时钟里定一个倒计时。"五分钟后叫我"用这个；说"几点几分"才用 set_alarm。' +
+      '定完会跳到时钟的倒计时页，看得见也能当场取消。',
+    args: [
+      { name: 'minutes', type: 'integer', desc: '多少分钟之后响，1 到 1440', required: true },
+      { name: 'label', type: 'string', desc: '这个倒计时叫什么' },
+    ],
+    needsConfirm: true,
+    leavesDevice: false,
+    run: async (args) => {
+      const minutes = Math.round(num(args.minutes, -1))
+      if (minutes < 1 || minutes > 1440) return { ok: false, text: '要说清楚多少分钟之后（1 到 1440）' }
+      const reply = await XyAction.setTimer({ minutes, label: str(args.label, '小夜定的倒计时') })
+      return reply.ok
+        ? { ok: true, text: `倒计时定好了：${reply.minutes ?? minutes} 分钟后响，时钟 App 里看得见` }
+        : { ok: false, text: text(reply, '倒计时没定上') }
+    },
+  },
+  {
     name: 'dial',
     label: '拨号',
     desc: '把号码填进拨号盘并打开它。**拨出那一下由人按**，她不会自己打出去。',
@@ -361,6 +434,26 @@ export const ACTIONS: PhoneAction[] = [
       const body = str(args.body)
       const reply = await XyAction.composeSms({ number, body })
       return reply.ok ? { ok: true, text: `短信草稿填好了（发给 ${number}），发送键在你手上` } : { ok: false, text: text(reply, '短信草稿打不开') }
+    },
+  },
+  {
+    name: 'send_email',
+    label: '写邮件',
+    desc: '打开邮件草稿并填好收件人、标题、正文。**发送那一下由人按**，她发不出去。地址不像邮箱就直接拒。',
+    args: [
+      { name: 'to', type: 'string', desc: '收件人邮箱地址', required: true },
+      { name: 'subject', type: 'string', desc: '邮件标题' },
+      { name: 'body', type: 'string', desc: '正文' },
+    ],
+    needsConfirm: true,
+    leavesDevice: true,
+    run: async (args) => {
+      const to = str(args.to).trim()
+      if (!to) return { ok: false, text: '要说发给谁' }
+      const reply = await XyAction.sendEmail({ to, subject: str(args.subject), body: str(args.body) })
+      return reply.ok
+        ? { ok: true, text: `邮件草稿填好了（发给 ${to}），发送键在你手上` }
+        : { ok: false, text: text(reply, '邮件草稿打不开') }
     },
   },
   {
@@ -395,6 +488,26 @@ export const ACTIONS: PhoneAction[] = [
       const url = str(args.url)
       const reply = await XyAction.openUrl({ url })
       return reply.ok ? { ok: true, text: `打开了 ${url}` } : { ok: false, text: text(reply, '链接没打开') }
+    },
+  },
+  {
+    name: 'navigate_to',
+    label: '找地方/导航',
+    desc:
+      '把"去哪儿"这句话交给系统的地图 App（地图自己拿起点）。本应用不读定位、不要定位权限；' +
+      '但这句话会送到地图 App 手里，算出这台手机。',
+    args: [
+      { name: 'query', type: 'string', desc: '要去的地方，比如"人民广场"，也可以是"39.9,116.4"这样的坐标', required: true },
+    ],
+    needsConfirm: true,
+    leavesDevice: true,
+    run: async (args) => {
+      const query = str(args.query).trim()
+      if (!query) return { ok: false, text: '要说去哪儿' }
+      const reply = await XyAction.navigateTo({ query })
+      return reply.ok
+        ? { ok: true, text: `地图已经开到「${query}」了，走不走、怎么走是你点` }
+        : { ok: false, text: text(reply, '地图打不开') }
     },
   },
   {
@@ -574,12 +687,20 @@ export async function execute(
   }
 }
 
-/** 把参数摊成一句给人看的话：确认框里不能只写"确定吗"。 */
+/**
+ * 把参数摊成一句给人看的话：确认框里不能只写"确定吗"，
+ * 但也不能把一整封邮件正文糊上去——超过一屏的确认框等于没有确认框。
+ */
 export function describe(action: PhoneAction, args: Record<string, unknown>): string {
   const parts = action.args
-    .map((arg) => `${arg.name}=${String(args[arg.name] ?? '')}`)
+    .map((arg) => `${arg.name}=${clip(String(args[arg.name] ?? ''))}`)
     .filter((piece) => !piece.endsWith('='))
   return parts.length ? `${action.name} ${parts.join(' ')}` : action.name
+}
+
+function clip(value: string, max = 40): string {
+  const one = value.replace(/\s+/g, ' ').trim()
+  return one.length > max ? `${one.slice(0, max)}…` : one
 }
 
 /** 模型看到的工具清单（OpenAI 兼容的 function 格式）。 */

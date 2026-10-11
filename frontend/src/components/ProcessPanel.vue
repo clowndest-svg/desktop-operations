@@ -95,8 +95,7 @@
         结束等于强杀，程序里没保存的东西会直接丢，多数情况下无法撤销。
       </p>
       <p class="procs__confirm-note">
-        系统关键进程（lsass / svchost / dwm 等）和小夜自己的窗口会被逐个拒绝，
-        即使它们被勾上。
+        系统关键进程（lsass / svchost / dwm 等）和小夜自己的窗口会被逐个拒绝，即使它们被勾上。
       </p>
       <div class="procs__confirm-actions">
         <button class="hud-btn danger" type="button" :disabled="busy" @click="commit">确认结束</button>
@@ -123,6 +122,7 @@
       @reminders="emit('reminders')"
       @usage="emit('usage')"
       @actions="emit('actions')"
+      @alerts="emit('alerts')"
     />
   </section>
 </template>
@@ -152,6 +152,7 @@ const emit = defineEmits<{
   (e: 'reminders'): void
   (e: 'usage'): void
   (e: 'actions'): void
+  (e: 'alerts'): void
 }>()
 
 const picked = ref<Record<number, string>>({})

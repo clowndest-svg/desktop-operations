@@ -42,11 +42,15 @@ const MOOD_POSE: Record<Mood, MoodPose> = {
   dormant: { pitch: 0.1, yaw: 0.05, roll: 0.02, brows: -0.18, gaze: -0.35, lids: 0.42, sit: 0 },
   armed: { pitch: -0.02, yaw: 0, roll: 0, brows: 0.02, gaze: 0, lids: 0, sit: 0 },
   listening: { pitch: -0.07, yaw: 0.1, roll: -0.05, brows: 0.22, gaze: 0.1, lids: 0, sit: 0 },
-  // 坐着想，不是打盹。上一版是 pitch 0.3（低头）+ lids 0.52（半闭眼）+ gaze -0.5（往
-  // 下看）—— 三个都往"睡"的方向走，用户说"她没反应"其实是在说她不像是忙，是像是关机。
-  // 现在：头歪一点、眼睛开着看自己膝盖上那块屏幕、眉头稍微收。真正的"在想"是下面
-  // shapeThinking 那点慢漂移和偶尔一次沉吟，不是把眼睛闭上。
-  thinking: { pitch: 0.15, yaw: -0.16, roll: 0.13, brows: 0.04, gaze: -0.17, lids: 0.12, sit: 1 },
+  // 站着低头想。这一格被否过两次，两次都记在这儿，免得下一轮又摆回同一个极端：
+  // ① pitch 0.3 + lids 0.52 + gaze -0.5（更早的版本）—— 三个通道一起往"睡"走，
+  //    用户说"她没反应"，其实是在说她不像是忙、像是关机；
+  // ② pitch 0.15 + sit 1 + 抱笔记本（上一版）—— 用户说这个姿势**太丑**，
+  //    要求就是"低头思考就行"。
+  // 所以现在：低头但不塌（0.22）、眼睛是开的只是往下看（lids 0.1 远低于打盹那档 0.42）、
+  // 眉头稍微收、侧倾收小（0.13 那个歪法读起来像困）。真正"在想"的还是 shapeThinking
+  // 那点慢漂移和偶尔一次沉吟，不是把眼睛闭上、也不是坐到地上。
+  thinking: { pitch: 0.22, yaw: -0.1, roll: 0.05, brows: 0.06, gaze: -0.28, lids: 0.1, sit: 0 },
   speaking: { pitch: -0.02, yaw: 0, roll: 0, brows: 0.08, gaze: 0, lids: 0, sit: 0 },
 }
 

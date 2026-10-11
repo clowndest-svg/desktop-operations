@@ -14,8 +14,11 @@ from jarvis.tools.builtins import (
     assistant_tools,
     computer_tools,
     file_tools,
+    image_tools,
     insight_tools,
+    mirror_tools,
     process_tools,
+    runtime_tools,
     selfconfig_tools,
     shell_tools,
     system_tools,
@@ -49,6 +52,9 @@ def build_builtin_tools(
     voices: selfconfig_tools.VoiceChanger | None = None,
     conversations: selfconfig_tools.ConversationSearch | None = None,
     alerts: system_tools.AlertCentre | None = None,
+    mirror: mirror_tools.MirrorSurface | None = None,
+    phone: mirror_tools.PhoneScreenSurface | None = None,
+    images: image_tools.ImageEngineSurface | None = None,
 ) -> list[tuple[ToolSpec, ToolHandler]]:
     """Assemble every built-in tool.
 
@@ -88,6 +94,15 @@ def build_builtin_tools(
             ``propose_kill_process``. ``None`` on a headless run: with no window there
             is nobody to press 确认, and a tool that can only produce an unanswered
             request is the ``run_shell`` mistake repeated.
+        mirror: The screen-mirror service, behind the three ``mirror_*`` tools. Left out
+            on a headless run, and left out entirely when the vendored ``scrcpy`` is not
+            in the package: :func:`mirror_tools.build` answers with no tools rather than
+            three that can only ever refuse.
+        images: The image-generation service, behind ``generate_image`` and
+            ``image_status``. ``None`` on a headless run (no panel to point at a ComfyUI
+            directory), and :func:`image_tools.build` also answers with nothing when the
+            chosen engine cannot possibly work -- a tool that can only ever say "画不出来"
+            is a capability the model will keep promising.
 
     Returns:
         ``(spec, handler)`` pairs, ready for
@@ -96,6 +111,7 @@ def build_builtin_tools(
     return [
         *time_tools.build(),
         *text_tools.build(),
+        *runtime_tools.build(),
         *file_tools.build(policy),
         *system_tools.build(monitor_factory, cleaner_factory, alerts),
         *web_tools.build(timeout_seconds=web_timeout_seconds, opener=web_opener),
@@ -114,6 +130,8 @@ def build_builtin_tools(
         *insight_tools.build(monitor=monitor, usage=usage),
         *process_tools.build(proposals=proposals),
         *selfconfig_tools.build(settings=settings, voices=voices, conversations=conversations),
+        *(mirror_tools.build(mirror, phone) if mirror is not None else []),
+        *image_tools.build(images),
     ]
 
 

@@ -710,3 +710,47 @@ class TestMemoryService:
         record = service.remember("用户的名字是张三")
         assert record.memory_id > 0
         assert service.stats()["total"] == 1
+
+
+def test_chat_memory_extraction_uses_the_selected_client_not_the_global_provider(
+    tmp_path: Path,
+) -> None:
+    from jarvis.app.chat_service import ChatService
+
+    global_model = ScriptedLlm("[]")
+    chosen = ScriptedLlm("你好", "[]")
+    memory = _service(tmp_path, global_model)
+    chat = ChatService(lambda: chosen, memory_provider=lambda: memory)
+    chat.start()
+    reply = chat.ask("我叫测试员")
+    assert not reply.error
+    assert (
+        len(global_model.calls) == 0
+    ), "a local/private conversation must not be sent to another provider for extraction"
+    assert len(chosen.calls) == 2
+
+
+def test_cancelled_partial_answers_do_not_start_another_model_for_memory(tmp_path: Path) -> None:
+    from jarvis.app.chat_service import ChatService
+
+    class CancelledClient(ScriptedLlm):
+        def complete_stream(
+            self,
+            messages: Sequence[ChatMessage],
+            *,
+            options: GenerationOptions | None = None,
+            on_text: Callable[[str], None] | None = None,
+            should_stop: Callable[[], bool] | None = None,
+        ) -> ChatResponse:
+            self.calls.append(list(messages))
+            return ChatResponse(content="只回答了一半", model="scripted", finish_reason="cancelled")
+
+    global_model = ScriptedLlm("[]")
+    chosen = CancelledClient()
+    memory = _service(tmp_path, global_model)
+    chat = ChatService(lambda: chosen, memory_provider=lambda: memory)
+    chat.start()
+    reply = chat.ask("我叫测试员", on_delta=lambda text: None)
+    assert reply.cancelled
+    assert len(global_model.calls) == 0
+    assert len(chosen.calls) == 1

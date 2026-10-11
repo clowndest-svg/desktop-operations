@@ -235,3 +235,47 @@ def test_touch_on_an_unknown_device_does_nothing(tmp_path: Path, clock: _Clock) 
 )
 def test_clean_name_squeezes_a_label_from_an_untrusted_phone(raw: str, expected: str) -> None:
     assert clean_name(raw) == expected
+
+
+def test_device_file_contains_only_a_token_digest(tmp_path: Path) -> None:
+    vault = PairingVault(tmp_path / "devices.json")
+    token = vault.exchange(vault.start_pairing(), "test phone")
+    assert token
+    data = json.loads(vault.path.read_text(encoding="utf-8"))
+    row = data["devices"][0]
+    assert "token" not in row
+    assert "token_sha256" in row
+    assert token not in vault.path.read_text(encoding="utf-8")
+
+
+def test_pairing_storage_failure_does_not_issue_a_live_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = PairingVault(tmp_path / "devices.json")
+    code = vault.start_pairing()
+
+    def fail() -> None:
+        raise OSError("disk is read-only")
+
+    monkeypatch.setattr(vault, "_save_locked", fail)
+    assert vault.exchange(code, "test phone") is None
+    assert vault.devices() == ()
+
+
+def test_failed_revocation_preserves_restart_consistency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = PairingVault(tmp_path / "devices.json")
+    token = vault.exchange(vault.start_pairing(), "test phone")
+    assert token is not None
+    device = vault.authenticate(token)
+    assert device is not None
+
+    def fail() -> None:
+        raise OSError("read-only device store")
+
+    monkeypatch.setattr(vault, "_save_locked", fail)
+    assert vault.revoke(device.device_id) is False
+    assert vault.authenticate(token) is not None
+    assert vault.revoke_all() == 0
+    assert PairingVault(vault.path).authenticate(token) is not None

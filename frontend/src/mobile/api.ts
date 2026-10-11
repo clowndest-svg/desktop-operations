@@ -1,18 +1,20 @@
+import { readSecret, writeSecret } from './secure'
 /**
  * 手机侧的三条外路：自己的模型 key、这台电脑、以及本地历史记录。
  *
  * 为什么模型请求也走原生层而不是 `fetch`：页面装在 `https://localhost` 这个源里，
  * 而绝大多数 OpenAI 兼容端点不发 CORS 头，`fetch` 会在**预检**阶段就死掉，
- * 报回来的还是一句没有信息量的 "Failed to fetch"。`XyNet` 把请求交给 Kotlin 发，
+ * 报回来的还是一句没有信息量的 "Failed to fetch"。`XyNet` 把请求交给 Java 发，
  * 没有跨域这一关，状态码和响应片段也能带回来。
  *
  * 电脑端点是**自签证书**，系统信任链不会认。所以那条路多带一个 `pin`：
- * 由 Kotlin 把对端证书的 SHA-256 和配对时人在电脑上念给你那串比一下——
+ * 由 Java 把对端证书的 SHA-256 和配对时人在电脑上念给你那串比一下——
  * 指纹固定替代 CA，而不是把校验关掉。
  */
 import { Preferences } from '@capacitor/preferences'
 import { Capacitor, registerPlugin, type PluginListenerHandle } from '@capacitor/core'
 import { createAccumulator, type Delta } from './sse'
+import { checkModel, modelHeaders, modelProbeResult } from './settings'
 import type { ActionRow } from './types'
 
 const MODEL_KEY = 'xiaoye.model'
@@ -147,7 +149,7 @@ const XyNet = registerPlugin<XyNetPlugin>('XyNet', {
 /** 这一版 App 的版本。必须和 `android/app/build.gradle` 的 versionName 一致，
  * 由 `tests/test_mobile_frontend.py` 盯着：手机上出问题第一句就是"你装的是哪一版"，
  * 而 APK 的图标底下不写这个。 */
-export const APP_VERSION = '0.4.0'
+export const APP_VERSION = '0.4.2'
 
 export const DEFAULT_MODEL: ModelConfig = {
   baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
@@ -157,7 +159,7 @@ export const DEFAULT_MODEL: ModelConfig = {
 }
 
 export async function loadModel(): Promise<ModelConfig> {
-  const { value } = await Preferences.get({ key: MODEL_KEY })
+  const value = await readSecret(MODEL_KEY)
   if (!value) return { ...DEFAULT_MODEL }
   try {
     return { ...DEFAULT_MODEL, ...(JSON.parse(value) as Partial<ModelConfig>) }
@@ -167,7 +169,7 @@ export async function loadModel(): Promise<ModelConfig> {
 }
 
 export async function saveModel(next: ModelConfig): Promise<void> {
-  await Preferences.set({ key: MODEL_KEY, value: JSON.stringify(next) })
+  await writeSecret(MODEL_KEY, JSON.stringify(next))
 }
 
 export async function loadHistory(): Promise<Turn[]> {
@@ -285,8 +287,8 @@ export interface ChatOptions {
 
 /** 中途不听了。返回的是"连接断没断"，不是"她想没想完"——见 `stopped` 那条注释。 */
 export async function cancelChat(): Promise<boolean> {
-  if (!Capacitor.isNativePlatform()) return false
   stopRequested = true
+  if (!Capacitor.isNativePlatform()) return false
   const reply = await XyNet.cancelStream()
   return Boolean(reply.ok)
 }
@@ -299,6 +301,8 @@ export async function cancelChat(): Promise<boolean> {
  * 一次只跑一条流（这 App 就这样），所以一个布尔够用。
  */
 let stopRequested = false
+export function beginChat(): void { stopRequested = false }
+export function chatWasCancelled(): boolean { return stopRequested }
 
 function failureOf(reply: NetReply, messages: ChatMessage[]): Error {
   const detail = `模型返回 ${reply.status}：${reply.body.slice(0, 200)}`
@@ -318,7 +322,6 @@ async function streamed(
   onDelta: (delta: Delta) => void,
 ): Promise<AssistantTurn> {
   const acc = createAccumulator()
-  stopRequested = false
   const handle = await XyNet.addListener('xyNet', (event) => {
     if (event.kind !== 'chunk') return
     const delta = acc.push(event.text ?? '')
@@ -330,9 +333,10 @@ async function streamed(
   } finally {
     await handle.remove()
   }
+  const done = acc.finish()
+  if (stopRequested) return { content: done.content, toolCalls: [], stopped: true }
   if (reply.error) throw new Error(`连不上模型：${reply.error}`)
   if (reply.status < 200 || reply.status >= 300) throw failureOf(reply, messages)
-  const done = acc.finish()
   return { content: done.content, toolCalls: done.toolCalls, stopped: stopRequested }
 }
 
@@ -342,17 +346,16 @@ export async function rawChat(
   tools: object[] = [],
   options: ChatOptions = {},
 ): Promise<AssistantTurn> {
-  if (!cfg.apiKey) throw new Error('还没填模型 Key：点右上角「设置」填一次就好')
+  if (stopRequested) return { content: '', toolCalls: [], stopped: true }
+  const issues = checkModel(cfg)
+  if (issues.length) throw new Error(issues[0].text)
   const body: Record<string, unknown> = {
     model: cfg.model,
     messages: [{ role: 'system', content: MOBILE_SYSTEM }, ...messages],
     stream: false,
   }
   if (tools.length) body.tools = tools
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Authorization: `Bearer ${cfg.apiKey}`,
-  }
+  const headers = modelHeaders(cfg.apiKey)
   const url = endpoint(cfg.baseUrl)
   // 老配置里没有 `pin` 这一栏（存过 Preferences 的手机上会是 undefined），
   // 合并默认值也只在读的时候生效，这里再兜一次，免得给原生层传个 undefined 进去。
@@ -394,10 +397,42 @@ export async function rawChat(
   }
 }
 
+/**
+ * "试一下这个配置"：真发一次最小请求，把结果翻成人话。
+ *
+ * 为什么不是只探一下域名通不通：**404 / 401 / 422 这三种失败在屏幕上长得一模一样**，
+ * 而修法完全不同（地址错一层 / Key 不对 / 模型名不存在）。只有真发一次才分得开。
+ * 这一次会真的花掉几个 token（`max_tokens: 1`），所以按钮上写明了"会真发一次"。
+ *
+ * 和 `rawChat` 共用校验与认证头：**Key 空着也照发**。自己机器上的 Ollama / vLLM 本来就不要 Key，
+ * 拿"没填 Key"当错误挡在门外的话，那一档用户永远试不通自己的地址。
+ */
+export async function probeModel(cfg: ModelConfig): Promise<{ ok: boolean; text: string }> {
+  const issues = checkModel(cfg)
+  if (issues.length) return { ok: false, text: issues[0].text }
+  const headers = modelHeaders(cfg.apiKey)
+  const body = {
+    model: cfg.model,
+    max_tokens: 1,
+    stream: false,
+    messages: [{ role: 'user', content: 'ping' }],
+  }
+  const reply = await XyNet.request({
+    url: endpoint(cfg.baseUrl),
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+    pin: (cfg.pin ?? '').trim().toLowerCase(),
+    timeoutMs: 15_000,
+  })
+  if (reply.error) return { ok: false, text: `连不上这个地址：${reply.error}` }
+  return modelProbeResult(reply.status, reply.body)
+}
+
 // -- 电脑（遥控模式） ------------------------------------------------------
 
 export async function loadPc(): Promise<PcLink | null> {
-  const { value } = await Preferences.get({ key: PC_KEY })
+  const value = await readSecret(PC_KEY)
   if (!value) return null
   try {
     return JSON.parse(value) as PcLink
@@ -408,10 +443,10 @@ export async function loadPc(): Promise<PcLink | null> {
 
 export async function savePc(link: PcLink | null): Promise<void> {
   if (link === null) {
-    await Preferences.remove({ key: PC_KEY })
+    await writeSecret(PC_KEY, null)
     return
   }
-  await Preferences.set({ key: PC_KEY, value: JSON.stringify(link) })
+  await writeSecret(PC_KEY, JSON.stringify(link))
 }
 
 function pcUrl(link: PcLink, path: string): string {
@@ -426,6 +461,8 @@ async function pcRequest(link: PcLink, method: string, path: string, body?: obje
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
+    // A local model may cold-start for minutes; do not abandon it at the default 20 seconds.
+    timeoutMs: /\/rpc\/(chat_ask|call_turn|call_warmup|call_speak|tts_preview_pcm|voice_clone_add)$/.test(path) ? 300_000 : 20_000,
     pin: link.pin,
   })
 }

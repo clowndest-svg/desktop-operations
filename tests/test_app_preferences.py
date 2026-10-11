@@ -10,10 +10,16 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from jarvis.app.preferences import VOICE_AUTO_ARM, Preferences
+from jarvis.app.preferences import (
+    MIRROR_MODE,
+    SHELL_TIER,
+    VOICE_AUTO_ARM,
+    Preferences,
+)
 
 
 def test_missing_file_is_not_an_error(tmp_path: Path) -> None:
@@ -139,3 +145,61 @@ def test_a_registered_key_really_writes_a_dict(tmp_path: Path) -> None:
 
     assert store.set(LLM_TUNING, table) is True
     assert Preferences(path).get(LLM_TUNING) == table
+
+
+class TestPersistenceIsHonestAboutItself:
+    """OPT-02 regression: "applied" and "on disk" are two different facts.
+
+    Migrated from the r93 review's isolated probe with the same assertions. The
+    original failure was that a read-only disk still answered ``True``, and that a
+    retry of the same value after the disk recovered skipped the write because the
+    cache already matched -- so a 命令行档位 downgrade came back at the next start.
+    """
+
+    def test_a_failed_disk_write_is_not_reported_as_saved(self, tmp_path: Path) -> None:
+        file = tmp_path / "preferences.json"
+        prefs = Preferences(file)
+        assert prefs.set(SHELL_TIER, 2)
+
+        def deny(_values: dict[str, Any]) -> None:
+            raise PermissionError("simulated read-only disk")
+
+        prefs._write = deny  # type: ignore[method-assign,assignment]
+        assert prefs.set(SHELL_TIER, 0) is False
+        assert Preferences(file).number(SHELL_TIER) == 2, "文件里还是旧档位，这正是要报出来的原因"
+        assert prefs.number(SHELL_TIER) == 0, "但这一轮已经收紧了：降级不能等写盘成功才生效"
+        assert prefs.unsaved() == [SHELL_TIER]
+
+    def test_retrying_the_same_value_after_the_disk_recovers_writes_it(
+        self, tmp_path: Path
+    ) -> None:
+        file = tmp_path / "preferences.json"
+        prefs = Preferences(file)
+        assert prefs.set(SHELL_TIER, 2)
+
+        def deny(_values: dict[str, Any]) -> None:
+            raise PermissionError("simulated read-only disk")
+
+        prefs._write = deny  # type: ignore[method-assign,assignment]
+        assert prefs.set(SHELL_TIER, 0) is False
+        prefs._write = Preferences(file)._write  # type: ignore[method-assign]
+        assert prefs.set(SHELL_TIER, 0) is True, "同值 + 脏标记 = 必须真的再写一次"
+        assert json.loads(file.read_text(encoding="utf-8"))[SHELL_TIER] == 0
+        assert prefs.unsaved() == []
+
+    def test_a_repair_pass_clears_everything_still_pending(self, tmp_path: Path) -> None:
+        file = tmp_path / "preferences.json"
+        prefs = Preferences(file)
+
+        def deny(_values: dict[str, Any]) -> None:
+            raise PermissionError("simulated read-only disk")
+
+        prefs._write = deny  # type: ignore[method-assign,assignment]
+        prefs.set(SHELL_TIER, 1)
+        prefs.set(MIRROR_MODE, "scan")
+        assert set(prefs.unsaved()) == {SHELL_TIER, MIRROR_MODE}
+        assert set(prefs.retry_unsaved()) == {SHELL_TIER, MIRROR_MODE}
+        prefs._write = Preferences(file)._write  # type: ignore[method-assign]
+        assert prefs.retry_unsaved() == []
+        saved = json.loads(file.read_text(encoding="utf-8"))
+        assert saved[SHELL_TIER] == 1 and saved[MIRROR_MODE] == "scan"

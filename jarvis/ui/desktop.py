@@ -30,17 +30,33 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
-from jarvis.app import voice_cloud
+from jarvis.app import local_model, voice_cloud
 from jarvis.app.collaboration import MODE_BOSS, MODE_TABLE, MODE_VOTE
 from jarvis.app.endpoint_catalog import list_endpoint_models
+from jarvis.app.image_gen import (
+    DEFAULT_SIZE,
+    DEFAULT_STEPS,
+    ENGINES,
+    SIZE_CHOICES,
+    ImageAnswer,
+    ImageService,
+    ImageStatus,
+)
 from jarvis.app.mobile_pairing import PairingVault
 from jarvis.app.model_probe import ModelProber
-from jarvis.app.preferences import PET_ENABLED, WINDOW_RECT
+from jarvis.app.phone_screen import PhoneScreenReader
+from jarvis.app.preferences import DISPLAY_NAME, PET_ENABLED, WINDOW_RECT, display_name
+from jarvis.app.screen_mirror import (
+    MirrorDeviceList,
+    MirrorStatus,
+    ScreenMirrorService,
+)
 from jarvis.app.turns import (
     KIND_CHAT,
     KIND_ROUNDTABLE,
     STATE_CANCELLED,
     STATE_DONE,
+    STATE_FAILED,
     STATE_RUNNING,
 )
 from jarvis.app.voice_library import VoiceLibraryError
@@ -57,6 +73,7 @@ from jarvis.ui.compositor import (
 from jarvis.ui.hotkeys import Hotkeys, default_bindings
 from jarvis.ui.instance import InstanceGate
 from jarvis.ui.lifecycle import ShellLifecycle
+from jarvis.ui.mirror_bar import MirrorControlBar
 from jarvis.ui.pet import PetController
 from jarvis.ui.pump import UiEventPump
 from jarvis.ui.state_bridge import StateBridge, UiState, UiVoiceState
@@ -69,6 +86,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from jarvis.app.command_access import CommandAccess
     from jarvis.app.computer_access import ComputerAccess
     from jarvis.app.disk_service import DiskService
+    from jarvis.app.pet_service import PetService
     from jarvis.app.preferences import Preferences
     from jarvis.app.process_service import ProcessService
     from jarvis.app.reminder_service import ReminderService
@@ -407,6 +425,22 @@ def _round_count(value: object) -> int:
     return 0
 
 
+def _turn_state(reply: object) -> str:
+    """Which way a turn ended, for the task table.
+
+    Three answers, not two. Reading only ``cancelled`` filed a provider refusal -- no
+    answer, an error string sitting beside it -- under ``done``, so the one place that
+    could say "she did not answer" claimed the round finished. An error alone is not
+    enough either: a round table that lost one seat still handed back a merge, and that
+    one did finish.
+    """
+    if bool(getattr(reply, "cancelled", False)):
+        return STATE_CANCELLED
+    if str(getattr(reply, "error", "") or "") and not str(getattr(reply, "answer", "") or ""):
+        return STATE_FAILED
+    return STATE_DONE
+
+
 #: What may be said, because the deletion gate is a human ticking boxes, not advice.
 JUNK_BRIEFING = (
     "下面是一次磁盘垃圾扫描的结果（只读扫描，还没有删除任何东西）。请：\n"
@@ -417,6 +451,80 @@ JUNK_BRIEFING = (
 )
 
 
+def _image_unavailable(detail: str) -> ImageStatus:
+    """没接生图服务时那一格的完整形状。
+
+    和 ``_mirror_unavailable`` 同一条理由：面板读的是整份状态，只回一句错误会让上一次
+    的档位、尺寸、引擎状态留在屏上 —— 用户看到的是"还在用本机 ComfyUI"，而下面那行说没服务。
+    """
+    return {
+        "engine": "auto",
+        "engines": [{"id": row.id, "label": row.label, "note": row.note} for row in ENGINES],
+        "sizes": [{"size": item, "note": ""} for item in SIZE_CHOICES],
+        "size": DEFAULT_SIZE,
+        "steps": DEFAULT_STEPS,
+        "comfy_url": "",
+        "comfy_dir": "",
+        "cloud_base": "",
+        "cloud_model": "",
+        "cloud_key_set": False,
+        "can_start_local": False,
+        "vendored_engine": False,
+        "local": None,
+        "phase": "off",
+        "detail": detail,
+        "last_path": "",
+        "last_seconds": 0.0,
+        "tail": [],
+        "error": "",
+    }
+
+
+def _image_answer_unavailable(detail: str) -> ImageAnswer:
+    return {
+        "ok": False,
+        "path": "",
+        "engine": "",
+        "prompt": "",
+        "size": "",
+        "steps": 0,
+        "seed": 0,
+        "seconds": 0.0,
+        "preview": "",
+        "error": detail,
+    }
+
+
+def _mirror_unavailable(detail: str, *, phase: str = "off") -> MirrorStatus:
+    """The panel's shape, filled in, when this process has no mirror service.
+
+    Every key is present on purpose: the page merges each answer over the last state,
+    so a short payload would leave a stale tier, a stale device list, or a stale
+    「正在投屏」 on screen after a half-built bridge answered it.
+    """
+    return {
+        "phase": phase,
+        "detail": detail,
+        "serial": "",
+        "available": False,
+        "tier": "",
+        "tiers": [],
+        "mode": "usb",
+        "modes": [],
+        "window": "window",
+        "windows": [],
+        "stretch": False,
+        "keys": [],
+        "swipes": [],
+        "audio": False,
+        "keep_screen": True,
+        "discovery": "",
+        "seconds": 0,
+        "tail": [],
+        "error": detail if phase == "failed" else "",
+    }
+
+
 class HudBridge:
     """The entire Python surface the page may call.
 
@@ -424,6 +532,20 @@ class HudBridge:
     exception thrown out of a ``js_api`` call reaches the page as an opaque
     ``pywebview`` error, which is the worst possible shape for "the microphone
     could not open".
+    """
+
+    _pets: PetService | None = None
+    """Class-level default for the same reason as ``_model_probe``: the contract
+    checks build this bridge with ``__new__`` and set only what they exercise, so
+    every door has to answer for a half-built object instead of raising.
+    """
+
+    _mirror: ScreenMirrorService | None = None
+    _images: ImageService | None = None
+    _phone: PhoneScreenReader | None = None
+    """Class-level default for the same reason as ``_pets``: a mirror door asked of a
+    half-built bridge answers 「这个进程没有接投屏」 rather than raising through the
+    pywebview boundary, where the page would see an opaque error and no reason.
     """
 
     _model_probe: ModelProber | None = None
@@ -446,6 +568,7 @@ class HudBridge:
         tools: ToolLedger | None = None,
         voice_picker: VoicePicker | None = None,
         voice_library: VoiceLibrary | None = None,
+        pets: PetService | None = None,
         voice_call: VoiceCall | None = None,
         voice_sample: Any | None = None,
         computer_access: ComputerAccess | None = None,
@@ -461,6 +584,9 @@ class HudBridge:
         planner: PlannerSurface | None = None,
         model_probe: ModelProber | None = None,
         alerts: Any | None = None,
+        mirror: ScreenMirrorService | None = None,
+        images: ImageService | None = None,
+        phone_screen: PhoneScreenReader | None = None,
     ) -> None:
         self._system = system
         self._alerts = alerts
@@ -475,6 +601,7 @@ class HudBridge:
         self._tools = tools
         self._voice_picker = voice_picker
         self._voice_library = voice_library
+        self._pets = pets
         self._voice_call = voice_call
         self._voice_sample = voice_sample
         """Records a sample of this machine's operator, in the process that owns the mic.
@@ -493,6 +620,9 @@ class HudBridge:
         self._scheduler = scheduler
         self._workflow = workflow
         self._planner = planner
+        self._mirror = mirror
+        self._images = images
+        self._phone = phone_screen
         self._pet: PetController | None = None
         self._remember_pet: Callable[[bool], None] | None = None
         self._bubble_palette: BubblePalette = DEFAULT_BUBBLE
@@ -649,6 +779,14 @@ class HudBridge:
         applied = bool(pet is not None and pet.apply_skin(value))
         return {"ok": True, "skin": value, "pet": applied, "error": ""}
 
+    def current_bubble_palette(self) -> BubblePalette:
+        """现在这套皮肤推导出来的卡片色。
+
+        凡是 Python 画的卡片（气泡、思考卡、投屏控制条）都从这里取 —— 页面换肤时只
+        报告一次墨色，正在显示的东西自己下一次重画时跟上，不留第二份颜色真相。
+        """
+        return self._bubble_palette
+
     def pet_palette(self, fill: object, line: object, glow: object) -> dict[str, object]:
         """The skin's three inks, so the cards Python paints can match the figure.
 
@@ -707,6 +845,84 @@ class HudBridge:
             return {"ok": False}
         pet.report_grip(rect)
         return {"ok": True}
+
+    # -- figures made from a photo -----------------------------------------
+
+    def pet_assets(self) -> dict[str, object]:
+        """The generated figures, which one is on the desktop, and whether a photo
+        can be turned into one right now.
+
+        ``can_generate`` rides along with the list instead of getting its own door:
+        the picker has to grey the button out *while* it shows what is already there,
+        and a second request would leave a window where the button promises something
+        the first line already knows is impossible.
+        """
+        if self._pets is None:
+            return {
+                "ok": False,
+                "pets": [],
+                "current": "",
+                "can_generate": False,
+                "reason": "宠物生成不可用",
+                "error": "宠物生成不可用",
+            }
+        return self._pets.assets()
+
+    def pet_generate(
+        self, photo: object, name: object = None, style: object = "outline"
+    ) -> dict[str, object]:
+        """Trace four figures out of one photo, in the chosen style.
+
+        The photo arrives as a data URL from the page and is dropped as soon as the
+        boundary is traced -- except in the 照片 style, where a thumbnail clipped to
+        the silhouette is kept on purpose, and the picker says so before the file
+        dialog opens.
+        """
+        if self._pets is None:
+            return {"ok": False, "pets": [], "current": "", "error": "宠物生成不可用"}
+        return self._pets.generate(photo, name, style)
+
+    def pet_pick(self, pet_id: object) -> dict[str, object]:
+        """Put one figure on the desktop. ``""`` gives her the built-in one back."""
+        if self._pets is None:
+            return {"ok": False, "error": "宠物生成不可用"}
+        answer = self._pets.pick(pet_id)
+        if answer.get("ok"):
+            self._pet_figure_changed()
+        return answer
+
+    def pet_delete(self, pet_id: object) -> dict[str, object]:
+        """Forget one figure. Deleting the one that is showing puts the built-in back."""
+        if self._pets is None:
+            return {"ok": False, "error": "宠物生成不可用"}
+        answer = self._pets.remove(pet_id)
+        if answer.get("ok"):
+            self._pet_figure_changed()
+        return answer
+
+    def pet_model(self) -> dict[str, object]:
+        """The polygon the pet page should extrude, asked for on load and on change.
+
+        Pulled by the page rather than pushed here because the page can start at any
+        moment -- the operator switches the pet on after lunch -- and a cue sent while
+        nothing was listening is a figure that never changes.
+        """
+        if self._pets is None:
+            return {
+                "ok": False,
+                "id": "",
+                "name": "",
+                "depth": 0.0,
+                "points": [],
+                "error": "宠物生成不可用",
+            }
+        return self._pets.model()
+
+    def _pet_figure_changed(self) -> None:
+        """Tell the pet page to come and ask what it should be drawing now."""
+        pet = self._pet
+        if pet is not None:
+            pet.apply_figure()
 
     def pet_frame(self, payload: object) -> dict[str, object]:
         """One composited frame of the figure, as a PNG data URL.
@@ -1614,15 +1830,17 @@ class HudBridge:
             listing["error"] = str(answer.get("error") or "切换失败")
         return listing
 
-    def chat_tuning(self, thinking: object = None, turns: object = None) -> dict[str, object]:
-        """Set the thinking level and/or context size for the model now in use.
+    def chat_tuning(
+        self, thinking: object = None, turns: object = None, tools: object = None
+    ) -> dict[str, object]:
+        """Set the thinking level, context size and/or tool table for the model now in use.
 
-        Both are optional and independent: the two knobs sit next to each other in the
-        chat header, and saving one must not silently reset the other.
+        All optional and independent: the knobs sit next to each other in the chat
+        header, and saving one must not silently reset the other.
         """
         if self._settings is None:
             return {"ok": False, "error": "设置不可用"}
-        return self._settings.set_tuning(thinking, turns)
+        return self._settings.set_tuning(thinking, turns, tools)
 
     def llm_add_model(
         self, provider: str, model_id: str = "", label: str = ""
@@ -1764,7 +1982,7 @@ class HudBridge:
         return {
             "answer_chars": len(reply.answer),
             "error": reply.error,
-            "state": STATE_CANCELLED if reply.cancelled else STATE_DONE,
+            "state": _turn_state(reply),
         }
 
     def llm_remove_model(self, provider: str, model_id: str = "") -> dict[str, object]:
@@ -1809,6 +2027,8 @@ class HudBridge:
         if self._settings is None:
             return
         kind = self._settings.thinking_loader()
+        if self._chat is not None:
+            self._chat.set_persona_name(self._settings.display_name())
         pet = self._pet
         if pet is not None:
             pet.set_thinking_loader(kind)
@@ -1819,23 +2039,27 @@ class HudBridge:
         state.set_speaks_typed(self._settings.speaks_typed())
 
     def list_endpoint_models(
-        self, base_url: object = "", provider: object = ""
+        self, base_url: object = "", provider: object = "", api_key: object = ""
     ) -> dict[str, object]:
         """Ask an endpoint which models it serves, so 起始模型 stops being a copy job.
 
-        The panel sends an address it just typed (or the row being edited). When a
-        provider name comes with it and that row actually has a key in the environment,
-        the key goes along: a gateway that wants a credential for ``/models`` wants the
-        same one it wants for chat, and saying "它要钥匙才肯列模型" is the honest answer
-        otherwise.
+        The panel sends an address it just typed (or the row being edited). ``api_key`` is
+        a key typed into the **same** form for a row that does not exist yet: without it the
+        button answered 「先把 Key 填上再拉」 while the key was sitting in the box right above
+        it, which is the second time this dialog has told somebody to do the thing they just
+        did. Used for this one request only -- not stored, not logged, not echoed.
+
+        With no typed key, a saved row's own credential from the environment goes along:
+        a gateway that wants a credential for ``/models`` wants the same one it wants for
+        chat, and saying "它要钥匙才肯列模型" is the honest answer otherwise.
         """
         url = str(base_url or "").strip()
         if not url.startswith(("http://", "https://")):
             return {"ok": False, "models": [], "error": "地址必须以 http:// 或 https:// 开头"}
-        key = ""
+        key = str(api_key or "").strip()
         name = str(provider or "").strip()
         settings = self._settings
-        if name and settings is not None:
+        if not key and name and settings is not None:
             row = next(
                 (item for item in settings.snapshot()["models"] if item["name"] == name), None
             )
@@ -1875,7 +2099,15 @@ class HudBridge:
         refused: dict[str, str] = {}
         for item in rows:
             name = str(item.get("name") or "")
+            # The add form now carries several models per row; the gate asks the one the row
+            # will actually answer with, which is the first. Probing a blank model would
+            # lean on whatever default the prober guesses -- and a row whose *second* model
+            # is the broken one is a row the operator still has to find out about by hand.
             model = str(item.get("model") or "")
+            listed = item.get("models")
+            if not model and isinstance(listed, list) and listed:
+                first = listed[0]
+                model = str(first.get("id") if isinstance(first, Mapping) else first)
 
             def rollback(target: str = name) -> dict[str, object]:
                 return settings.apply({"remove_model": target})
@@ -1954,6 +2186,69 @@ class HudBridge:
             "models": self._usage.by_provider(window),
             "span": self._usage.ledger_span(),
         }
+
+    def _sync_local_dial(self) -> None:
+        """把「屏上那一格」和「引擎下一步要加载的那一份」重新钉在一起。
+
+        `local_server` 不许读偏好（层级规矩），它只认 `configure()` 推进来的 dial。而 dial
+        只有在**设置那一侧动手写的时候**才会被推一遍 —— 于是写下偏好的另一条路（一键建议、
+        手机、她自己用 settings 工具改）或者任何一次漏推，都会让屏上显示 A、引擎按 B 决定，
+        而 B 恰好是 `none` 时，屏上会冒出一句「设置里选了『不用离线模型』」（r86 真机抓到，
+        同一进程内偏好已经是 1.7B，加载仍然被这样拒掉；重启就好了）。
+        所以每次问状态/按下加载之前，先从偏好重推一次：读一次内存里的旋钮，不起进程。
+        """
+        if self._settings is not None:
+            self._settings.tune_local()
+
+    def model_server_status(self) -> dict[str, object]:
+        """The bundled llama.cpp server: which phase it is in, and why not more.
+
+        Read-only on purpose -- the settings row polls this, and a poll must never be
+        able to allocate 5 GB by accident.
+        """
+        self._sync_local_dial()
+        return local_model.status()
+
+    def model_server_start(self) -> dict[str, object]:
+        """Bring the bundled model up now instead of waiting for the first question.
+
+        Blocks while the weights load (tens of seconds), which is what the page's
+        "正在加载" button state is for; the answer carries the reason when it fails.
+        """
+        self._sync_local_dial()
+        return local_model.start()
+
+    def model_server_stop(self) -> dict[str, object]:
+        """Hand the memory back. The next local question starts her up again."""
+        return local_model.stop()
+
+    def local_model_check(self, model: str, context: int) -> dict[str, object]:
+        """ "要是换成这个模型 / 这一档，这台机器接不接得住" —— 选中那一刻就能问，不改设置。
+
+        读的是 `verdict_for`，和真正加载前拦的那一下是同一段代码：预览说能跑、点下去却起不来，
+        这种屏上的自相矛盾比一次失败更伤人。
+        """
+        if self._settings is None:
+            return {"ok": False, "reason": "设置服务还没起来"}
+        return local_model.preflight(str(model or ""), int(context or 0))
+
+    def local_advice(self) -> dict[str, object]:
+        """Ask for a settings recommendation for this machine. Blocks on the model.
+
+        Tens of seconds when the offline model has to load first, which is what the
+        page's busy state is for; when that model is what cannot be reached, the rule
+        engine answers immediately and the row says which one spoke.
+        """
+        if self._settings is None:
+            return {"error": "这个窗口没有设置服务", "source": "rule", "reason": ""}
+        return self._settings.recommend_local()
+
+    def local_advice_apply(self, advice: dict[str, object]) -> dict[str, object]:
+        """Apply a recommendation card the operator clicked. Re-validated server-side."""
+        if self._settings is None:
+            return {"error": "这个窗口没有设置服务", "snapshot": {}}
+        problem = self._settings.apply_local_advice(advice or {})
+        return {"error": problem or "", "snapshot": self._settings.snapshot()}
 
     def voice_status(self) -> dict[str, object]:
         """Whether the microphone is available, and what it is doing about it."""
@@ -2154,6 +2449,9 @@ class HudBridge:
             return {"question": text, "answer": "", "error": "对话服务未启用"}
         payload = attachments if isinstance(attachments, list) else []
         target = conversation or service.session_id
+        # 问题可能正是"让她自己加载"的那一下：先按偏好把 dial 重推一遍，别让引擎按
+        # 一份过路的选择去加载（见 _sync_local_dial）。
+        self._sync_local_dial()
         state = self._state
         if state is not None:
             # Both, and in this order: the question is on screen before she says she is
@@ -2177,7 +2475,7 @@ class HudBridge:
             conversation_id=target,
             kind=KIND_CHAT,
             question=text,
-            participants=(f"{provider}/{model}" if provider else ()),
+            participants=((f"{provider}/{model}",) if provider else ()),
             work=lambda context: self._drive_turn(
                 context, service, text, payload, target, provider, model
             ),
@@ -2252,7 +2550,7 @@ class HudBridge:
             "answer_chars": len(reply.answer),
             "tools_used": reply.tools_used,
             "error": reply.error,
-            "state": STATE_CANCELLED if reply.cancelled else STATE_DONE,
+            "state": _turn_state(reply),
         }
 
     def _phase_reporter(self, context: Any) -> Callable[[str], None]:
@@ -2281,7 +2579,12 @@ class HudBridge:
             state.clear_stream(task_id)
             if conversation == self._active_tab() and reply.answer:
                 state.add_turn(
-                    "assistant", reply.answer, reply.reasoning, reply.model, reply.record
+                    "assistant",
+                    reply.answer,
+                    reply.reasoning,
+                    reply.model,
+                    reply.record,
+                    reply.to_dict().get("tools"),
                 )
             if self._turns is None or not self._turns.waiting():
                 state.set_turn(UiVoiceState.IDLE)
@@ -2495,12 +2798,277 @@ class HudBridge:
         # happens if I close this", and the answer changed with this build.
         lifecycle = self._lifecycle
         return {
-            "name": "小夜",
+            "name": self._settings.display_name() if self._settings is not None else "小夜",
             "version": __version__,
             "engine": "pywebview",
             "built": build_stamp(),
             "tray": bool(lifecycle is not None and lifecycle.hides_to_tray),
         }
+
+    # -- 手机投屏（scrcpy） ------------------------------------------------
+
+    def mirror_state(self) -> MirrorStatus:
+        """Where the mirror is: phase, tier, elapsed seconds, scrcpy's last lines.
+
+        Poll-safe on purpose -- no ``adb`` call, no spawn, one lock -- because the panel
+        reads it on a timer while it is open. The device list is a separate door
+        precisely so that a timer cannot turn into a repeated subprocess.
+        """
+        if self._mirror is None:
+            return _mirror_unavailable("这个进程没有接投屏服务")
+        return self._mirror.status()
+
+    def mirror_devices(self) -> MirrorDeviceList:
+        """The phones ``adb`` can see right now, one row per phone, each with what to do.
+
+        This one does shell out (12 second ceiling), so the panel calls it on open and
+        on 「刷新设备」 rather than on the timer. One row per *phone* because ``adb``
+        lists channels: that vivo on the desk answers over a cable and two tcpip ports,
+        three lines for one device, and the panel was reading that as three phones.
+        """
+        if self._mirror is None:
+            return {"devices": [], "error": "这个进程没有接投屏服务"}
+        rows, error = self._mirror.phones()
+        return {"devices": [row.to_dict() for row in rows], "error": error}
+
+    def image_state(self) -> ImageStatus:
+        """生图那一格的快照：档位、两条引擎现在各是什么情况、上次画了多久。
+
+        轮询安全 —— 一个网络请求都不发。真去问本机有没有 ComfyUI 是「检测引擎」那颗按钮
+        的事（:meth:`image_probe`）：运行态不等于发现态，和投屏那一格同一条规矩。
+        """
+        if self._images is None:
+            return _image_unavailable("这个进程没有接生图服务")
+        return self._images.status()
+
+    def image_probe(self) -> ImageStatus:
+        """真问一次本地引擎在不在，然后把新的整份状态还给面板。
+
+        回整份而不是一个布尔：那一行要同时说清版本、权重个数、以及"没找到"之后下一步按哪个按钮。
+        """
+        if self._images is None:
+            return _image_unavailable("这个进程没有接生图服务")
+        self._images.probe()
+        return self._images.status()
+
+    def image_generate(self, prompt: object, size: object = "") -> ImageAnswer:
+        """画一张。慢是常态（本机 ComfyUI 实测 512x512 二十步 22 秒），所以这一扇门
+        由页面自己转圈，绝不挂在 1.5 秒的轮询上。"""
+        if self._images is None:
+            return _image_answer_unavailable("这个进程没有接生图服务")
+        return self._images.generate(str(prompt or ""), size=str(size or "") or None)
+
+    def image_tune(self, engine: object, size: object, steps: object) -> ImageStatus:
+        """档位、尺寸、步数一次发齐。
+
+        合在一扇门里是故意的：分开三扇，页面上任何一格回得慢一点就会把另一格刚选的值盖掉 ——
+        投屏那两格（显示方式 + 拉伸）第 95 轮就是这么坏的。
+        """
+        if self._images is None:
+            return _image_unavailable("这个进程没有接生图服务")
+        verdicts = [
+            text
+            for text in (
+                self._images.set_choice(engine),
+                self._images.set_size(size),
+                self._images.set_steps(steps),
+            )
+            if text
+        ]
+        status = self._images.status()
+        if verdicts:
+            status["error"] = "；".join(verdicts)
+        return status
+
+    def image_setup(
+        self, comfy_url: object, comfy_dir: object, cloud_base: object, cloud_model: object
+    ) -> ImageStatus:
+        """两个地址、一个目录、一个模型名一次发齐。钥匙不走这扇门 —— 它只进环境变量，
+        在「设置 → 生图」那一格填，界面永不回显它的值。"""
+        if self._images is None:
+            return _image_unavailable("这个进程没有接生图服务")
+        problems = [
+            text
+            for text in (
+                self._images.set_comfy_url(comfy_url),
+                self._images.set_comfy_dir(comfy_dir),
+                self._images.set_cloud(cloud_base, cloud_model),
+            )
+            if text
+        ]
+        status = self._images.status()
+        if problems:
+            status["error"] = "；".join(problems)
+        return status
+
+    def mirror_start(self, serial: object = "") -> MirrorStatus:
+        """Open the mirror window. The answer is the state after the attempt.
+
+        Refusals come back as a phase and a sentence, not an exception: 「连着两台，要哪
+        一台」 and 「手机还没点允许 USB 调试」 are the normal outcomes here, and the panel
+        has to show them rather than a spinner that never resolves.
+        """
+        if self._mirror is None:
+            return _mirror_unavailable("这个进程没有接投屏服务", phase="failed")
+        return self._mirror.start_mirror(str(serial or ""))
+
+    def mirror_stop(self) -> MirrorStatus:
+        """Close the window and take the child process with it."""
+        if self._mirror is None:
+            return _mirror_unavailable("这个进程没有接投屏服务")
+        return self._mirror.stop_mirror()
+
+    def mirror_connect(self, address: object = "") -> MirrorStatus:
+        """``adb connect`` for the wireless-debugging address the phone is showing."""
+        if self._mirror is None:
+            return _mirror_unavailable("这个进程没有接投屏服务", phase="failed")
+        return self._mirror.connect_wireless(str(address or ""))
+
+    def mirror_pair(self, address: object = "", code: object = "") -> MirrorStatus:
+        """``adb pair`` with the six-digit code from the phone's 无线调试 dialog."""
+        if self._mirror is None:
+            return _mirror_unavailable("这个进程没有接投屏服务", phase="failed")
+        return self._mirror.pair_wireless(str(address or ""), str(code or ""))
+
+    def mirror_tcpip(self, serial: object = "") -> MirrorStatus:
+        """Give a phone whose 无线调试 has no pairing code a TCP port, then connect.
+
+        Android 10 and older cannot pair wirelessly at all, so 「同一个 WiFi」 would be a
+        promise they cannot keep without this door: it is the one click that plugs in
+        once and reads the phone's own WiFi address off ``wlan0``.
+        """
+        if self._mirror is None:
+            return _mirror_unavailable("这个进程没有接投屏服务", phase="failed")
+        return self._mirror.open_wireless_port(str(serial or ""))
+
+    def mirror_discover(self) -> MirrorStatus:
+        """Scan the local /24 for phones listening on the tcpip port and connect them.
+
+        Slow (a couple of seconds, bounded) and deliberately not on a timer: it is a
+        button, and a background port sweep on this machine would be a different kind of
+        software.
+        """
+        if self._mirror is None:
+            return _mirror_unavailable("这个进程没有接投屏服务", phase="failed")
+        return self._mirror.discover_wireless()
+
+    def mirror_display(self, window_mode: object = "", stretch: object = None) -> MirrorStatus:
+        """Remember how big the window should be, and resize the live one if that is possible.
+
+        The parameter is called ``window_mode``, not ``window``: pywebview builds each
+        stub with ``new Function(<python param names>, body)`` and that body says
+        ``window.pywebview._jsApiCallback(...)`` -- so a parameter named ``window``
+        shadows the global and the call dies with "Cannot read properties of undefined
+        (reading '_jsApiCallback')". It looked exactly like a mock-mode success.
+
+        The answer carries what could *not* be done live (全屏 needs a relaunch, and a
+        window the person already closed cannot be maximized) -- a control that reports
+        success while the picture stayed the same size is the failure mode this project
+        keeps getting billed for.
+        """
+        if self._mirror is None:
+            return _mirror_unavailable("这个进程没有接投屏服务", phase="failed")
+        note = self._mirror.apply_window_mode(window_mode)
+        if stretch is not None:
+            self._mirror.set_stretch(bool(stretch))
+        status = self._mirror.status()
+        status["error"] = note
+        return status
+
+    def mirror_screen(self, question: object = "") -> dict[str, object]:
+        """读手机那一屏，回一段她能直接引用的话。
+
+        这颗按钮存在的理由：「我手机上现在是什么」走工具是对的，但人点投屏面板时想立刻看到
+        结果，不该先逼他打一句话。回答里带 ``sources`` —— 哪条路走了、哪条没走、为什么没走。
+        """
+        if self._phone is None:
+            blank = "这个进程没接手机读屏。"
+            return {"text": blank, "error": blank, "sources": [], "allow_vision": False}
+        screen = self._phone.read(str(question or ""))
+        return {
+            "text": screen.to_text(),
+            "error": screen.error,
+            "sources": list(screen.sources),
+            "allow_vision": self._phone.vision_allowed(),
+        }
+
+    def mirror_screen_vision(self, allow: object = None) -> dict[str, object]:
+        """那格「允许把这块屏发给能看图的模型」。不传就是只读当前状态。
+
+        单独一扇门而不塞进 mirror_tune：这一格改的不是画质，是"手机画面会不会离开这台
+        机器"，它值得在自己的回答里被读到。
+
+        这里**不重新读屏**：一次读屏是 dumpsys + uiautomator（实测约 3 秒、两次 adb），
+        勾一格开关不该付这个钱，更不该把刚读出来的那段答案擦掉。
+        """
+        if self._phone is None:
+            blank = "这个进程没接手机读屏。"
+            return {"text": blank, "error": blank, "sources": [], "allow_vision": False}
+        problem = ""
+        if allow is not None:
+            problem = self._phone.set_vision_allowed(bool(allow))
+        allowed = self._phone.vision_allowed()
+        return {
+            "text": (
+                ""
+                if problem
+                else (
+                    "能看图的那一档可以收这张屏了"
+                    if allowed
+                    else "不发给模型了：只用手机自己报上来的字和本地 OCR"
+                )
+            ),
+            "error": problem,
+            "sources": [],
+            "allow_vision": allowed,
+        }
+
+    def mirror_key(self, key: object = "") -> MirrorStatus:
+        """Press one of the phone's own navigation buttons: back / home / recents.
+
+        This changes the phone, not us -- which is why the answer carries the refusal
+        when nothing is being mirrored: 「按了没反应」和「没在投屏所以不知道按哪台」是两件
+        完全不同的事，界面上必须说清是哪一件。
+        """
+        if self._mirror is None:
+            return _mirror_unavailable("这个进程没有接投屏服务", phase="failed")
+        return self._mirror.press_key(str(key or ""))
+
+    def mirror_swipe(self, direction: object = "") -> MirrorStatus:
+        """Fling the mirrored phone's screen: 下一个（往上）/ 上一个（往下）.
+
+        Ratios of the device's own height, asked of ``adb`` once per phone, so Douyin
+        翻页 does not depend on where the mouse pointer happens to be.
+        """
+        if self._mirror is None:
+            return _mirror_unavailable("这个进程没有接投屏服务", phase="failed")
+        return self._mirror.swipe(str(direction or ""))
+
+    def mirror_tune(
+        self,
+        tier: object = "",
+        audio: object = None,
+        keep_screen: object = None,
+        mode: object = "",
+    ) -> MirrorStatus:
+        """Remember the picture settings; ``""`` / ``None`` means leave that one alone.
+
+        Everything here is per machine, not per phone: what the link in this room can
+        carry is a property of the WiFi, and the tier a person picks in the panel is the
+        tier a tool call then uses -- one file, two doors, no second copy of the choice.
+        """
+        if self._mirror is None:
+            return _mirror_unavailable("这个进程没有接投屏服务", phase="failed")
+        problem = self._mirror.set_tier(tier) if str(tier or "").strip() else ""
+        if str(mode or "").strip():
+            problem = self._mirror.set_mode(mode) or problem
+        if audio is not None:
+            self._mirror.set_audio(bool(audio))
+        if keep_screen is not None:
+            self._mirror.set_keep_screen(bool(keep_screen))
+        status = self._mirror.status()
+        status["error"] = problem
+        return status
 
     # -- 手机接入 --------------------------------------------------------
 
@@ -2978,6 +3546,7 @@ def run(
     tools: ToolLedger | None = None,
     voice_picker: VoicePicker | None = None,
     voice_library: VoiceLibrary | None = None,
+    pets: PetService | None = None,
     voice_call: VoiceCall | None = None,
     voice_sample: Any | None = None,
     computer_access: ComputerAccess | None = None,
@@ -3004,6 +3573,9 @@ def run(
     greeter: Any = None,
     turns: Any = None,
     model_probe: ModelProber | None = None,
+    mirror: ScreenMirrorService | None = None,
+    images: ImageService | None = None,
+    phone_screen: PhoneScreenReader | None = None,
     debug: bool = False,
 ) -> int:
     """Open the HUD window and block until it closes.
@@ -3108,7 +3680,12 @@ def run(
     # built before. A late-bound holder is the whole trick: pystray asks the tick and
     # the callback when the menu is *opened*, by which time the bridge exists.
     mobile_box: list[Any] = []
+    # The name the operator chose, worn by everything built below. Read once: the HUD
+    # brand follows the setting live, these titles at the next launch.
+    stored_name = preferences.text(DISPLAY_NAME, default="") if preferences else ""
+    shown_as = display_name(stored_name)
     tray = TrayIcon(
+        name=shown_as,
         on_activate=lifecycle.activate,
         on_quit=lifecycle.quit,
         on_toggle_pet=lifecycle.toggle_pet,
@@ -3168,6 +3745,7 @@ def run(
         tools=tools,
         voice_picker=voice_picker,
         voice_library=voice_library,
+        pets=pets,
         voice_call=voice_call,
         voice_sample=voice_sample,
         computer_access=computer_access,
@@ -3183,6 +3761,9 @@ def run(
         planner=planner,
         model_probe=model_probe,
         alerts=alerts,
+        mirror=mirror,
+        images=images,
+        phone_screen=phone_screen,
     )
     gateway = build_mobile_gateway(bridge, mobile, mobile_dir)
     if turns is not None:
@@ -3211,7 +3792,7 @@ def run(
         screen,
     )
     window = webview.create_window(
-        title="小夜",
+        title=shown_as,
         url=base_url,
         js_api=bridge,
         width=initial.width,
@@ -3238,6 +3819,7 @@ def run(
         # Her cards are drawn by Python, so the press on one arrives here rather than
         # through a page. Same handlers the panel's own buttons call.
         on_action=bridge.pet_action,
+        title=f"{shown_as} · 桌面宠物",
     )
     lifecycle.attach_pet(pet)
     bridge.attach_pet(pet, remember=_remember_pet_choice(preferences))
@@ -3291,6 +3873,11 @@ def run(
     # message loop is running (and ``loaded`` handlers run off the UI thread).
     if preferences is not None and bool(preferences.get(PET_ENABLED)):
         _restore_pet_on_load(window, pet)
+    # 投屏那一屏旁边的控制条：手不用离开画面去够那几颗按钮。它自己轮询投屏状态，
+    # 没在投屏时是隐藏的；起不来它自己写日志，面板里那排按钮照常能用。
+    # 颜色从桥面现在这套皮肤取 —— 它和气泡一样是 Python 画的卡片，换肤必须跟着换。
+    mirror_bar = MirrorControlBar(mirror, palette=bridge.current_bubble_palette)
+    mirror_bar.start()
     logger.info(
         "opening desktop window (%sx%s at %s,%s, maximized=%s) at %s",
         initial.width,
@@ -3311,6 +3898,7 @@ def run(
         # takes a second does not leave a clickable ghost on the taskbar.
         lifecycle.shutdown()
         hotkeys.stop()
+        mirror_bar.stop()
         unsubscribe()
         pump.stop()
         if audio is not None:

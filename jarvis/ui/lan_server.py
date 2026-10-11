@@ -56,6 +56,15 @@ logger = logging.getLogger("jarvis.ui.lan_server")
 APP_NAME = "小夜"
 
 MAX_BODY_BYTES = 2 * 1024 * 1024
+
+_HANDSHAKE_TIMEOUT: float = 3.0
+"""How long a client may take to finish the TLS handshake before it is dropped."""
+
+_REQUEST_TIMEOUT: float = 15.0
+"""Read budget for one request, once the handshake is done."""
+
+_MAX_SESSIONS: int = 8
+"""Live connections at a time. Beyond that the port refuses new ones, loudly."""
 """Largest request body accepted.
 
 Sized by a real cross-file fact, not a guess: a photo question is an attachment
@@ -334,6 +343,36 @@ class _MobileRequestHandler(http.server.BaseHTTPRequestHandler):
 
     server: _MobileHttpServer
 
+    timeout = _REQUEST_TIMEOUT
+    """Read budget *after* the handshake: a device that starts a body and then stops
+    gets dropped rather than holding a worker and its slot forever."""
+
+    def setup(self) -> None:
+        """Do the TLS handshake here, in this connection's own thread.
+
+        Wrapping the *listening* socket -- which is what this used to do -- puts the
+        handshake in the accept loop, so one client that opens the TCP port and then
+        sends nothing at all stops every healthy phone from being accepted. Measured on
+        loopback in the r93 review: a second request timed out until the silent
+        connection was closed. Per connection, the worst a stranger can do to the port
+        is hold one worker for ``_HANDSHAKE_TIMEOUT`` seconds.
+        """
+        raw = self.request
+        raw.settimeout(_HANDSHAKE_TIMEOUT)
+        context = self.server.tls
+        if context is None:  # pragma: no cover - enable() sets it before serving
+            raise RuntimeError("手机接入没装上 TLS 上下文")
+        try:
+            self.request = context.wrap_socket(raw, server_side=True)
+        except OSError as exc:  # ssl.SSLError and the handshake timeout are both OSError
+            logger.debug(
+                "mobile client %s never finished the handshake: %s",
+                self.client_address[0],
+                exc,
+            )
+            raise
+        super().setup()
+
     def do_GET(self) -> None:
         """``/hello`` for anyone; ``/methods`` and ``/state`` for a paired device."""
         path = self.path.split("?", 1)[0].rstrip("/") or "/"
@@ -423,6 +462,11 @@ class _MobileHttpServer(http.server.ThreadingHTTPServer):
     """The socket, the vault, and the bridge the whitelisted methods live on."""
 
     daemon_threads = True
+    # ``serve_forever`` must not wait on a client that never finished shaking hands --
+    # that is the same blocking bug from the other side, and it would show up as
+    # 「关掉了手机接入，程序却退不出去」.
+    block_on_close = False
+
     # Not the stdlib default (``http.server`` sets 1). On Windows SO_REUSEADDR lets
     # a bind succeed even when another process already holds the port, so a leftover
     # 小夜 would not fail loudly -- two listeners would split the phones on 8737.
@@ -442,6 +486,8 @@ class _MobileHttpServer(http.server.ThreadingHTTPServer):
         self.version = version
         # Set by the gateway before the first request: which device just spoke.
         self.on_request: Callable[[str], None] = lambda device_id: None
+        self.tls: ssl.SSLContext | None = None
+        self._slots = threading.BoundedSemaphore(_MAX_SESSIONS)
         super().__init__(address, _MobileRequestHandler)
 
     # -- endpoints -------------------------------------------------------
@@ -492,6 +538,28 @@ class _MobileHttpServer(http.server.ThreadingHTTPServer):
             "methods": sorted(ALLOWED_METHODS),
             "server": {"name": APP_NAME, "version": self.version},
         }
+
+    def verify_request(self, request: Any, client_address: tuple[str, int]) -> bool:
+        """Refuse over the limit *before* spending a thread on it.
+
+        Every paired phone needs a live connection for the length of one RPC, so the cap
+        counts connections rather than requests. Refusals are logged: a silent 「手机显示
+        连着，点什么都没反应」 is otherwise undiagnosable.
+        """
+        if not self._slots.acquire(blocking=False):
+            logger.warning(
+                "手机接入同时到 %d 条连接，先拒掉来自 %s 的这一条",
+                _MAX_SESSIONS,
+                client_address[0],
+            )
+            return False
+        return True
+
+    def process_request_thread(self, request: Any, client_address: tuple[str, int]) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
 
     def rpc(self, method: str, body: dict[str, Any]) -> dict[str, object]:
         """Call one whitelisted bridge method.
@@ -660,11 +728,12 @@ class MobileGateway:
             return False
         server.on_request = self._touch
         try:
-            server.socket = ssl_context(key_path, cert_path).wrap_socket(
-                server.socket, server_side=True
-            )
+            # Built here, applied per connection (see ``_MobileRequestHandler.setup``).
+            # Wrapping ``server.socket`` instead would move the handshake into the accept
+            # loop and let one silent client lock every real phone out.
+            server.tls = ssl_context(key_path, cert_path)
         except (OSError, ssl.SSLError):
-            logger.exception("could not put TLS on the mobile socket")
+            logger.exception("could not load the TLS material")
             server.server_close()
             self._reason = "TLS 装载失败，看日志"
             return False
@@ -730,11 +799,22 @@ class MobileGateway:
 
     def revoke(self, device_id: str) -> dict[str, object]:
         """Cut one phone off, and hand back the list so the panel can redraw it."""
-        return {"revoked": self._vault.revoke(str(device_id)), "devices": self._vault.devices()}
+        revoked = self._vault.revoke(str(device_id))
+        return {
+            "revoked": revoked,
+            "devices": self._vault.devices(),
+            "error": "" if revoked else "没有撤销成功：设备不存在或设备清单写入失败",
+        }
 
     def revoke_all(self) -> dict[str, object]:
         """Cut every phone off at once — the answer to a lost device."""
-        return {"revoked": self._vault.revoke_all(), "devices": self._vault.devices()}
+        revoked = self._vault.revoke_all()
+        remaining = self._vault.devices()
+        return {
+            "revoked": revoked,
+            "devices": remaining,
+            "error": "" if not remaining else "没有撤销成功：设备清单写入失败",
+        }
 
     def selftest(self) -> dict[str, object]:
         """Does this machine's listener really refuse plaintext? Run it, do not assume.

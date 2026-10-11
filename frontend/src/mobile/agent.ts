@@ -10,7 +10,7 @@
  * 3. 每一笔都写进台账，**包括被取消的和失败的**——只记成功的那本账不是台账，是宣传。
  */
 import { execute, findAction, toolSchemas, type Approve } from './actions'
-import { rawChat, type Attachment, type ChatMessage, type ModelConfig, type Turn } from './api'
+import { beginChat, chatWasCancelled, rawChat, type Attachment, type ChatMessage, type ModelConfig, type Turn } from './api'
 import type { Delta } from './sse'
 import type { ActionRow } from './types'
 
@@ -67,17 +67,25 @@ export async function askAgent(
   approve: Approve,
   hooks: AgentHooks,
 ): Promise<string> {
+  beginChat()
   const messages = toMessages(history, attachments)
+  const guardedApproval: Approve = async prompt => {
+    if (chatWasCancelled()) return false
+    const allowed = await approve(prompt)
+    return allowed && !chatWasCancelled()
+  }
   const options = hooks.onDelta ? { onDelta: hooks.onDelta } : {}
   let spoken = ''
   // 不是所有 OpenAI 兼容端点都接 `tools`：老一点的会直接 4xx。这时候退回纯聊天，
   // 但要把"退回了"说出去——静默降级的结果是用户以为她不愿意动，而不是动不了。
   let tools: object[] = toolSchemas()
   for (let round = 0; round < MAX_ROUNDS; round += 1) {
+    if (chatWasCancelled()) return spoken
     let turn
     try {
       turn = await rawChat(messages, cfg, tools, options)
     } catch (error) {
+      if (chatWasCancelled()) return spoken
       const message = error instanceof Error ? error.message : String(error)
       if (!tools.length || !/tools?|function/i.test(message)) throw error
       tools = []
@@ -87,7 +95,7 @@ export async function askAgent(
     spoken = turn.content || spoken
     // 人按了"不听了"：手里这一轮的文本留下，但**不要**拿半截的 tool_calls 去动手机。
     // 参数是逐字流出来的，取消的时候 `{"percent":4` 这种半句完全可能出现。
-    if (turn.stopped) return turn.content || spoken
+    if (turn.stopped || chatWasCancelled()) return turn.content || spoken
     if (!turn.toolCalls.length) return turn.content || spoken
     messages.push({
       role: 'assistant',
@@ -99,8 +107,9 @@ export async function askAgent(
       })),
     })
     for (const call of turn.toolCalls) {
+      if (chatWasCancelled()) return spoken
       const known = findAction(call.name)
-      const result = await execute(call.name, parse(call.arguments), approve)
+      const result = await execute(call.name, parse(call.arguments), guardedApproval)
       hooks.onAction({
         at: Date.now(),
         name: call.name,

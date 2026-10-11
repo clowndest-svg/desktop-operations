@@ -12,6 +12,7 @@ import ctypes
 import sys
 import threading
 import types
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -1155,3 +1156,34 @@ class TestSkinReachesHer:
         """宠物没开的时候不该凭空去 evaluate_js（那会抛，而且没有任何东西可改）。"""
         pet = controller()
         assert pet.apply_skin("green") is False
+
+
+class TestSheThinksStandingWithHerHeadDown:
+    """思考姿势被否过两次，所以把数值钉在测试里，不钉在注释里。
+
+    ① 更早：pitch 0.3 + lids 0.52 —— 读起来像关机，"她没反应"；
+    ② 上一版：pitch 0.15 + **坐到地上抱笔记本** —— 用户原话"这个思考姿势太丑了，
+      给我改成人物低头思考就行了"。
+    钉的是绝对值：把 sit 改回 1、或者把 lids 抬到打盹那一档，这条就红。
+    """
+
+    @staticmethod
+    def _pose(mood: str) -> dict[str, float]:
+        import re
+
+        source = Path("frontend/src/avatar/driver.ts").read_text(encoding="utf-8")
+        line = re.search(rf"^\s*{mood}: \{{([^}}]*)\}},", source, re.MULTILINE)
+        assert line is not None, f"driver.ts 里找不到 {mood} 那一格"
+        return {key: float(value) for key, value in re.findall(r"(\w+): (-?[\d.]+)", line.group(1))}
+
+    def test_nothing_sits_anymore(self) -> None:
+        for mood in ("dormant", "armed", "listening", "thinking", "speaking"):
+            assert self._pose(mood)["sit"] == 0.0, f"{mood} 又让她坐下去了"
+
+    def test_the_head_bows_but_the_eyes_stay_open(self) -> None:
+        pose = self._pose("thinking")
+        assert 0.15 <= pose["pitch"] <= 0.30, f"低头幅度不对：{pose['pitch']}"
+        # 打盹那一档是 lids 0.42；超过 0.2 就开始往"睡"读，那正是第一次被否的原因。
+        assert pose["lids"] <= 0.2, f"眼睛闭太多了：{pose['lids']}"
+        assert pose["gaze"] < 0, "往下看才算在想"
+        assert abs(pose["roll"]) <= 0.08, f"头歪过头就读成困了：{pose['roll']}"

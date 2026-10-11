@@ -8,6 +8,7 @@
         <button class="hud-btn" type="button" @click="emit('close')">关闭</button>
       </header>
 
+      <div class="ca__scroll">
       <p v-if="error" class="ca__error">{{ error }}</p>
 
       <ul v-if="levels.length" class="ca__list">
@@ -44,8 +45,7 @@
         <span>
           允许她替你在输入框里打字
           <em>
-            关了：她只能按键（切窗口、回车、Esc），一个字都打不出来。
-            开了：她能输入文字 —— 包括消息正文；发出去之前仍然要你按回车。
+            关了：她只能按键（切窗口、回车、Esc），一个字都打不出来。开了：她能输入文字 —— 包括消息正文；发出去之前仍然要你按回车。
           </em>
         </span>
       </label>
@@ -106,6 +106,7 @@
             ><template v-if="entry.seconds !== null"> · {{ entry.seconds }}s</template>
           </span>
         </div>
+      </div>
       </div>
     </section>
   </div>
@@ -299,16 +300,25 @@ async function setShell(tier: number): Promise<void> {
   max-height: 80vh;
   display: flex;
   flex-direction: column;
-  /* Without this the box had nowhere to put the overflow, so the one child that *could*
-     shrink -- the ledger, which has its own scroll -- collapsed to a sliver and the last
-     row was cut in half. The box scrolls; nothing inside it is squeezed to make room. */
-  overflow-y: auto;
   padding: 16px 20px 14px;
   border: 1px solid var(--hud-line);
   border-top: 1px solid rgba(77, 216, 255, 0.45);
   border-radius: var(--hud-radius);
   background: linear-gradient(180deg, rgba(10, 24, 40, 0.96), rgba(4, 8, 14, 0.98));
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+}
+
+/*
+ * The box used to be the scroller, which took 关闭 out of view on the first pull.
+ * Everything but the head scrolls in here instead, and nothing inside is squeezed to
+ * make room -- the ledger keeps its own scroll for the same reason it always did.
+ */
+.ca__scroll {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .ca__head {
@@ -447,8 +457,8 @@ async function setShell(tier: number): Promise<void> {
   background: rgba(3, 9, 16, 0.55);
   max-height: 168px;
   overflow-y: auto;
-  /* Its own scroll made it the one item the box could squeeze. It keeps its height now
-     that the box scrolls instead. */
+  /* Held at its own height: a scroller shrinks whatever item it can, and this one has a
+     scroll of its own rather than being squeezed into a sliver. */
   flex: 0 0 auto;
 }
 

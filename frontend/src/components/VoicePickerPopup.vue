@@ -79,6 +79,14 @@
 
       <ul v-else class="vp__list">
         <li v-for="choice in choices" :key="choice.id" class="vp__row" :class="{ 'vp__row--on': choice.id === current }">
+          <label v-if="choice.kind === 'clone'" class="vp__pickbox" title="勾上，一起删">
+            <input
+              type="checkbox"
+              :checked="picked.includes(choice.id)"
+              @change="toggleVoice(choice.id)"
+            />
+          </label>
+          <span v-else class="vp__pickbox" aria-hidden="true"></span>
           <button
             class="vp__pick"
             type="button"
@@ -88,32 +96,27 @@
           >
             {{ choice.id === current ? '● 在用' : '○ 选用' }}
           </button>
-          <label v-if="choice.kind === 'clone'" class="vp__pickbox" title="勾上，一起删">
-            <input
-              type="checkbox"
-              :checked="picked.includes(choice.id)"
-              @change="toggleVoice(choice.id)"
-            />
-          </label>
           <span class="vp__label">{{ choice.label }}</span>
-          <button
-            class="hud-btn vp__try"
-            type="button"
-            :disabled="previewing === choice.id || busy"
-            @click="preview(choice.id)"
-          >
-            {{ previewing === choice.id ? '合成中…' : '试听' }}
-          </button>
-          <button
-            v-if="choice.kind === 'clone'"
-            class="hud-btn vp__try"
-            type="button"
-            :disabled="removing !== ''"
-            title="删掉这段录音做出来的音色"
-            @click="remove(choice.id)"
-          >
-            {{ removing === choice.id ? '删除中…' : '删' }}
-          </button>
+          <span class="vp__ops">
+            <button
+              class="hud-btn vp__try"
+              type="button"
+              :disabled="previewing === choice.id || busy"
+              @click="preview(choice.id)"
+            >
+              {{ previewing === choice.id ? '合成中…' : '试听' }}
+            </button>
+            <button
+              v-if="choice.kind === 'clone'"
+              class="hud-btn vp__try"
+              type="button"
+              :disabled="removing !== ''"
+              title="删掉这段录音做出来的音色"
+              @click="remove(choice.id)"
+            >
+              {{ removing === choice.id ? '删除中…' : '删' }}
+            </button>
+          </span>
         </li>
       </ul>
 
@@ -181,16 +184,14 @@
               <input v-model.trim="name" type="text" maxlength="24" placeholder="如：我的声音" />
             </label>
             <p class="vp__why">
-              对齐用的就是上面那句「{{ readLine }}」—— 复刻拿录音和这句话对齐，
-              所以念的时候别加词别改口。
+              对齐用的就是上面那句「{{ readLine }}」—— 复刻拿录音和这句话对齐，所以念的时候别加词别改口。
             </p>
             <label class="vp__upload">
               <input v-model="uploadCloud" type="checkbox" />
               <span>把这段录音传到厂商做云端复刻</span>
             </label>
             <p class="vp__why">
-              不勾就只存在这台机器上 —— 本机跑得动离线复刻模型才说得出你的声音。
-              勾上才立刻能用，但这段录音会离开这台机器（要 DASHSCOPE_API_KEY）。
+              不勾就只存在这台机器上 —— 本机跑得动离线复刻模型才说得出你的声音。勾上才立刻能用，但这段录音会离开这台机器（要 DASHSCOPE_API_KEY）。
             </p>
             <div class="vp__rec-ops">
               <button
@@ -217,8 +218,7 @@
         previewing never selects -- hearing the alternative is not committing to it.
       -->
       <p class="vp__note">
-        选用后从下一句朗读开始生效；试听只播给你听，不会改变当前选择。
-        语速和音量同样从下一句开始生效，「试听这一档」听的就是它们。
+        选用后从下一句朗读开始生效；试听只播给你听，不会改变当前选择。语速和音量同样从下一句开始生效，「试听这一档」听的就是它们。
       </p>
     </section>
   </div>
@@ -693,7 +693,10 @@ watch(
 
 .vp__row {
   display: grid;
-  grid-template-columns: 64px 1fr 64px;
+  /* Four cells, always filled: the checkbox column exists on every row so a
+     recorded voice does not push its buttons into an implicit second grid row --
+     that is what made 试听 24px and 删 stretch across the whole line. */
+  grid-template-columns: 22px 64px 1fr auto;
   align-items: center;
   gap: 10px;
   padding: 5px 8px;
@@ -735,7 +738,15 @@ watch(
 
 .vp__try {
   padding: 2px 8px;
+  min-width: 52px;
   font-size: 11px;
+  text-align: center;
+}
+
+.vp__ops {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
 }
 
 .vp__note-line {
@@ -776,7 +787,8 @@ watch(
 }
 
 .vp__pickbox {
-  margin-right: 8px;
+  display: flex;
+  justify-content: center;
 }
 
 /* --- 录一段我的声音 --- */

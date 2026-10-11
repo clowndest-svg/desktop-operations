@@ -8,6 +8,7 @@
         <button class="hud-btn" type="button" @click="emit('close')">关闭</button>
       </header>
 
+      <div class="ma__body">
       <p v-if="state.error" class="ma__error">{{ state.error }}</p>
 
       <div class="ma__switch">
@@ -104,9 +105,9 @@
       <p class="ma__note">
         手机是这台电脑的<strong>第二张脸，不是第二个大脑</strong>：能问、能说、能建提醒。
         <strong>删除类操作、提权、开电脑麦克风，手机一侧永远点不到</strong>，只能在电脑前确认。
-        只做内网，没有公网穿透；关掉上面的开关，端口立刻扫不到。
-        手机丢了就在这里把它撤销。
+        只做内网，没有公网穿透；关掉上面的开关，端口立刻扫不到。手机丢了就在这里把它撤销。
       </p>
+      </div>
     </section>
   </div>
 </template>
@@ -317,7 +318,6 @@ watch(
   position: relative;
   width: min(600px, 94vw);
   max-height: 84vh;
-  overflow-y: auto;
   display: flex;
   flex-direction: column;
   padding: 16px 20px 14px;
@@ -326,6 +326,15 @@ watch(
   border-radius: var(--hud-radius);
   background: linear-gradient(180deg, rgba(10, 24, 40, 0.96), rgba(4, 8, 14, 0.98));
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+}
+
+/* Everything that moves, moves in here -- the head with 关闭 is a sibling of it. */
+.ma__body {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .ma__head {

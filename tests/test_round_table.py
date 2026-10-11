@@ -579,12 +579,19 @@ class TestThePageAndTheTableAgree:
         """
         api = self._page("api/bridge.ts")
         assert "if (mode === 'boss') return seats + 1" in api
-        assert "if (mode === 'vote') return seats * 2" in api
+        assert "if (mode === 'vote') return seats === 1 ? 1 : seats * 2" in api
+        assert "if (mode === 'table') return seats * Math.min(3, Math.max(1, rounds)) + 1" in api
         for seats, rounds in ((3, 2), (4, 1), (2, 3)):
             for mode in (MODE_TABLE, MODE_BOSS, MODE_VOTE):
                 assert requests_for(mode, seats, rounds) > 0, mode
         assert requests_for(MODE_BOSS, 3, 2) == 4
         assert requests_for(MODE_VOTE, 3, 2) == 6
+        # 圆桌那条此前只验了「大于 0」：把轮数从算式里漏掉，页面上写的 3 家 × 2 轮照样是
+        # 正数，用户看到的价和引擎真正花的次数差了 3 次 —— 用量面板事后才对不上。
+        assert requests_for(MODE_TABLE, 3, 2) == 7
+        assert requests_for(MODE_TABLE, 4, 1) == 5
+        assert requests_for(MODE_TABLE, 2, 3) == 7
+        assert requests_for(MODE_TABLE, 3, 0) == requests_for(MODE_TABLE, 3, 1)
         # 形态的人话名字两边都得有，缺一个下拉框就出现英文 key。
         for mode in (MODE_TABLE, MODE_BOSS, MODE_VOTE):
             assert label_for(mode) in api, label_for(mode)

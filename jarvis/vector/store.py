@@ -286,6 +286,30 @@ class SqliteVectorStore(Repository):
             metadata=self._metadata(row["metadata"]),
         )
 
+    def record_ids(
+        self, collection: str, *, metadata: Mapping[str, object] | None = None
+    ) -> list[str]:
+        """The record ids in a collection, optionally only those carrying this metadata.
+
+        ``delete("the chunks I currently know about")`` is not the same question as
+        ``delete("everything that came from this document")``: when a document gets
+        shorter, the tail of the previous version has no chunk row left to name it, and
+        those vectors go on answering searches with text the user already replaced.
+        """
+        rows = self.query(
+            "SELECT record_id, metadata FROM vector_records WHERE collection = ?",
+            (collection,),
+        )
+        found: list[str] = []
+        for row in rows:
+            if metadata is None:
+                found.append(str(row["record_id"]))
+                continue
+            payload = self._metadata(row["metadata"])
+            if all(payload.get(key) == value for key, value in metadata.items()):
+                found.append(str(row["record_id"]))
+        return found
+
     def count(self, collection: str | None = None) -> int:
         """Number of indexed records, optionally restricted to one collection."""
         if collection is None:

@@ -20,7 +20,7 @@
             @click="openSession(session.id)"
           >
             <span class="chat__session-title">{{ session.title }}</span>
-            <span class="chat__session-meta">{{ session.turns }} 轮 · {{ dayOf(session.updated_at) }}</span>
+            <span class="chat__session-meta">{{ session.turns }} 轮 · {{ stamp(session.updated_at) }}</span>
           </button>
         </li>
       </ul>
@@ -93,7 +93,7 @@
           @change="chooseProvider"
         >
           <option v-for="entry in providers" :key="entry.name" :value="entry.name">
-            {{ entry.name }}{{ entry.key_set ? '' : entry.key_optional ? '（免 Key）' : '（缺 key）' }}
+            {{ entry.name }}{{ entry.key_set ? '' : needsKey(entry) ? '（缺 key）' : '（免 Key）' }}
           </option>
         </select>
         <select
@@ -119,7 +119,7 @@
           :title="thinkingTitle"
           @change="saveThinking"
         >
-          <option v-for="level in thinkingLevels" :key="level" :value="level">{{ THINKING_LABELS[level] ?? level }}</option>
+          <option v-for="level in thinkingLevels" :key="level" :value="level">{{ levelLabel(level) }}</option>
         </select>
         <select
           v-if="turnsBounds.length === 2"
@@ -131,6 +131,15 @@
         >
           <option v-for="count in turnOptions" :key="count" :value="String(count)">{{ count }} 轮上下文</option>
         </select>
+        <!--
+          工具表是她那双手的清单，这一格决定每次请求带不带它。不是偏好而是端点的上限：
+          实测 34 个 schema 要 4639 token，一个 4096 上下文的本地模型连「你好」都装不下，
+          所以这一格只能按"这一对模型"存，而不是全局一个开关。
+        -->
+        <label class="chat__knob chat__knob--check" title="每次请求带不带工具表（不带就没有那双手）">
+          <input type="checkbox" :checked="tools" :disabled="switching" @change="saveTools" />
+          带工具
+        </label>
         <!--
           协作形态。三种形态只差一件事：谁能看见谁说的话。
           价格写在这一行里，因为点下去之后才知道"这一句问了九次"是没有回头路的。
@@ -184,8 +193,14 @@
         One row per conversation, each with its own status. The strip reads the pushed
         snapshot rather than keeping score locally, because two tabs can be answering at
         the same moment and "which one is still working" has exactly one right answer.
+
+        It is drawn even when there is only one card: the ＋ that opens a second
+        conversation lives in here, so the old `v-if="tabs.length > 1"` (whose second
+        half said exactly the same thing) was a row that would swallow the door if the
+        list ever came up with a single card. Packaged builds start with two cards, so
+        this was a latent trap rather than something a customer hit.
       -->
-      <nav v-if="tabs.length > 1 || showTabStrip" class="chat__tabs" aria-label="对话列表">
+      <nav class="chat__tabs" aria-label="对话列表">
         <button
           v-for="tab in tabs"
           :key="tab.id"
@@ -207,8 +222,7 @@
 
       <div ref="listRef" class="chat__log" @scroll.passive="onLogScroll">
         <p v-if="lines.length === 0" class="hud-label chat__empty">
-          打一句话、或点「按一下说」直接开口。文字问答只需要 API Key；
-          语音要在上方点「启用语音」，加载约 30 秒。
+          打一句话、或点「按一下说」直接开口。文字问答只需要 API Key；语音要在上方点「启用语音」，加载约 30 秒。
         </p>
         <div v-for="(line, index) in lines" :key="index" class="chat__turn" :class="`chat__turn--${line.role}`">
           <div class="chat__bubble">
@@ -238,6 +252,14 @@
               <summary class="hud-label">圆桌记录</summary>
               <pre class="chat__reasoning-text">{{ line.record }}</pre>
             </details>
+            <!--
+              Whether this answer actually had hands. The 带工具 box says what the setting
+              asks for; only this says what went out, which is the difference between
+              "she won't" and "she was never given the tool".
+            -->
+            <div v-if="line.role === 'assistant' && line.tools" class="chat__tools">
+              {{ toolReport(line.tools) }}
+            </div>
           </div>
         </div>
         <!--
@@ -307,6 +329,32 @@
                 回复
               </button>
             </span>
+          </div>
+        </div>
+        <!--
+          She asked a model something and got nothing back. Until this card existed the
+          reason stayed in logs/jarvis.log and the screen showed only the operator's own
+          bubble, which is indistinguishable from a hang -- and the two have opposite fixes.
+          The words go where the answer would have gone. The advice is looked up by the
+          error's own kind, never by reading its sentence: rewording a message must not
+          silently turn a helpful card back into a bare stack of letters.
+        -->
+        <!--
+          这一轮答上了，不过是把工具表扔了才装进它的上下文的。不当失败画（失败卡一多，
+          人就学会忽略失败卡），也不能不说：「她能帮我开软件」在这一轮并不成立。
+        -->
+        <p v-if="turnNote" class="chat__note">{{ turnNote }}</p>
+        <div v-if="failure" class="chat__turn chat__turn--assistant">
+          <div class="chat__bubble chat__bubble--failed">
+            <span class="chat__who">小夜</span>
+            <span class="chat__failed-title">这句我没答上</span>
+            <p class="chat__failed-reason">{{ failure.reason }}</p>
+            <p v-if="failure.hint" class="chat__failed-hint">{{ failure.hint }}</p>
+            <p v-if="failure.where" class="chat__failed-where">{{ failure.where }}</p>
+            <details v-if="failure.detail" class="chat__reasoning">
+              <summary class="hud-label">完整报错（可以整段抄给服务商）</summary>
+              <pre class="chat__reasoning-text">{{ failure.detail }}</pre>
+            </details>
           </div>
         </div>
         <div v-if="error" class="chat__error">{{ error }}</div>
@@ -395,7 +443,8 @@
           <span v-else class="hud-label">当前模型 {{ currentLabel || '—' }}</span>
           <span v-if="pinNote" class="hud-label">{{ pinNote }}</span>
           <span class="hud-label">
-            {{ THINKING_LABELS[thinking] ?? thinking }} · {{ turns }} 轮上下文
+            {{ THINKING_LABELS[thinking] ?? thinking }} · {{ turns }} 轮上下文 ·
+            {{ tools ? '带工具' : '不带工具' }}
           </span>
           <span class="hud-label">{{ lines.length }} 条 · 会话 {{ activeTitle }}</span>
           <span class="hud-label">Esc 收回</span>
@@ -429,10 +478,13 @@ import {
   type ProviderChoice,
   type QueuedQuestion,
   type SessionInfo,
+  type ToolReport,
 } from '@/api/bridge'
 import { readAsDataUrl, shrinkToBudget } from '@/api/thumbnail'
+import { stamp } from '@/api/time'
 import {
   MODE_LABELS,
+  needsKey,
   requestsFor,
   type CollaborationMode,
   type ModelCap,
@@ -489,6 +541,22 @@ interface Line {
    * merged answer, so a reloaded session shows the conclusion without the argument.
    */
   record?: string
+  /**
+   * Which model answered, shown as that turn's name.
+   *
+   * Live turns only, like ``reasoning`` -- the transcript table has a column for the
+   * model but the reload path does not fill this, so carrying it means "the one still
+   * on screen", not "the one that was stored".
+   */
+  model?: string
+  /**
+   * What this answer's request carried: tool count, pack, what was called, why fewer.
+   *
+   * Live turns only. The transcript stores questions and answers, so a reloaded row
+   * has nothing to say about a request it never saw -- and drawing 「本次 0 个工具」
+   * under an old answer would be inventing that.
+   */
+  tools?: ToolReport
 }
 
 const seeded = ref<Line[]>([])
@@ -503,7 +571,10 @@ const provider = ref('')
 const model = ref('')
 const thinking = ref('medium')
 const turns = ref(10)
+const tools = ref(true)
 const thinkingLevels = ref<string[]>([])
+/** 精确预算（设置面板里填的那个数）；档位是 custom 时显示要用。 */
+const thinkingBudget = ref<number | null>(null)
 const turnsBounds = ref<number[]>([])
 const switching = ref(false)
 const switchNotice = ref('')
@@ -522,10 +593,10 @@ const caps = ref<ModelCap[]>([])
 
 const single = computed(() => mode.value === 'single')
 
-/** Every model that can actually answer, i.e. whose provider has a key. */
+/** Every model that can actually answer: a key on the row, or a row that needs none. */
 const seatOptions = computed(() =>
   providers.value
-    .filter((entry) => entry.key_set)
+    .filter((entry) => !needsKey(entry))
     .flatMap((entry) =>
       entry.models.map((spec) => {
         const cap = caps.value.find((row) => row.provider === entry.name && row.model === spec.id)
@@ -610,9 +681,14 @@ const THINKING_LABELS: Record<string, string> = {
   high: '深度思考',
 }
 
-const thinkingTitle = computed(
-  () => `思考强度：${THINKING_LABELS[thinking.value] ?? thinking.value}`,
-)
+/** 设置面板里填过精确预算时，档位对不上任何一档 —— 那就把那个数印出来。
+ *  少这一项的话 `<select>` 挑不到 option，屏上看着像"这一对没设过"。 */
+function levelLabel(level: string): string {
+  if (level === 'custom') return `自定义 ${thinkingBudget.value ?? ''}`.trim()
+  return THINKING_LABELS[level] ?? level
+}
+
+const thinkingTitle = computed(() => `思考强度：${levelLabel(thinking.value)}`)
 
 /** The turn counts the dropdown offers: a few round numbers inside the allowed range. */
 const turnOptions = computed<number[]>(() => {
@@ -637,7 +713,9 @@ async function loadModels(): Promise<void> {
     provider.value = list.provider
     model.value = list.model
     thinking.value = list.thinking
+    thinkingBudget.value = list.thinking_custom_budget ?? null
     turns.value = list.turns
+    tools.value = list.tools
     thinkingLevels.value = list.thinking_levels ?? []
     turnsBounds.value = list.turns_bounds ?? []
     caps.value = list.caps ?? []
@@ -646,14 +724,15 @@ async function loadModels(): Promise<void> {
   }
 }
 
-/** What to say after a switch: the key gap is the part worth mentioning out loud. */
+/** What to say after a switch: the key gap is the part worth mentioning out loud -- and it
+ * is only a gap when that row actually wants a credential. */
 function describePick(): string {
   const row = providers.value.find((entry) => entry.name === provider.value)
   const spec = models.value.find((entry) => entry.id === model.value)
   if (!row || !spec) return '已切换模型'
-  return row.key_set
-    ? `已切到 ${spec.label}`
-    : `已切到 ${spec.label}，但它缺 ${row.key_variable}，问话会失败`
+  return needsKey(row)
+    ? `已切到 ${spec.label}，但它缺 ${row.key_variable}，问话会失败`
+    : `已切到 ${spec.label}`
 }
 
 /**
@@ -688,7 +767,9 @@ async function applyPick(wanted: string, wantedModel: string, select: HTMLSelect
     provider.value = list.provider
     model.value = list.model
     thinking.value = list.thinking
+    thinkingBudget.value = list.thinking_custom_budget ?? null
     turns.value = list.turns
+    tools.value = list.tools
     switchNotice.value = describePick()
   } catch (err) {
     select.value = wantedModel ? model.value : provider.value
@@ -706,21 +787,23 @@ async function applyPick(wanted: string, wantedModel: string, select: HTMLSelect
  * and a page that echoed both would turn "raise the thinking budget" into a context
  * size the operator never picked.
  */
-async function saveKnob(level?: string, count?: number): Promise<void> {
+async function saveKnob(level?: string, count?: number, carry?: boolean): Promise<void> {
   switching.value = true
   try {
-    const answer = await saveTuning(level, count)
+    const answer = await saveTuning(level, count, carry)
     if (!answer.ok) {
       // Put the two selects back where the knobs actually are. A `<select>` keeps
       // whatever was clicked, so a refusal left alone reads as "it saved" -- the
       // exact lie this picker was built to avoid.
       thinking.value = answer.thinking
       turns.value = answer.turns
+      tools.value = answer.tools
       switchNotice.value = `没能保存：${answer.error}`
       return
     }
     thinking.value = answer.thinking
     turns.value = answer.turns
+    tools.value = answer.tools
   } catch (err) {
     switchNotice.value = err instanceof Error ? err.message : String(err)
   } finally {
@@ -735,6 +818,11 @@ async function saveThinking(event: Event): Promise<void> {
 async function saveTurns(event: Event): Promise<void> {
   await saveKnob(undefined, Number((event.target as HTMLSelectElement).value))
 }
+
+async function saveTools(event: Event): Promise<void> {
+  await saveKnob(undefined, undefined, (event.target as HTMLInputElement).checked)
+}
+
 
 onMounted(() => {
   void loadModels()
@@ -775,15 +863,23 @@ async function loadCurrent(): Promise<void> {
       return
     }
     const stored = await fetchSessionMessages(list.current)
-    // A reopened conversation has no reasoning to show: the turns are stored, the
-    // thoughts are not. Empty means the box is not drawn, rather than a box that lies
-    // about what was kept.
-    seeded.value = stored.messages.map((turn) => ({
-      role: turn.role,
-      text: turn.content,
-      reasoning: '',
-      attachments: turn.attachments ?? [],
-    }))
+    // 思考过程不落盘（存的是问答）。以前这里给每一行写死空串，于是"重新读一遍"这个动作
+    // 本身就把屏上刚看到的那段擦掉了 —— 点「放大」正是走这条路（打包版量到：收起时 216 字，
+    // 放大后那一格整个没了）。落盘的只有问答，所以带过去只能靠"文字对得上"这一条：
+    // 对得上的是同一轮，把内存里那份带上；对不上（真是重新打开的老对话）仍然留空，不假装存过。
+    const previous = lines.value
+    seeded.value = stored.messages.map((turn) => {
+      const before = previous.find((row) => row.role === turn.role && row.text === turn.content)
+      return {
+        role: turn.role,
+        text: turn.content,
+        reasoning: before?.reasoning ?? '',
+        record: before?.record ?? '',
+        model: before?.model ?? '',
+        tools: before?.tools,
+        attachments: turn.attachments ?? [],
+      }
+    })
     consumed.value = voice.history.length
   } catch {
     seeded.value = []
@@ -814,12 +910,6 @@ const currentLabel = computed(() => {
   if (!spec) return ''
   return provider.value ? `${provider.value} · ${spec.label}` : spec.label
 })
-
-function dayOf(stamp: string): string {
-  // The rail has ~200px. A full ISO timestamp there would push the title out, and
-  // "which day was this" is the only thing the date is asked.
-  return stamp ? stamp.slice(5, 10) : ''
-}
 
 async function toggleExpanded(): Promise<void> {
   expanded.value = !expanded.value
@@ -877,6 +967,24 @@ onBeforeUnmount(() => {
  * typed half of the conversation and drop the spoken half -- two histories in one
  * chat panel is a reader having to work out which one is real.
  */
+/** One line under the bubble: what the request carried, in the words the backend chose. */
+function toolReport(tools: ToolReport): string {
+  const pack = tools.pack ? `（能力包 ${tools.pack}）` : ''
+  if (tools.used.length) {
+    return `本轮调用了 ${tools.used.join('、')}${pack}`
+  }
+  if (tools.degraded === 'overflow') {
+    return '上下文装不下工具表，这一轮没带工具，所以她没能动手'
+  }
+  if (tools.degraded === 'model') {
+    return `带了 ${tools.count} 个工具${pack}，她一个都没调用就答了`
+  }
+  if (!tools.count) {
+    return '这一轮没有携带工具'
+  }
+  return `带了 ${tools.count} 个工具${pack}，本轮没用到`
+}
+
 const lines = computed<Line[]>(() =>
   [
     ...seeded.value,
@@ -886,6 +994,7 @@ const lines = computed<Line[]>(() =>
       reasoning: turn.reasoning ?? '',
       record: turn.record ?? '',
       model: turn.model ?? '',
+      tools: turn.tools,
       attachments: turn.text === overlay.value?.text ? overlay.value.attachments : [],
     })),
   ].filter((line) => line.text.trim() !== ''),
@@ -911,7 +1020,7 @@ const activeTab = computed<ConversationCard | undefined>(() =>
 const conversationModelChoices = computed(() =>
   providers.value.flatMap((entry) =>
     entry.models.map((spec) => ({
-      key: `${entry.name} ${spec.id}`,
+      key: `${entry.name}\u0000${spec.id}`,
       label: `${entry.name} · ${spec.label}`,
       provider: entry.name,
       model: spec.id,
@@ -924,7 +1033,7 @@ const activeTabModelKey = computed(() => {
   const hit = conversationModelChoices.value.find(
     (pair) => pair.provider === tab.provider && pair.model === tab.model,
   )
-  return hit ? hit.key : `${tab.provider} ${tab.model}`
+  return hit ? hit.key : `${tab.provider}\u0000${tab.model}`
 })
 const pinNote = ref('')
 
@@ -963,6 +1072,71 @@ const streamed = computed(() => {
   const streaming = voice.streaming
   if (!streaming || streaming.conversation_id !== activeTab.value?.id) return null
   return streaming
+})
+
+/**
+ * 这一家失败之后该做什么。键是报错自带的 kind（``jarvis.llm.errors`` 里写死的分类），
+ * 不是报错的句子 —— 句子给人抄，分类给机器读，两者混在一起改文案就会把提示改哑。
+ */
+const FAILURE_HINTS: Record<string, string> = {
+  auth: 'Key 被拒了：打开 设置 · 服务商，把这一行的 Key 重填一次（注意填的是值，不是变量名）',
+  forbidden: '这把 Key 能用，但它不许问这个模型（403）：换个模型名，或去厂商那边给这个令牌开这个模型',
+  quota: '这一家的额度或频率到顶了：等它恢复，或在 设置 · 服务商 换一家再问',
+  timeout: '这一家答得太慢被掐了：在 设置 · 服务商 把这一行的超时调大一点',
+  network:
+    '连不上这个地址：先看服务起没起、端口对不对，再看防火墙/代理（报错里括号内就是它要连的那个端口）',
+  server: '厂商自己返回 5xx：不是你这边的设置，稍后再试或换一家',
+  request: '这一家不收这个请求：模型名写错，或这句话（含图片）太长了',
+  overflow:
+    '这一家的上下文装不下这一句（工具表实测就要 4639 token）：把「带工具」勾掉、把「上下文轮数」调小，或者把服务端的上下文（n_ctx / num_ctx）调大',
+  malformed: '它回的内容读不成聊天回复：这个地址多半不是 OpenAI 兼容接口',
+  empty: '它应了但什么都没返回：再问一次，或换一家',
+  crash: '这是我这边的毛病：logs/jarvis.log 里有完整堆栈',
+  pictures: '协作这一桌不带你这张图：把图单独问某一个模型',
+}
+
+/**
+ * 这一轮做了什么答案里看不出来的事。键是后端给的 token（``Conversation.note``），
+ * 句子在这里 —— 和失败卡同一个道理：改文案不能把说明改哑。
+ */
+const NOTE_LABELS: Record<string, string> = {
+  no_tools: '这一句是去掉工具表才装进它的上下文的：这一轮她只回答，动不了这台电脑。',
+}
+
+/** 只有真答上了一轮才说这句；还在跑、或者根本没答上，都不该冒出来。 */
+const turnNote = computed(() => {
+  const tab = activeTab.value
+  if (!tab || tab.status !== 'done' || runningTask.value) return ''
+  return NOTE_LABELS[String(tab.note || '')] ?? ''
+})
+
+/**
+ * 后端替这一对把工具表扔了，那一格就得跟着改。
+ *
+ * 不等下一次刷新：屏上写着「带工具」而请求里根本没有，正是这一轮刚发生过的事 —— 操作员
+ * 会照着屏上那句话去说"帮我打开记事本"，然后等到一句她其实没动手的回答。
+ */
+watch(
+  () => activeTab.value?.note ?? '',
+  (note) => {
+    if (note === 'no_tools') void loadModels()
+  },
+)
+
+/** 这句没答上时该说什么。没在失败、或这一轮还在跑，都不该出现这张卡片。 */
+const failure = computed(() => {
+  const tab = activeTab.value
+  if (!tab || tab.status !== 'failed' || runningTask.value) return null
+  const raw = String(tab.error || '').trim()
+  // 报错形如 "消息 (provider='x', status=401, body='...')"：正文单独一行，细节折起来。
+  const cut = raw.indexOf(' (')
+  const reason = raw ? (cut > 4 ? raw.slice(0, cut) : raw) : '这一轮没留下原因，日志里也没有'
+  return {
+    reason,
+    detail: cut > 4 ? raw : '',
+    hint: FAILURE_HINTS[String(tab.error_kind || '')] ?? '',
+    where: tab.provider ? `问的是：${tab.provider}${tab.model ? ` · ${tab.model}` : ''}` : '',
+  }
 })
 
 const talkTitle = computed(() => {
@@ -1029,9 +1203,6 @@ async function talk(): Promise<void> {
 function openFiles(): void {
   fileRef.value?.click()
 }
-
-/** Whether the strip is worth a row: more than one tab, or a tab someone just made. */
-const showTabStrip = computed(() => tabs.value.length > 1)
 
 function tabTitle(tab: ConversationCard): string {
   const model = tab.model ? ` · ${tab.model}` : tab.provider ? ` · ${tab.provider}` : ''
@@ -1138,8 +1309,18 @@ async function send(): Promise<void> {
   localError.value = ''
   await scrollToEnd()
   try {
+    // 这一页钉过模型的会话，发出去的就是钉住的那一对：顶栏那两个 ref 是**全局**选择，
+    // 照发会把 pin 顶掉 —— 屏上三处写着 deepseek、实际花钱问的是 qwen（r86 审计抓到的）。
+    const tab = activeTab.value
+    const pinned = Boolean(tab?.provider || tab?.model)
     const started = single.value
-      ? await chatSend(question, attachments, activeTab.value?.id ?? '', provider.value, model.value)
+      ? await chatSend(
+          question,
+          attachments,
+          tab?.id ?? '',
+          pinned ? (tab?.provider ?? '') : provider.value,
+          pinned ? (tab?.model ?? '') : model.value,
+        )
       : await chatCollaborate(
           question,
           seats.value,
@@ -1341,6 +1522,18 @@ async function clear(): Promise<void> {
 
 .chat__knob:disabled {
   opacity: 0.45;
+}
+
+.chat__knob--check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  max-width: none;
+}
+
+.chat__knob--check input {
+  accent-color: var(--hud-cyan);
 }
 
 /*
@@ -1596,6 +1789,37 @@ async function clear(): Promise<void> {
   gap: 8px;
 }
 
+/*
+ * The card that replaces an answer that never came. Red border and no animation: this is
+ * a finished state that wants reading, not another thing moving on the screen.
+ */
+.chat__bubble--failed {
+  border-color: rgba(255, 107, 107, 0.55);
+}
+
+.chat__failed-title {
+  color: var(--hud-red);
+  letter-spacing: 0.08em;
+}
+
+.chat__failed-reason {
+  margin: 0;
+  word-break: break-word;
+}
+
+.chat__failed-hint {
+  margin: 0;
+  color: var(--hud-cyan);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.chat__failed-where {
+  margin: 0;
+  color: var(--hud-dim);
+  font-size: 10px;
+}
+
 .chat__thinking-word {
   color: var(--hud-cyan);
   letter-spacing: 0.08em;
@@ -1685,6 +1909,13 @@ async function clear(): Promise<void> {
 
 .chat__reasoning > summary::-webkit-details-marker {
   display: none;
+}
+
+.chat__tools {
+  margin-top: 4px;
+  font-size: 0.8em;
+  color: var(--hud-dim);
+  opacity: 0.75;
 }
 
 .chat__reasoning-text {
@@ -1848,6 +2079,13 @@ async function clear(): Promise<void> {
 .chat__error {
   color: var(--hud-red);
   font-size: 12px;
+}
+
+/* 不是报错，所以不是红的；但也不能和正文一个颜色，那等于混进她说的话里。 */
+.chat__note {
+  margin: 0;
+  color: var(--hud-dim);
+  font-size: 11px;
 }
 
 .chat__form {

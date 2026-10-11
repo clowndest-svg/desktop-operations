@@ -22,6 +22,7 @@ window opens onto nothing.
 import importlib.util
 import json
 import os
+import runpy
 import time
 
 from PyInstaller.utils.hooks import (
@@ -139,17 +140,53 @@ _buildinfo_dir = os.path.join(ROOT, "build")
 os.makedirs(_buildinfo_dir, exist_ok=True)
 _buildinfo_file = os.path.join(_buildinfo_dir, "buildinfo.json")
 with open(_buildinfo_file, "w", encoding="utf-8") as _handle:
-    json.dump({"built_at": time.strftime("%Y-%m-%d %H:%M")}, _handle)
+    _manifest = runpy.run_path(os.path.join(ROOT, "scripts", "release_manifest.py"))
+    from pathlib import Path
+    json.dump(_manifest["build_info"](Path(ROOT)), _handle, ensure_ascii=False)
 
 datas = [
     (os.path.join(ROOT, "jarvis", "config", "defaults.yaml"), "jarvis/config"),
     (os.path.join(ROOT, "jarvis", "ui", "web"), "jarvis/ui/web"),
+    # The silhouette weights the desktop pet's 生成 door reads (4.57 MB, U^2-Net
+    # lite). The code locates them through ``Path(__file__).parent / "data"``, which
+    # in a frozen tree resolves under ``_MEIPASS`` -- so a build that skips this line
+    # ships a working-looking button that answers "抠图模型不在 …" on the first click.
+    (os.path.join(ROOT, "jarvis", "vision", "data"), "jarvis/vision/data"),
     # The offline-voice worker has to exist **on disk**: it is executed by the other
     # interpreter, not imported here, and inside the PYZ archive there is no file to
     # hand a subprocess. Without this line the packaged app cannot reach voice cloning.
     (os.path.join(ROOT, "jarvis", "tts", "cosyvoice_worker.py"), "jarvis/tts"),
     (_buildinfo_file, "jarvis"),
 ]
+
+# The bundled llama.cpp runtime (91 MB of exe + DLLs) that answers for 自带模型. It is
+# only shipped when it was placed there -- see ``docs/内置模型与许可.md`` for how -- and a
+# build without it still works: ``local_server.plan()`` reports "没带运行时" and the
+# settings row says so instead of offering a button that cannot start.
+_llama = os.path.join(ROOT, "jarvis", "vendor", "llama")
+if os.path.isfile(os.path.join(_llama, "llama-server.exe")):
+    datas.append((_llama, "jarvis/vendor/llama"))
+else:
+    print("WARNING: jarvis/vendor/llama 不在，这一版打包不带 llama.cpp 运行时（自带模型会不可用）")
+
+# The phone-mirroring runtime (26 MB: scrcpy.exe, adb.exe, scrcpy-server and the
+# SDL/FFmpeg/libusb DLLs they load). Like llama.cpp it has to stay **files on disk** --
+# scrcpy.exe is executed, not imported, and it pushes ``scrcpy-server`` to the phone
+# from the directory it was started in. A build without it still works: the panel says
+# 「这个包里没带 scrcpy 运行时」 and the three mirror tools are not registered at all.
+# 生图的随包引擎（ComfyUI + 它那个 venv）。**默认不带**：那是 10.7 GB 的独立第三方软件，
+# 而且是 GPL-3.0 —— 本软件只做客户端（`jarvis/app/image_gen.py` 发 HTTP）。留这一条是为了
+# 真要带的时候只放文件、不改代码；不在就是不在，`vendored_engine_dir()` 会回 None，
+# 面板上明说"这台没带本地引擎"，而不是按下去才知道。
+_comfy = os.path.join(ROOT, "jarvis", "vendor", "comfyui")
+if not os.path.isfile(os.path.join(_comfy, "main.py")):
+    print("INFO: jarvis/vendor/comfyui 不在 —— 这一版的生图只走「连已开着的 ComfyUI」和云端 API")
+
+_scrcpy = os.path.join(ROOT, "jarvis", "vendor", "scrcpy")
+if os.path.isfile(os.path.join(_scrcpy, "scrcpy.exe")):
+    datas.append((_scrcpy, "jarvis/vendor/scrcpy"))
+else:
+    print("WARNING: jarvis/vendor/scrcpy 不在，这一版打包不带投屏运行时（手机投屏会不可用）")
 
 binaries = []
 

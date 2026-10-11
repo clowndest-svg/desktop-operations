@@ -15,9 +15,12 @@ import android.media.AudioManager;
 import android.net.Uri;
 import android.os.BatteryManager;
 import android.os.Build;
+import android.os.Environment;
+import android.os.StatFs;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.os.VibratorManager;
+import android.provider.AlarmClock;
 import android.provider.CalendarContract;
 import android.provider.MediaStore;
 import android.provider.Settings;
@@ -69,6 +72,10 @@ public class XyActionPlugin extends Plugin {
     private static final String SETTINGS_PAGES =
             "wlan|bluetooth|location|sound|display|app|notification|battery|airplane|date|accessibility|tts";
 
+    /** 邮箱地址的白名单形状。宁可拒掉一个奇怪的合法地址，也不放一个能拼 URI 的字符串过去。 */
+    private static final java.util.regex.Pattern EMAIL =
+            java.util.regex.Pattern.compile("[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}");
+
     @PluginMethod
     public void capability(PluginCall call) {
         Context context = getContext();
@@ -77,6 +84,9 @@ public class XyActionPlugin extends Plugin {
         result.put("vibrate", context.getSystemService(Vibrator.class) != null);
         result.put("dial", canHandle(dialIntent("1")));
         result.put("sms", canHandle(sendToIntent("1")));
+        result.put("email", canHandle(mailIntent("a@b.cn")));
+        result.put("maps", canHandle(geoIntent("探测")));
+        result.put("timer", canHandle(timerIntent(60)));
         result.put("calendar", canHandle(calendarIntent("探测", 0L)));
         result.put("browser", canHandle(viewIntent("https://example.com")));
         // 能不能列出发得起的应用，取决于 <queries> 有没有写；没写的话这里查到的是空表，
@@ -110,11 +120,17 @@ public class XyActionPlugin extends Plugin {
 
     @PluginMethod
     public void volume(PluginCall call) {
+        int stream = streamOf(call.getString("stream", "media"));
+        if (stream < 0) {
+            call.resolve(fail("没有这个声道。可选：media（媒体）、ring（铃声）、alarm（闹钟）"));
+            return;
+        }
         AudioManager audio = audio();
         JSObject result = new JSObject();
-        int max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
-        int now = audio.getStreamVolume(AudioManager.STREAM_MUSIC);
+        int max = audio.getStreamMaxVolume(stream);
+        int now = audio.getStreamVolume(stream);
         result.put("ok", true);
+        result.put("stream", streamName(stream));
         result.put("percent", max <= 0 ? 0 : Math.round(100f * now / max));
         result.put("max", max);
         call.resolve(result);
@@ -127,13 +143,53 @@ public class XyActionPlugin extends Plugin {
             call.resolve(fail("要说音量调到百分之多少"));
             return;
         }
+        int stream = streamOf(call.getString("stream", "media"));
+        if (stream < 0) {
+            call.resolve(fail("没有这个声道。可选：media（媒体）、ring（铃声）、alarm（闹钟）"));
+            return;
+        }
         AudioManager audio = audio();
-        int max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
+        int max = audio.getStreamMaxVolume(stream);
         int target = Math.round(Math.max(0, Math.min(100, percent)) / 100f * max);
-        audio.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0);
+        try {
+            audio.setStreamVolume(stream, target, 0);
+        } catch (SecurityException error) {
+            // 铃声/通知那几条声道在勿扰模式下归系统管（要 NotificationPolicyAccess 才能改）。
+            // 这里不去要那个权限：说清楚改不了，比偷偷改一条别的声道好。
+            call.resolve(fail("这条声道现在归勿扰模式管，改不了：" + describe(error)));
+            return;
+        }
+        // 报回去的是**调完读回来的那个数**，不是请求的数：勿扰或设备音量档会把请求吃掉，
+        // 只有回读才知道真调到了哪儿。
+        int now = audio.getStreamVolume(stream);
         JSObject result = new JSObject();
         result.put("ok", true);
-        result.put("percent", percent);
+        result.put("stream", streamName(stream));
+        result.put("percent", max <= 0 ? percent : Math.round(100f * now / max));
+        call.resolve(result);
+    }
+
+    /**
+     * 剩余空间。`StatFs` 直接问数据分区，不需要任何权限。
+     *
+     * 报的是"应用能用的那一块"，不是厂商标的容量——两个数天生差一截（系统分区、
+     * 预留空间都在里面），所以回给界面的字段名就叫 freeGb/totalGb，不含糊。
+     */
+    @PluginMethod
+    public void storage(PluginCall call) {
+        JSObject result = new JSObject();
+        try {
+            StatFs stat = new StatFs(Environment.getDataDirectory().getPath());
+            long free = stat.getAvailableBytes();
+            long total = stat.getTotalBytes();
+            result.put("ok", true);
+            result.put("freeGb", Math.round(free / 1073741824.0 * 10) / 10.0);
+            result.put("totalGb", Math.round(total / 1073741824.0 * 10) / 10.0);
+            result.put("percent", total <= 0L ? 0 : Math.round(100f * free / total));
+        } catch (Exception error) {
+            result.put("ok", false);
+            result.put("error", "读不到剩余空间：" + describe(error));
+        }
         call.resolve(result);
     }
 
@@ -262,6 +318,29 @@ public class XyActionPlugin extends Plugin {
         call.resolve(result);
     }
 
+    /**
+     * 倒计时（"五分钟后来叫我"）。
+     *
+     * 走的是 `AlarmClock.ACTION_SET_TIMER`，也就是系统时钟自己的倒计时页：
+     * **`EXTRA_SKIP_UI` 刻意留 false**，让人看得见这个计时器真的建起来了、也能当场取消。
+     * 跳过界面那种"她说定了，屏幕上什么都没发生"是这类动作最难查的一种失败。
+     */
+    @PluginMethod
+    public void setTimer(PluginCall call) {
+        Integer minutes = readInt(call, "minutes");
+        String label = call.getString("label", "小夜定的倒计时");
+        if (minutes == null || minutes < 1 || minutes > 24 * 60) {
+            call.resolve(fail("要说清楚多少分钟（1 到 1440）"));
+            return;
+        }
+        JSObject result = new JSObject();
+        boolean opened = startActivity(timerIntent(minutes * 60, label), result);
+        result.put("ok", opened);
+        result.put("minutes", minutes);
+        result.put("note", opened ? "时钟的倒计时页已经开在那儿了，看一眼就知道定没定上" : result.optString("error"));
+        call.resolve(result);
+    }
+
     @PluginMethod
     public void dial(PluginCall call) {
         String number = digits(call.getString("number", ""));
@@ -284,6 +363,59 @@ public class XyActionPlugin extends Plugin {
         boolean opened = startActivity(sendToIntent(number, body), result);
         result.put("ok", opened);
         result.put("note", opened ? "短信草稿已经填好，发送键在你手上" : result.optString("error"));
+        call.resolve(result);
+    }
+
+    /**
+     * 邮件草稿（mailto）。最后那一下"发送"永远是人按的。
+     *
+     * 收件人必须先过白名单正则：`mailto:` 后面直接拼原样字符串的话，`?subject=`、`&body=`、
+     * 空格都会被当成 URI 的一部分，等于让模型能往这封邮件里塞它自己编的字段。
+     * 用 `Uri.fromParts` 能挡掉一部分，但形状本身还是要校验——地址不像地址就该直接拒绝。
+     */
+    @PluginMethod
+    public void sendEmail(PluginCall call) {
+        String to = call.getString("to", "").trim();
+        String subject = call.getString("subject", "");
+        String body = call.getString("body", "");
+        JSObject result = new JSObject();
+        if (!EMAIL.matcher(to).matches()) {
+            result.put("ok", false);
+            result.put("error", "收件人不像一个邮箱地址，原样报给你看：" + to);
+            call.resolve(result);
+            return;
+        }
+        boolean opened = startActivity(mailIntent(to, subject, body), result);
+        result.put("ok", opened);
+        result.put("note", opened ? "邮件草稿已经填好，发送键在你手上" : result.optString("error"));
+        call.resolve(result);
+    }
+
+    /**
+     * 找个地方 / 导航（`geo:` URI）。
+     *
+     * 只把"去哪儿"这句话交给系统，由系统挑地图 App。**本应用不读定位、不要定位权限**：
+     * 起点是地图 App 自己去拿的，这条边界写在这里，也写在 `actions.ts` 的 desc 里。
+     */
+    @PluginMethod
+    public void navigateTo(PluginCall call) {
+        String query = call.getString("query", "").trim();
+        JSObject result = new JSObject();
+        if (query.isEmpty()) {
+            result.put("ok", false);
+            result.put("error", "要去哪儿总得说一个地方");
+            call.resolve(result);
+            return;
+        }
+        if (query.length() > 200) {
+            result.put("ok", false);
+            result.put("error", "地名太长了，说一句人话能听懂的就行");
+            call.resolve(result);
+            return;
+        }
+        boolean opened = startActivity(geoIntent(query), result);
+        result.put("ok", opened);
+        result.put("note", opened ? "地图已经开到那个地方了，走不走、怎么走是你点" : result.optString("error"));
         call.resolve(result);
     }
 
@@ -770,6 +902,65 @@ public class XyActionPlugin extends Plugin {
 
     private Intent calendarIntent(String title, long startMillis) {
         return calendarIntent(title, startMillis, startMillis + 60 * 60_000L);
+    }
+
+    /** 倒计时（能力探测用，不带标签）。 */
+    private Intent timerIntent(int seconds) {
+        return timerIntent(seconds, "小夜定的倒计时");
+    }
+
+    private Intent timerIntent(int seconds, String label) {
+        Intent intent = new Intent(AlarmClock.ACTION_SET_TIMER);
+        intent.putExtra(AlarmClock.EXTRA_LENGTH, seconds);
+        intent.putExtra(AlarmClock.EXTRA_MESSAGE, label);
+        // 不跳过系统界面：定上了要让人看得见，取消也在那一页上。
+        intent.putExtra(AlarmClock.EXTRA_SKIP_UI, false);
+        return intent;
+    }
+
+    /** 只有收件人的 mailto（能力探测用）。 */
+    private Intent mailIntent(String to) {
+        return mailIntent(to, "", "");
+    }
+
+    private Intent mailIntent(String to, String subject, String body) {
+        Intent intent = new Intent(Intent.ACTION_SENDTO, Uri.fromParts("mailto", to, null));
+        if (subject != null && !subject.isEmpty()) {
+            intent.putExtra(Intent.EXTRA_SUBJECT, subject);
+        }
+        if (body != null && !body.isEmpty()) {
+            intent.putExtra(Intent.EXTRA_TEXT, body);
+        }
+        return intent;
+    }
+
+    /** `geo:0,0?q=…`：把"去哪儿"这句话交给系统挑地图 App，起点由地图自己拿。 */
+    private Intent geoIntent(String query) {
+        return new Intent(Intent.ACTION_VIEW, Uri.parse("geo:0,0?q=" + Uri.encode(query)));
+    }
+
+    /** 声道白名单：模型只能挑这三个，挑不出一个越界的目标；不认识的一律 -1。 */
+    private static int streamOf(String which) {
+        switch (which == null ? "media" : which.trim().toLowerCase(Locale.ROOT)) {
+            case "media":
+                return AudioManager.STREAM_MUSIC;
+            case "ring":
+                return AudioManager.STREAM_RING;
+            case "alarm":
+                return AudioManager.STREAM_ALARM;
+            default:
+                return -1;
+        }
+    }
+
+    private static String streamName(int stream) {
+        if (stream == AudioManager.STREAM_RING) {
+            return "铃声";
+        }
+        if (stream == AudioManager.STREAM_ALARM) {
+            return "闹钟";
+        }
+        return "媒体";
     }
 
     private Intent calendarIntent(String title, long startMillis, long endMillis) {

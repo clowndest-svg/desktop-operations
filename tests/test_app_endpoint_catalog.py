@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import urllib.error
+import urllib.request
+from typing import Any
 
 import pytest
 
 import jarvis.app.endpoint_catalog as catalog
+from jarvis.core.constants import USER_AGENT
 
 
 class TestListingEndpointModels:
@@ -68,7 +71,9 @@ class TestListingEndpointModels:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _, _, calls = self._list(200, {"data": [{"id": "m"}]}, monkeypatch)
-        assert calls["headers"] == {"Accept": "application/json"}
+        # The listing call is the one the settings panel makes before anything is
+        # saved, so it must not arrive wearing the stdlib default either.
+        assert calls["headers"] == {"Accept": "application/json", "User-Agent": USER_AGENT}
         _, _, with_key = self._list_with_key(monkeypatch)
         sent = with_key["headers"]
         assert isinstance(sent, dict)
@@ -88,3 +93,49 @@ class TestListingEndpointModels:
             "https://gw.example/v1", timeout_seconds=9.0, api_key="sk-local-test"
         )
         return ids, why, calls
+
+
+class TestListingFromALocalEndpointSkipsTheProxy:
+    """「看看它有哪些模型」打的是本机端口，那条路也不能绕道系统代理。
+
+    这一条不替换 ``_get_json``：要的就是它真的走到开连接那一步，接线断了才看得见。
+    """
+
+    def test_the_models_call_is_opened_without_proxies(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: dict[str, object] = {}
+
+        class _Response:
+            def __enter__(self) -> _Response:
+                return self
+
+            def __exit__(self, *exc: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return b'{"data": [{"id": "qwen2.5:7b"}]}'
+
+        class _Opener:
+            def open(self, request, timeout=None):  # type: ignore[no-untyped-def]
+                seen["url"] = request.full_url
+                return _Response()
+
+        def fake_build_opener(*handlers: object) -> Any:
+            seen["handlers"] = handlers
+            return _Opener()
+
+        def never(*args: object, **kwargs: object) -> None:
+            raise AssertionError("本机端点的清单请求不该走 urlopen（那才会用系统代理）")
+
+        monkeypatch.setattr("urllib.request.build_opener", fake_build_opener)
+        monkeypatch.setattr("urllib.request.urlopen", never)
+        monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:7897")
+
+        ids, why = catalog.list_endpoint_models("http://127.0.0.1:11434/v1", timeout_seconds=9.0)
+
+        assert ids == ["qwen2.5:7b"] and why == ""
+        handlers = seen.get("handlers")
+        assert isinstance(handlers, tuple) and handlers
+        assert isinstance(handlers[0], urllib.request.ProxyHandler)
+        assert vars(handlers[0])["proxies"] == {}

@@ -5,8 +5,11 @@
     <TopBar
         @settings="settingsOpen = true"
         @activity="activityOpen = true"
+        @alerts="alertsOpen = true"
         @access="accessOpen = true"
         @phone="phoneOpen = true"
+        @mirror="mirrorOpen = true"
+        @images="imagesOpen = true"
       @assistant="assistantOpen = true"
       @skin="skinOpen = true"
       />
@@ -94,6 +97,7 @@
         @reminders="assistantOpen = true"
         @usage="usageOpen = true"
         @actions="activityOpen = true"
+        @alerts="alertsOpen = true"
       />
     </main>
 
@@ -103,6 +107,9 @@
       @close="settingsOpen = false"
       @saved="onSettingsSaved"
       @voice="voiceOpen = true"
+      @pet="petOpen = true"
+      @alerts="alertsOpen = true"
+      :pet-closed="petClosed"
     />
     <!--
       One voice picker for both entrances (对话区 and 设置), mounted right after the
@@ -111,13 +118,31 @@
       but not reach is the failure this window has already been billed for once.
     -->
     <VoicePickerPopup :open="voiceOpen" @close="closeVoicePicker" />
+    <!--
+      Same reason as the voice picker: this one is opened from 设置 too, so it has to
+      be mounted after that dialog and not inside it.
+    -->
+    <PetForgePopup :open="petOpen" @close="closePetForge()" />
     <ActivityPopup :open="activityOpen" @close="activityOpen = false" />
+    <!--
+      告警弹窗挂在所有对话框之后：它有三个入口（顶栏那颗「告警 N」、概览卡告警格、
+      设置 → 告警里那颗按钮），从设置开着它时弹窗必须压在设置面板上面 —— 挂在设置
+      内部就是"看得见够不着"，这个项目为这件事付过一次账。
+    -->
+    <AlertsPopup :open="alertsOpen" @close="alertsOpen = false" />
     <ComputerAccessPopup :open="accessOpen" @close="accessOpen = false" />
     <MobileAccessPopup
       :open="phoneOpen"
       @close="phoneOpen = false"
       @changed="announcePhoneChange"
     />
+    <!--
+      投屏 sits next to 手机接入 because that is where the phone questions live. It is
+      mounted at the top level rather than inside ChatPanel for the same reason the
+      voice picker is: a dialog the operator can see but not reach is a billed bug.
+    -->
+    <MirrorPopup :open="mirrorOpen" @close="mirrorOpen = false" />
+    <ImagePopup :open="imagesOpen" @close="imagesOpen = false" />
     <AssistantPopup :open="assistantOpen" @close="assistantOpen = false" />
     <SkinPopup :open="skinOpen" @close="skinOpen = false" />
 
@@ -143,16 +168,20 @@ function rate(bytesPerSecond: number | null | undefined): string {
 import ChatPanel from '@/components/ChatPanel.vue'
 import DiskPanel from '@/components/DiskPanel.vue'
 import ActivityPopup from '@/components/ActivityPopup.vue'
+import AlertsPopup from '@/components/AlertsPopup.vue'
 import AssistantPopup from '@/components/AssistantPopup.vue'
 import SkinPopup from '@/components/SkinPopup.vue'
 import CleanPanel from '@/components/CleanPanel.vue'
 import ComputerAccessPopup from '@/components/ComputerAccessPopup.vue'
 import MobileAccessPopup from '@/components/MobileAccessPopup.vue'
+import MirrorPopup from '@/components/MirrorPopup.vue'
+import ImagePopup from '@/components/ImagePopup.vue'
 import ProcessPanel from '@/components/ProcessPanel.vue'
 import SettingsPanel from '@/components/SettingsPanel.vue'
 import TopBar from '@/components/TopBar.vue'
 import UsagePopup from '@/components/UsagePopup.vue'
 import VoicePickerPopup from '@/components/VoicePickerPopup.vue'
+import PetForgePopup from '@/components/PetForgePopup.vue'
 import TrendPanel from '@/components/TrendPanel.vue'
 import VoiceCore from '@/components/VoiceCore.vue'
 import { useSystemStore } from '@/stores/system'
@@ -185,10 +214,16 @@ function announcePhoneChange(label: string): void {
   window.dispatchEvent(new CustomEvent('jarvis-phone-changed', { detail: label }))
 }
 const activityOpen = ref(false)
+const alertsOpen = ref(false)
 const accessOpen = ref(false)
 const phoneOpen = ref(false)
+const mirrorOpen = ref(false)
+const imagesOpen = ref(false)
 const usageOpen = ref(false)
 const voiceOpen = ref(false)
+const petOpen = ref(false)
+/** Bumped when the pet picker closes, so 设置 re-reads who is standing there. */
+const petClosed = ref(0)
 /** Bumped when the picker closes, so 设置 re-reads which voice is now in force. */
 const voiceClosed = ref(0)
 
@@ -196,6 +231,12 @@ const voiceClosed = ref(0)
 function closeVoicePicker(): void {
   voiceOpen.value = false
   voiceClosed.value += 1
+}
+
+/** Same bargain as the voice picker: the row in 设置 has to say what the panel changed. */
+function closePetForge(): void {
+  petOpen.value = false
+  petClosed.value += 1
 }
 const assistantOpen = ref(false)
 const skinOpen = ref(false)

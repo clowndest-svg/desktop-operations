@@ -89,3 +89,50 @@ class TestLlmService:
 
     def test_name_is_stable(self) -> None:
         assert LlmService(make_section).name == "llm"
+
+
+def _local_section() -> LlmSection:
+    """一份只有自带模型那一行的配置，且它写的模型名是 defaults.yaml 那个旧的。"""
+    return LlmSection.from_mapping(
+        {
+            "default_provider": "local",
+            "timeout_seconds": 30,
+            "max_retries": 0,
+            "retry_backoff_seconds": 0.1,
+            "providers": {
+                "local": {
+                    "base_url": "http://127.0.0.1:28181/v1",
+                    "models": ["qwen2.5-7b"],
+                    "default_model": "qwen2.5-7b",
+                    "api_key_env": "LOCAL_NOTHING",
+                    "key_optional": True,
+                }
+            },
+        }
+    )
+
+
+def test_the_bundled_row_asks_for_the_model_that_is_actually_loaded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """那一行不再自带模型名：发出去的就是「选哪个离线模型」选中那张卡的别名。
+
+    实拍：设置里那一行写着 qwen2.5-7b，而实际加载的是 Qwen3-4B —— 报错尾巴
+    (provider='local', model='qwen2.5-7b') 就是两处各说一套的证据。
+    """
+    from jarvis.llm import local_server
+
+    monkeypatch.setattr(
+        local_server, "selected_card", lambda: local_server.MODEL_CARDS["Qwen3-4B.Q4_K_M.gguf"]
+    )
+    monkeypatch.setattr(local_server.shared_server(), "ensure_running", lambda **k: (True, ""))
+    monkeypatch.setattr(local_server, "endpoint", lambda: "http://127.0.0.1:28181/v1")
+
+    service = LlmService(_local_section, environ={})
+    service.start()
+
+    client = service.client_for("local", "qwen2.5-7b")
+
+    assert client.model == "qwen3-4b", "发出去的名字必须是在内存里那个"
+    assert isinstance(client, OpenAiCompatClient)
+    assert client._settings.bundled is True, "自带那一行要能被看门狗认出来（请求在飞不许关）"

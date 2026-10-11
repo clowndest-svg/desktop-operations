@@ -16,7 +16,9 @@ from jarvis.tools.builtins import (
     assistant_tools,
     build_builtin_tools,
     computer_tools,
+    image_tools,
     insight_tools,
+    mirror_tools,
     process_tools,
     selfconfig_tools,
     shell_tools,
@@ -31,6 +33,19 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from jarvis.tools.monitor import SystemMonitor
 
 logger = logging.getLogger("jarvis.tools.service")
+
+_RUN_POWERSHELL: str = "run_powershell"
+"""The one tool whose *registration* does not follow the switch that governs it."""
+
+_SHELL_OFF: str = "off"
+"""``jarvis.app.command_access.OFF``. Spelled as the wire value because ``tools`` may
+not import ``app`` -- the same reason ``ShellGate`` is a structural protocol."""
+
+_DESKTOP_TOOLS: frozenset[str] = frozenset(
+    {"open_app", "mouse_move", "mouse_click", "mouse_scroll", "key_press", "type_text"}
+)
+"""The six that a switched-off 桌面控制 refuses every time. ``computer_status`` is not
+here on purpose -- it is how she finds out, and how she says so."""
 
 
 class ToolService:
@@ -58,6 +73,9 @@ class ToolService:
         voices: selfconfig_tools.VoiceChanger | None = None,
         conversations: selfconfig_tools.ConversationSearch | None = None,
         alerts: system_tools.AlertCentre | None = None,
+        mirror: mirror_tools.MirrorSurface | None = None,
+        phone: mirror_tools.PhoneScreenSurface | None = None,
+        images: image_tools.ImageEngineSurface | None = None,
         registry: ToolRegistry | None = None,
     ) -> None:
         """Create the service.
@@ -107,6 +125,9 @@ class ToolService:
         self._voices = voices
         self._conversations = conversations
         self._alerts = alerts
+        self._mirror = mirror
+        self._phone = phone
+        self._images = images
         self._registry = registry or ToolRegistry(settings_provider)
         self._started = False
 
@@ -144,6 +165,12 @@ class ToolService:
             voices=self._voices,
             conversations=self._conversations,
             alerts=self._alerts,
+            mirror=self._mirror,
+            # Not stored-and-forgotten: a surface that reaches __init__ but not the
+            # builder registers nothing, and the HUD would advertise a capability the
+            # registry has never heard of.
+            phone=self._phone,
+            images=self._images,
             web_opener=self._web_opener,
         ):
             self._registry.register(spec, handler)
@@ -188,8 +215,56 @@ class ToolService:
         return self._registry.specs()
 
     def to_openai_tools(self) -> list[dict[str, object]]:
-        """The ``tools`` array for a chat-completion request."""
-        return self._registry.to_openai_tools()
+        """The ``tools`` array for a chat-completion request.
+
+        Filtered to what would actually run if she asked. ``run_powershell`` is the
+        case this exists for: its own description promises 「关闭=问不到」, and the
+        desktop registers it unconditionally, so on a fresh install the model was
+        handed a 182-token invitation to do a thing that can only ever answer 关闭 ——
+        on a 4K local window that is a fifth of the budget spent on a dead end, and
+        the model then reports to the operator that it tried.
+
+        A gate it cannot read is left **in** rather than dropped: a capability that
+        silently disappears is worse than one that refuses with a reason, and the
+        refusal now names where to click.
+        """
+        return [spec.to_openai_schema() for spec in self._registry.specs() if self._reachable(spec)]
+
+    def _reachable(self, spec: ToolSpec) -> bool:
+        """Whether this tool would do something, rather than only refuse, right now."""
+        if spec.name in _DESKTOP_TOOLS:
+            return self._desktop_enabled()
+        if spec.name != _RUN_POWERSHELL or self._shell_gate_factory is None:
+            return True
+        try:
+            gate = self._shell_gate_factory()
+        except Exception:  # pragma: no cover - a preference read that throws
+            logger.exception("could not read the command-line level; advertising it anyway")
+            return True
+        if gate is None:
+            return False
+        return gate.mode() != _SHELL_OFF
+
+    def _desktop_enabled(self) -> bool:
+        """Whether 桌面控制 is switched on at all, per the level a person picked.
+
+        Tier 关闭's own copy in the popup promises 「工具一条都不注册，模型连问都不能问」.
+        The tools are registered regardless -- the level only refuses at call time -- so
+        without this filter that sentence is a lie and the model spends a fifth of a 4K
+        local window on six tools that can only answer 「已关闭」. ``computer_status`` is
+        deliberately *not* filtered: reading the switch is how she explains why the
+        other six are gone.
+        """
+        if self._computer_factory is None:
+            return True  # not registered in the first place; nothing to decide here
+        try:
+            service = self._computer_factory()
+            stats = service.stats()
+        except Exception:
+            logger.exception("could not read the desktop-control level; advertising it anyway")
+            return True
+        enabled = stats.get("enabled") if isinstance(stats, Mapping) else None
+        return True if enabled is None else bool(enabled)
 
     def register(self, spec: ToolSpec, handler: Callable[[Mapping[str, object]], str]) -> None:
         """Register an externally-provided tool (MCP bridge, plugin, app layer).

@@ -791,9 +791,10 @@ def _draw_loader(
         for column in range(3):
             for row in range(2):
                 head = (frame + column * 3 + row) % THINKING_FRAMES
+                left = x + column * (cell + 1)
+                top = y + row * (cell + 1)
                 paint.rectangle(
-                    (x + column * (cell + 1), y + row * (cell + 1)),
-                    (x + column * (cell + 1) + cell - 1, y + row * (cell + 1) + cell - 1),
+                    (left, top, left + cell - 1, top + cell - 1),
                     fill=_loader_ink(palette, 70 + head * 22),
                 )
         return

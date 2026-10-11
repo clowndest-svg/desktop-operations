@@ -101,7 +101,7 @@ class EvidenceHit(Protocol):
 
 
 class KnowledgeSurface(Protocol):
-    """The knowledge base, narrowed to the one call a search tool makes.
+    """The knowledge base, narrowed to what her two knowledge tools may ask of it.
 
     Gated on ``enabled`` as well as ``running``: a disabled base returns an empty
     list from every query, so the tool would report "没找到" about a corpus the
@@ -115,7 +115,23 @@ class KnowledgeSurface(Protocol):
     @property
     def enabled(self) -> bool: ...
 
+    @property
+    def notes_dir(self) -> object: ...
+
+    """Where a note of her own may be written, or ``None`` when there is nowhere.
+
+    Decides whether ``add_knowledge`` is offered at all. A write tool with no directory
+    behind it can only ever refuse, and this project has already made that mistake twice
+    with shell tools -- a model that keeps hitting a wall it was told exists is worse off
+    than one that never was.
+    """
+
     def retrieve(self, query: str, *, top_k: int = ...) -> Sequence[EvidenceHit]: ...
+
+    def ingest_text(self, title: str, text: str, *, source: str = ...) -> Dictifiable: ...
+
+    """The write half. The service owns where the note goes and what a duplicate title
+    means, because a tool that picked its own path could overwrite an imported manual."""
 
 
 def _spec(
@@ -210,6 +226,28 @@ _KNOWLEDGE_SEARCH = _spec(
     required=("query",),
 )
 
+_ADD_KNOWLEDGE = ToolSpec(
+    name="add_knowledge",
+    description=(
+        "把一段资料存进她自己的知识库，以后可以用 knowledge_search 查回来。"
+        "两种用法：① 用户说「去查一下 X，回头记到你资料里」——先用 fetch_url 或 search_web "
+        "把内容拿到，再把读到的正文原样放进来，source 写那个网址；② 用户口述一段以后要用的"
+        "资料（流程、参数、他自己的规定），直接存。"
+        "存进去的是原文，不是你的转述：要记就记你读到的那一段。"
+        "跟「记住」不是一回事 —— 那条写的是关于用户的一句话，这条写的是一页资料。"
+        "同名会覆盖上一条笔记并说明替换了几段，不会越攒越多。"
+    ),
+    parameters=object_schema(
+        {
+            "title": string_property("这条资料的标题，会显示在出处上"),
+            "text": string_property("要存进去的正文，原样，别缩写"),
+            "source": string_property("来自哪个网址，或者「用户口述」；不填算她自己记的"),
+        },
+        required=("title", "text"),
+    ),
+    risk=RiskLevel.CAUTION,
+)
+
 _MEMORY_KINDS: frozenset[str] = frozenset({"fact", "preference", "episode"})
 """The kinds a tool may write.
 
@@ -259,7 +297,7 @@ def build(
     if memory is not None and memory.running:
         tools.extend(_memory_tools(memory))
     if knowledge is not None and knowledge.running and knowledge.enabled:
-        tools.extend(_knowledge_tools(knowledge))
+        tools.extend(_knowledge_tools(knowledge, writable=knowledge.notes_dir is not None))
     return tools
 
 
@@ -359,7 +397,9 @@ def _memory_tools(memory: MemorySurface) -> list[tuple[ToolSpec, ToolHandler]]:
     return [(_MEMORY_SEARCH, search), (_REMEMBER, remember)]
 
 
-def _knowledge_tools(knowledge: KnowledgeSurface) -> list[tuple[ToolSpec, ToolHandler]]:
+def _knowledge_tools(
+    knowledge: KnowledgeSurface, *, writable: bool = True
+) -> list[tuple[ToolSpec, ToolHandler]]:
     def search(arguments: Mapping[str, object]) -> str:
         query = _text_of(arguments, "query")
         if not query:
@@ -375,7 +415,30 @@ def _knowledge_tools(knowledge: KnowledgeSurface) -> list[tuple[ToolSpec, ToolHa
         ]
         return f"资料检索「{query}」命中 {len(blocks)} 段：\n\n" + "\n\n".join(blocks)
 
-    return [(_KNOWLEDGE_SEARCH, search)]
+    def add(arguments: Mapping[str, object]) -> str:
+        title = _text_of(arguments, "title")
+        text = _text_of(arguments, "text")
+        if not title:
+            return "要给这条资料起个标题，以后出处上显示的就是它"
+        if not text:
+            return "没有要存的内容。先用 fetch_url 或 search_web 拿到正文，再原样放进来。"
+        result = knowledge.ingest_text(title, text, source=_text_of(arguments, "source"))
+        chunks = _field(result, "chunks")
+        if not _field(result, "ok"):
+            # The real reason, not a generic failure: a corpus switched off in config,
+            # a note that came out empty after chunking, and a disk that refused the
+            # write are three different things the operator can act on.
+            why = _field(result, "error") or _field(result, "skipped_reason") or "未知原因"
+            return f"没能存进知识库：{why}"
+        where = f"{_field(result, 'source')}（{title}）"
+        if _field(result, "replaced"):
+            return f"已更新那条叫「{title}」的旧笔记，重新切成 {chunks} 段，出处：{where}"
+        return f"已存进知识库，切成 {chunks} 段，出处：{where}。以后用 knowledge_search 查得到。"
+
+    tools: list[tuple[ToolSpec, ToolHandler]] = [(_KNOWLEDGE_SEARCH, search)]
+    if writable:
+        tools.append((_ADD_KNOWLEDGE, add))
+    return tools
 
 
 def _as_sequence(value: object) -> Sequence[object]:

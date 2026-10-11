@@ -704,3 +704,160 @@ def test_the_disconnected_banner_mentions_voice() -> None:
     assert "语音" in text, "横幅没提语音：这正是用户找不到的那一项"
     assert "音色" in text, "横幅没提音色"
     assert "手机接入" in text, "横幅没说要先在电脑上打开「手机接入」"
+
+
+def _query_blocks() -> list[str]:
+    """`<queries>` 里每一个 `<intent>` 块的原文。"""
+    manifest = read(ANDROID / "AndroidManifest.xml")
+    scope = re.search(r"<queries>(.*?)</queries>", manifest, re.S)
+    assert scope, "清单里没有 <queries>：Android 11 起应用之间默认互相看不见"
+    return re.findall(r"<intent>(.*?)</intent>", scope.group(1), re.S)
+
+
+# (原生代码里那处用法的记号[正则], 清单里的 action 名, 还要对上的 data 条件)
+INTENT_VISIBILITY: tuple[tuple[str, str, str], ...] = (
+    (r"Intent\.ACTION_DIAL\b", "android.intent.action.DIAL", 'android:scheme="tel"'),
+    (r"smsto:", "android.intent.action.SENDTO", 'android:scheme="smsto"'),
+    (r'"mailto"', "android.intent.action.SENDTO", 'android:scheme="mailto"'),
+    (r"geo:0,0\?q=", "android.intent.action.VIEW", 'android:scheme="geo"'),
+    (r"Intent\.ACTION_VIEW\b", "android.intent.action.VIEW", 'android:scheme="https"'),
+    (
+        r"Intent\.ACTION_INSERT\b",
+        "android.intent.action.INSERT",
+        'android:mimeType="vnd.android.cursor.item/event"',
+    ),
+    (r"Intent\.ACTION_SEND\b", "android.intent.action.SEND", 'android:mimeType="text/plain"'),
+    (r"AlarmClock\.ACTION_SET_TIMER\b", "android.intent.action.SET_TIMER", ""),
+    (r"Intent\.ACTION_MAIN\b", "android.intent.action.MAIN", ""),
+)
+
+
+def test_every_intent_the_phone_asks_about_is_declared_in_queries() -> None:
+    """凡是要 `queryIntentActivities` 或隐式 `startActivity` 的，`<queries>` 里都得有。
+
+    Android 11 起应用之间默认互相看不见。少了声明的后果**不是报错**，而是查回来一张空表：
+    界面上写着"没有能接文字的应用"、"叫不动任何应用"，而手机上明明装着微信。
+    这类"能力看起来没了"最难查，因为代码一行都没错——`share_text` 那条就是这么丢的。
+
+    记号那一栏同时是**对照表的保鲜期**：哪天原生代码不再这么写了，这条会先红，
+    而不是一直守着一个已经不存在的用法。
+    """
+    java = read(ANDROID / "java" / "com" / "xiaoye" / "assistant" / "XyActionPlugin.java")
+    blocks = _query_blocks()
+    for marker, action, data in INTENT_VISIBILITY:
+        assert re.search(marker, java), f"{marker} 不在原生代码里了，这份对照表已经过期"
+        hit = [
+            block
+            for block in blocks
+            if f'android:name="{action}"' in block and (not data or data in block)
+        ]
+        assert hit, f"{action} {data or '(无 data)'} 没有在 <queries> 里声明"
+
+
+def test_busy_is_claimed_before_the_ui_yields() -> None:
+    """`submit()` 里 `busy` 必须排在第一个 `await` 之前置位。
+
+    原来这两行中间夹着一个 `await nextTick()`：让出一次执行权，快速双击就能两次都通过
+    `busy` 检查，于是两条问答并发往同一个气泡里写字。屏幕上看起来是"她的回答串了"，
+    而两次的日志各自都正常。
+    """
+    app = read(MOBILE_TS / "MobileApp.vue")
+    body = re.search(r"async function submit\(\).*?\n\}", app, re.S)
+    assert body, "submit() 不在了"
+    text = body.group(0)
+    # 只认**行首就是这句代码**的那一处。解释这件事的注释里也写着 `await nextTick()`，
+    # 拿裸 substring 找会被自己的注释骗一次（这条测试第一版就是这么红的）。
+    claimed = re.search(r"^\s*busy\.value = true\s*$", text, re.M)
+    yielded = re.search(r"^\s*await nextTick\(\)\s*$", text, re.M)
+    assert claimed and yielded, "submit() 里找不到 busy 置位或 nextTick 那两行"
+    assert claimed.start() < yielded.start(), "busy 置位排在 await 之后，双击就能挤进来两条"
+
+
+def test_a_stalled_answer_says_so_instead_of_spinning() -> None:
+    """卡住要看得见：等了多久、能不能停。
+
+    进了流式而一个字都还没来的时候，屏幕上只有一个空气泡——`streaming >= 0` 顺手把
+    "她在想"那三个点也关掉了，于是卡住的唯一线索是"什么都没动"，那是最像死机的一种状态。
+    """
+    app = read(MOBILE_TS / "MobileApp.vue")
+    assert "STALL_SHOW_AFTER" in app, "等待计时不见了"
+    delta = re.search(r"function onStreamDelta\(.*?\n\}", app, re.S)
+    assert delta and "stall.value = 0" in delta.group(0), "收到新字没有把计时归零"
+    # 计时器要在离开这一页时清掉，不然它会在后台一直跳。
+    unmount = re.search(r"onBeforeUnmount\(\(\) => \{(.*?)\n\}\)", app, re.S)
+    assert unmount and "stopStall()" in unmount.group(1), "卸载时没清计时器"
+    # 只报数，**不自动取消**：替用户掐掉一次问答，比多等十秒贵得多。
+    assert not re.search(
+        r"stall[^=]*>=\s*STALL_SHOW_AFTER[^)]*cancelChat", app, re.S
+    ), "计时器不许自己去掐连接"
+
+
+def test_an_offline_phone_says_so_before_it_sends() -> None:
+    """断网时先说人话，别让人干等一次超时；而且要留住已经打好的字。
+
+    原来这条路是：按发送 → 20 秒连接超时 → 一句"连不上模型"。中间那 20 秒屏幕上
+    什么都没有，而输入框已经清空了——用户既不知道是网的问题，也丢了刚打的那段话。
+    """
+    app = read(MOBILE_TS / "MobileApp.vue")
+    assert "navigator.onLine" in app
+    assert "'offline'" in app and "'online'" in app
+    body = re.search(r"async function submit\(\).*?\n\}", app, re.S)
+    assert body, "submit() 不在了"
+    text = body.group(0)
+    assert "offline.value" in text, "发送前没看网"
+    assert text.index("offline.value") < text.index("draft.value = ''"), "断网还是把字清掉了"
+    # 卸载时要把这两个监听摘掉，否则热重载会一次挂两份。
+    unmount = re.search(r"onBeforeUnmount\(\(\) => \{(.*?)\n\}\)", app, re.S)
+    assert unmount and "removeEventListener('offline'" in unmount.group(1)
+
+
+def test_the_model_settings_are_checked_before_they_are_saved() -> None:
+    """保存之前要拦得住填错的地址，而且规则要能在没手机的地方判死。
+
+    "存进去一个连不上的地址、屏幕上却写着已保存"是这一栏最贵的错法：下一次问答失败时，
+    人不会想到是设置的问题。所以规则单独放在 `settings.ts`（不碰任何插件），
+    Node 里跑 `scripts/test_settings.mjs` 就能判死，不用等装机。
+    """
+    settings = read(MOBILE_TS / "settings.ts")
+    assert "@capacitor" not in settings, "校验规则碰了插件，就没法在 Node 里跑了"
+    assert "export function checkModel" in settings
+    harness = read(REPO / "scripts" / "test_settings.mjs")
+    assert "settings.ts" in harness and "checkModel" in harness
+    app = read(MOBILE_TS / "MobileApp.vue")
+    body = re.search(r"async function save\(\).*?\n\}", app, re.S)
+    assert body, "save() 不在了"
+    text = body.group(0)
+    assert "checkModel(form)" in text, "保存前没有校验"
+    assert text.index("modelIssues.value.length") < text.index("saveModel("), "校验不过还是存了"
+
+
+def test_the_model_config_can_be_probed_before_it_is_trusted() -> None:
+    """「试一下这个配置」：404 / 401 / 422 在屏幕上必须分得开。
+
+    这三种失败原来都只表现为"连不上模型"，而修法完全不同（地址错一层 / Key 不对 /
+    模型名不存在）。分不开的话用户只能一栏一栏地试。
+    """
+    api = read(MOBILE_TS / "api.ts")
+    probe = re.search(r"export async function probeModel.*?\n\}", api, re.S)
+    assert probe, "probeModel 不在了"
+    text = probe.group(0)
+    # 探的是一次最小请求，不是一轮真问答。
+    assert "max_tokens: 1" in text
+    # 自建端点常常不要 Key：拿"没填 Key"当错误挡在门外的话，那一档用户永远试不通自己的地址。
+    assert "if (!cfg.apiKey" not in text
+    assert "modelProbeResult" in text, "探测必须核对状态码与响应结构"
+    app = read(MOBILE_TS / "MobileApp.vue")
+    assert "probeModel(" in app and "tryModel" in app
+
+
+def test_sensitive_mobile_settings_use_keystore_and_remove_plaintext_after_commit() -> None:
+    api = read(MOBILE_TS / "api.ts")
+    secure = read(MOBILE_TS / "secure.ts")
+    native = read(
+        REPO / "frontend/android/app/src/main/java/com/xiaoye/assistant/XySecurePlugin.java"
+    )
+    assert "readSecret(MODEL_KEY)" in api and "readSecret(PC_KEY)" in api
+    assert "writeSecret(MODEL_KEY" in api and "writeSecret(PC_KEY" in api
+    assert "readMigrated" in secure
+    assert "AndroidKeyStore" in native and "AES/GCM/NoPadding" in native
+    assert "updateAAD" in native and "cipher.doFinal" in native

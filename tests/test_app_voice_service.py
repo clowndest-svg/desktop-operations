@@ -775,8 +775,72 @@ class TestReadAloud:
         service.enable()
         assert _wait_until(lambda: service.status.phase is VoicePhase.RUNNING)
         service.speak_text("你好")
-        assert service.stop_speaking() is True
+        assert service.stop_speaking()
         assert loop.reading_stops == 1
+
+
+class TestTheFailureLineIsWrittenForTheOperator:
+    """状态条上那句是给人看下一步该干什么的，不是给堆栈跟踪看的。
+
+    此前失败只留 ``ModuleNotFoundError: No module named 'funasr'`` 这种英文原文，用户读到
+    的是"一个不懂的词"。中文在前、原文在后：原文是排查用的，不能丢。
+    """
+
+    def _failed_detail(self, events: list[PipelineEvent]) -> str:
+        """从页面真正收到的那条事件里取，不看服务内部字段。"""
+        failed = [e for e in events if e.kind == VOICE_STATUS_KIND and e.text == "failed"]
+        assert failed, "失败必须发出一条 voice_status"
+        detail = failed[-1].detail
+        assert isinstance(detail, str), f"屏上要读的是句子，不是 {type(detail).__name__}"
+        return detail
+
+    def test_a_stack_that_cannot_be_built_leads_with_chinese(
+        self, events: list[PipelineEvent]
+    ) -> None:
+        def builder(_on_event: object) -> FakeLoop:
+            raise ModuleNotFoundError("No module named 'funasr'")
+
+        service = _service(builder, events)
+        service.enable()
+
+        assert _wait_until(lambda: service.status.phase is VoicePhase.FAILED)
+        detail = self._failed_detail(events)
+        assert detail.startswith("语音引擎装不起来"), detail
+        assert "ModuleNotFoundError" in detail and "funasr" in detail, "原文要留着，那是排查线索"
+
+    def test_a_stack_that_cannot_start_blames_the_microphone_first(
+        self, events: list[PipelineEvent]
+    ) -> None:
+        class Busy(FakeLoop):
+            def start(self) -> None:
+                raise OSError("[WinError 32] 另一个程序正在使用此文件")
+
+        service = _service(lambda _on_event: Busy(), events)
+        service.enable()
+
+        assert _wait_until(lambda: service.status.phase is VoicePhase.FAILED)
+        detail = self._failed_detail(events)
+        assert detail.startswith("语音引擎装好了但没跑起来"), detail
+        assert "麦克风" in detail, "这句得指出最可能的那件事：麦克风被占用或没给权限"
+
+    def test_the_read_aloud_switch_says_what_is_still_missing(self) -> None:
+        """「朗读」 是一格偏好；没有引擎时后端会正确地拒绝，屏上却只亮了一个绿灯。
+
+        用户报的形态是"这功能坏了"，而真相是"还没启用语音"。页面必须把这两件事分开说。
+        """
+        core = (
+            Path(__file__).resolve().parents[1]
+            / "frontend"
+            / "src"
+            / "components"
+            / "VoiceCore.vue"
+        ).read_text(encoding="utf-8")
+        assert "const hasVoiceEngine = computed(" in core
+        toggle = core[core.index("async function toggleReading") :]
+        assert "voice.speaksTyped && !hasVoiceEngine.value" in toggle
+        assert "启用语音" in toggle, "提示要说清还缺点什么"
+        # 耳朵关掉（muted）嗓子还在：这句不该把释放麦克风当成没引擎。
+        assert "voice.phase === 'running' || voice.phase === 'muted'" in core
 
     def test_stopping_when_nothing_is_saying_anything_is_false(
         self, events: list[PipelineEvent]

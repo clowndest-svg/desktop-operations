@@ -181,8 +181,152 @@ ones, and an operator who never opens the section still gets told when C: is ful
 ALERTS_COOLDOWN_MINUTES = "alerts.cooldown_minutes"
 """How long a recovered alert stays quiet before it may open again."""
 
+DEFAULT_DISPLAY_NAME = "小夜"
+"""What the interface calls her when the operator has not chosen a name.
+
+Labels only. The shipped executable, the wake-word recordings (「你好小夜」 is an acoustic
+match, not a string) and the asset files on disk keep their names -- renaming those would
+break them rather than rename her.
+"""
+
+LOCAL_CONTEXT = "llm.local_context"
+"""How big a context window the bundled model loads with, in tokens.
+
+Not free, but cheaper than it looks: on this machine 4096 costs 5061 MB resident and 16384
+costs 5226 MB, because llama.cpp's ``--fit`` trades model layers in VRAM for the KV cache.
+A buyer without a discrete GPU cannot make that trade -- measured CPU-only the same climb
+costs +837 MB -- so the memory gate rises with the tier and the tier is the operator's call.
+"""
+
+LOCAL_IDLE_MINUTES = "llm.local_idle_minutes"
+"""Minutes of silence before the bundled model is thrown away. ``0`` keeps it loaded."""
+
+LOCAL_MODEL = "llm.bundled_model"
+"""Which weights file the bundled runtime loads.
+
+``""`` means auto (the biggest file in ``模型``), ``"none"`` means do not load an offline
+model at all, anything else is that exact file name. The files that are *not* selected stay
+on disk and never touch memory -- that is the whole point of the picker: a buyer with 8 GB
+should be able to run the 0.6B and not have the 7B refuse to load at them.
+"""
+
+LOCAL_EAGER = "llm.local_eager"
+"""Load the bundled model even when the free-memory gate says there is not room.
+
+Off by default: refusing is a sentence on the screen, while over-committing makes Windows
+swap the whole desktop. A machine with more RAM than the developer's can opt in knowingly.
+"""
+
+DISPLAY_NAME = "ui.display_name"
+
+MIRROR_TIER = "mirror.tier"
+"""Which scrcpy quality preset to mirror with. Per machine, not per phone: what the
+link can carry depends on this room's WiFi, and a buyer on 2.4GHz needs a different
+number than one on a cable."""
+
+MIRROR_AUDIO = "mirror.audio"
+"""Whether to carry the phone's audio across. Off by default -- audio capture is a
+real stutter source on a weak link, and a mirrored picture that arrives in chunks is
+worse than a silent one that arrives smoothly."""
+
+MIRROR_MODE = "mirror.mode"
+"""How the phone is expected to reach this computer: over a cable or over the WiFi.
+
+It is a filter on the implicit pick, not a scrcpy flag -- once adb has the device, the
+mirror command is identical either way. What changes is which rows count as candidates,
+and what the refusal tells you to do about it.
+"""
+
+MIRROR_WINDOW = "mirror.window"
+"""How big the scrcpy window should be: ``window``, ``maximized`` or ``fullscreen``.
+
+Maximizing is done to the live window; fullscreen is a launch flag (scrcpy's SDL owns
+that state), which is why picking it while a mirror is up says "重开一次" rather than
+pretending.
+"""
+
+MIRROR_STRETCH = "mirror.stretch"
+"""Whether to fill the window without preserving the aspect ratio.
+
+Off by default: a stretched face is an ugly truth, and the black bars are the honest
+price of the correct shape. On, the picture covers the screen -- which is what some
+people mean when they say 铺满.
+"""
+
+MIRROR_KEEP_PHONE_SCREEN = "mirror.keep_screen_on"
+"""Leave the phone's own display on while mirroring. On by default because turning it
+off is surprising; off saves battery and GPU on the phone, which helps the frame rate
+on weaker devices."""
+"""The name the interface shows. Empty means :data:`DEFAULT_DISPLAY_NAME`."""
+
+MIRROR_ALLOW_SCREEN_VISION = "mirror.allow_screen_vision"
+"""Whether 「我手机上现在是什么」 may send the screenshot to a model that has eyes.
+
+Off by default, and not merely as decoration: a phone screen is WeChat threads,
+verification codes and payment pages. The accessibility tree and a local OCR read the
+same screen without any of it leaving the machine, so the path that costs nothing runs
+first and this switch only decides whether the picture may also go to a provider.
+"""
+
+MIRROR_KEEP_SCREENSHOTS = "mirror.keep_screen_shots"
+"""Whether reading the phone's screen leaves the PNG on disk. Off by default: the read
+needs the bytes for a moment, and keeping a running folder of phone screenshots is a
+different promise from answering one question."""
+
 ALERTS_SPEAK_CRITICAL = "alerts.speak_critical"
 """Whether a *critical* alert is also spoken. The screen list is not gated by this."""
+
+IMAGE_ENGINE = "image.engine"
+"""Which 生图 engine to use: ``auto`` (本地有就本地，没有就云端)、``local``、``cloud``。
+
+Default ``local`` is not chosen because it is nicer but because it is the only one that
+answers without a key: a buyer who has ComfyUI running gets pictures the first time they
+ask, and a buyer who has not gets a sentence naming what to do, instead of a silent
+fallback to a cloud endpoint they never configured.
+"""
+
+IMAGE_COMFY_URL = "image.comfy_url"
+"""The address of a ComfyUI already running (``http://127.0.0.1:8188``).
+
+Empty means "look for one": the service probes the ports ComfyUI actually uses rather
+than making somebody type a URL. Filled in by hand when the engine is on another machine.
+"""
+
+IMAGE_COMFY_DIR = "image.comfy_dir"
+"""Where a ComfyUI installation lives, when the app should start it itself.
+
+Empty means never start one -- which is the right default on a 4 GB card: a second engine
+next to one already running does not slow the picture down, it crashes while loading the
+weights. Measured on the author's machine: the copy started, found the CUDA device, and
+died inside ``load_checkpoint`` because the other engine held 2.2 of 4 GB.
+"""
+
+IMAGE_CLOUD_BASE = "image.cloud_base"
+"""Cloud image endpoint's base URL (``.../v1``), OpenAI-compatible ``/images/generations``.
+
+The key never lands here -- see :data:`jarvis.app.settings_service.IMAGE_KEY_ENV`.
+"""
+
+IMAGE_CLOUD_MODEL = "image.cloud_model"
+"""Which image model that endpoint should use. Empty means "whatever it defaults to"."""
+
+IMAGE_SIZE = "image.size"
+"""``512x512`` and friends. One string, because both engines want it that way:
+ComfyUI splits it into the latent node's two numbers, cloud endpoints take it verbatim."""
+
+IMAGE_STEPS = "image.steps"
+"""Sampler steps. A real cost knob: 20 steps measured 22 s on a GTX 1650, and the same
+card roughly triples that at 40 -- this is the difference between 「等一会儿」 and 「算了」."""
+
+IMAGE_KEEP_OUTPUT = "image.keep"
+"""Whether generated pictures stay in the ``生图`` folder. On by default: a generated
+file the operator cannot go and look at is a capability with a hole in it."""
+
+
+def display_name(value: object) -> str:
+    """The name to print, or the shipped one when the box was left empty or filled with spaces."""
+    text = value if isinstance(value, str) else ""
+    return text.strip() or DEFAULT_DISPLAY_NAME
 
 
 def thinking_loader(value: object) -> str:
@@ -199,6 +343,14 @@ Remembered rather than per-run: the choice is about the operator's desktop, and 
 figure that reappears after every reboot -- or vanishes after it -- is both annoying
 and, since it is the thing that listens for the wake word, confusing about where to
 speak."""
+
+PET_FIGURE = "pet.figure"
+"""Which generated pet stands on the desktop. ``""`` means the built-in figure.
+
+An id and not a path: the polygon lives in ``数据/pets/index.json``, and a stored
+path would outlive the file it names -- which turns the pet window into a silent
+"she did not change" instead of a row the picker can say is gone.
+"""
 
 WINDOW_RECT = "window.rect"
 """Where the HUD window was last left: ``{x, y, width, height, maximized}``.
@@ -233,11 +385,33 @@ PREFERENCE_TYPES: dict[str, type] = {
     COMPUTER_ALLOW_TYPING: bool,
     SHELL_TIER: int,
     PET_ENABLED: bool,
+    PET_FIGURE: str,
     THINKING_LOADER: str,
     ALERTS_RULES: dict,
     ALERTS_COOLDOWN_MINUTES: float,
     ALERTS_SPEAK_CRITICAL: bool,
     WINDOW_RECT: dict,
+    LOCAL_CONTEXT: int,
+    LOCAL_IDLE_MINUTES: int,
+    LOCAL_EAGER: bool,
+    LOCAL_MODEL: str,
+    DISPLAY_NAME: str,
+    MIRROR_TIER: str,
+    MIRROR_AUDIO: bool,
+    MIRROR_KEEP_PHONE_SCREEN: bool,
+    MIRROR_ALLOW_SCREEN_VISION: bool,
+    MIRROR_KEEP_SCREENSHOTS: bool,
+    MIRROR_MODE: str,
+    MIRROR_WINDOW: str,
+    MIRROR_STRETCH: bool,
+    IMAGE_ENGINE: str,
+    IMAGE_COMFY_URL: str,
+    IMAGE_COMFY_DIR: str,
+    IMAGE_CLOUD_BASE: str,
+    IMAGE_CLOUD_MODEL: str,
+    IMAGE_SIZE: str,
+    IMAGE_STEPS: int,
+    IMAGE_KEEP_OUTPUT: bool,
 }
 """The only keys that round-trip, with the type each must have.
 
@@ -268,6 +442,14 @@ class Preferences:
     def __init__(self, path: Path) -> None:
         self._path = path
         self._lock = threading.Lock()
+        self._unsaved: set[str] = set()
+        """Keys applied in memory that the disk does not have yet.
+
+        Written by :meth:`set` when the file write fails. Without it, "applied" and
+        "persisted" collapse into one boolean and a failed save is indistinguishable
+        from a successful one -- which for 命令行档位 meant a downgrade that quietly
+        rolled itself back at the next start.
+        """
         self._values: dict[str, Any] | None = None
 
     @property
@@ -392,19 +574,55 @@ class Preferences:
             return False
         with self._lock:
             values = self._read()
-            if key in values and values[key] == value:
-                return True  # an unchanged choice is not a disk write
+            if key in values and values[key] == value and key not in self._unsaved:
+                return True  # an unchanged choice that is already on disk is not a write
             values[key] = value
             self._values = values
             try:
                 self._write(values)
             except Exception:  # a lost preference must not lose the window
                 logger.exception("could not save preference %s=%s to %s", key, value, self._path)
+                # The value *is* applied -- this is what keeps a permission downgrade in
+                # force for the rest of the session even though the disk still says
+                # "wide open". What it is not, is saved, and saying otherwise is how
+                # r93 shipped a 命令行档位 that came back after a restart.
+                self._unsaved.add(key)
+                return False
+            self._unsaved.discard(key)
         return True
 
-    def set_flag(self, key: str, value: bool) -> None:
-        """Record one boolean choice. Never raises into the caller."""
-        self.set(key, bool(value))
+    def unsaved(self) -> list[str]:
+        """Keys held in memory but not on disk.
+
+        ``applied`` and ``persisted`` are two facts, and one bool from :meth:`set` can
+        only ever describe one call. Anything that shows "已保存" has to ask this.
+        """
+        with self._lock:
+            return sorted(self._unsaved)
+
+    def retry_unsaved(self) -> list[str]:
+        """Write the dirty keys again; returns the ones still not on disk.
+
+        The same-value short-circuit above is what makes this necessary: once the cache
+        matches the wish, a plain retry of ``set()`` would be the only way to persist it,
+        and that path used to be skipped as "no change".
+        """
+        with self._lock:
+            if not self._unsaved:
+                return []
+            try:
+                self._write(dict(self._read()))
+            except Exception:
+                logger.exception("补写偏好还是失败：%s", self._path)
+                return sorted(self._unsaved)
+            count = len(self._unsaved)
+            self._unsaved.clear()
+        logger.info("补写回了 %d 项偏好", count)
+        return []
+
+    def set_flag(self, key: str, value: bool) -> bool:
+        """Record one boolean choice. Never raises; ``False`` means it is not on disk."""
+        return self.set(key, bool(value))
 
     def forget(self, key: str) -> None:
         """Drop one remembered choice (the settings screen's "restore default")."""

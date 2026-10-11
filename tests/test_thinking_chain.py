@@ -121,6 +121,26 @@ class TestWireFormat:
         assert "enable_thinking" not in payload
         assert "thinking_budget" not in payload
 
+    def test_chat_template_kwargs_reach_the_payload(self) -> None:
+        """Qwen3 只有一个地方能关掉它的思考：llama.cpp 的 chat_template_kwargs。"""
+        transport = FakeTransport()
+        transport.json_replies.append(ok_response("ok"))
+        make_client(transport).complete(
+            [ChatMessage.user("hi")],
+            options=GenerationOptions(template_kwargs={"enable_thinking": False}),
+        )
+        payload = transport.json_calls[0]["payload"]
+        assert isinstance(payload, dict)
+        assert payload["chat_template_kwargs"] == {"enable_thinking": False}
+
+    def test_nothing_unasked_for_is_added_to_the_payload(self) -> None:
+        transport = FakeTransport()
+        transport.json_replies.append(ok_response("ok"))
+        make_client(transport).complete([ChatMessage.user("hi")], options=GenerationOptions())
+        payload = transport.json_calls[0]["payload"]
+        assert isinstance(payload, dict)
+        assert "chat_template_kwargs" not in payload
+
     def test_switched_on_puts_the_flag_and_the_budget_on_the_wire(self) -> None:
         transport = FakeTransport()
         transport.json_replies.append(thinking_reply())
@@ -277,6 +297,7 @@ class TestStateBridgeCarriesIt:
                 # only place the page can read who argued what, and it is display-only
                 # -- nothing stores it, so this is the whole of its life.
                 "record": "",
+                "tools": {},
             }
         ]
 

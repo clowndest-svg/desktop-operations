@@ -56,6 +56,11 @@ ALLOWED: dict[str, frozenset[str]] = {
     "tools": frozenset({"core", "config"}),
     "vision": frozenset({"core", "config", "ocr", "llm", "prompt"}),
     "computer": frozenset({"core", "config", "vision", "ocr"}),
+    # Not code: the third-party binaries that ship inside the package (llama.cpp's
+    # ``llama-server.exe`` and its DLLs). It holds no ``.py`` and imports nothing, so
+    # the honest entry is "may reach nothing" -- adding a module under vendor/ should
+    # fail this table rather than quietly gain a layer.
+    "vendor": frozenset(),
     "mcp": frozenset({"core", "config", "tools"}),
     "plugins": frozenset({"core", "config", "tools"}),
     "agent": frozenset(

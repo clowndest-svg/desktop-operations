@@ -53,6 +53,13 @@ _NOT_RUNNING = {
 """Why 「按一下说」 refused, per phase. A button that does nothing silently is
 indistinguishable from a broken one, and the customer cannot tell which."""
 
+_LOAD_FAILED = "语音引擎装不起来（多半是缺依赖或模型文件不在）"
+"""屏上这句是给人看的，后半截的异常原文是给排查用的。此前只把 ``ModuleNotFoundError:
+No module named 'funasr'`` 这类英文原文直接铺到状态条上，用户读到的是"一个不懂的词"，
+不是"下一步该干什么"。"""
+
+_START_FAILED = "语音引擎装好了但没跑起来（多半是麦克风被占用或没给权限）"
+
 
 class VoiceLoop(Protocol):
     """The running voice stack, as far as this service cares.
@@ -453,14 +460,18 @@ class VoiceService:
             loop = self._build(self.forward_event)
         except Exception as exc:  # any failure must still produce a status
             logger.exception("voice stack failed to load")
-            self._report(generation, VoicePhase.FAILED, f"{type(exc).__name__}: {exc}")
+            self._report(
+                generation, VoicePhase.FAILED, f"{_LOAD_FAILED} · {type(exc).__name__}: {exc}"
+            )
             return
         try:
             loop.start()
         except Exception as exc:
             logger.exception("voice stack failed to start")
             self._quietly_stop(loop)
-            self._report(generation, VoicePhase.FAILED, f"{type(exc).__name__}: {exc}")
+            self._report(
+                generation, VoicePhase.FAILED, f"{_START_FAILED} · {type(exc).__name__}: {exc}"
+            )
             return
         with self._lock:
             superseded = self._stopping.is_set() or self._generation != generation

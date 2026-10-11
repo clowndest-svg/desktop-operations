@@ -289,8 +289,165 @@ export interface WorkflowRunAnswer {
   error: string
 }
 
+
+/** One figure the operator generated from a photograph, as the picker sees it. */
+export interface PetFigureRow {
+  id: string
+  name: string
+  /** Vertices left after simplification -- what 「细线 / 粗线」 actually counts. */
+  lines: number
+  aspect: number
+  coverage: number
+  /** Slab thickness in units of the figure's own height. */
+  depth: number
+  /** outline | photo | cartoon. */
+  style: string
+  /** The fur colour a cartoon was tinted with, as ``#rrggbb``. */
+  colour: string
+  /** Which authored shape a cartoon uses; empty for the traced styles. */
+  template: string
+  /** True when this figure keeps a thumbnail clipped from your photo. */
+  has_texture: boolean
+  created_at: string
+  /** Milliseconds the segmentation pass took on this machine. */
+  cost_ms: number
+  /** base64 PNG, no data-URL prefix. Empty when the thumbnail went missing. */
+  preview: string
+}
+
+/** One of the rigged models that ship with the program (see ``pet_gallery.py``). */
+export interface GalleryModel {
+  /** ``builtin:<Key>`` -- the value stored as the chosen figure. */
+  id: string
+  key: string
+  name: string
+  /** 动物 / 幻想 / 人物. */
+  kind: string
+  note: string
+  /** Bytes of the shipped ``.glb``, read off disk. */
+  bytes: number
+  /** Animation clips in the file, read off disk. */
+  clips: number
+  url: string
+}
+
+export interface PetAssets {
+  ok: boolean
+  pets: PetFigureRow[]
+  /** The built-in models on this machine: only the ones whose file actually shipped. */
+  models?: GalleryModel[]
+  /** The figure on the desktop. Empty string means the built-in one. */
+  current: string
+  can_generate?: boolean
+  reason?: string
+  error: string
+}
+
+export interface PetGenerated extends PetAssets {
+  /** The four ids this photo produced, in candidate order. */
+  made: string[]
+  cost_ms: number
+  segment_ms: number
+  /** Which style was asked for; the shell echoes it so the note can name it. */
+  style?: string
+  colour?: string
+}
+
+/** What the pet page asks for: which body to draw, and its data. */
+export interface SilhouetteModel {
+  /** ``builtin`` (a shipped model), ``silhouette`` (a traced figure), or ``""``. */
+  kind: string
+  /** Set when ``kind`` is ``builtin``; the page hands it straight to the loader. */
+  model?: GalleryModel
+  id: string
+  name: string
+  depth: number
+  style: string
+  colour: string
+  template: string
+  aspect: number
+  /** base64 PNG clipped to the silhouette. Only set for the 照片 style. */
+  texture: string
+  points: [number, number][]
+}
+
 export interface PetState {
   shown: boolean
+  error?: string
+}
+
+/** The bundled llama.cpp server: what it is doing and why it is not doing more. */
+/** 一个随包（或买家自己放进 ``模型`` 目录）的离线模型，连同它在这台机器上的实测代价。 */
+export interface BundledModel {
+  file: string
+  label: string
+  size_mb: number
+  /** 文件在不在这台机器的 ``模型`` 目录里 —— 删掉了就选不了，但列表里仍要看得见。 */
+  present: boolean
+  selected: boolean
+  license: string
+  /** false = 这个文件没实测过，下面几个数是按大小估的，界面上要这么说。 */
+  measured: boolean
+  /** 默认开思考的模型（Qwen3 全系）：不关掉它，回答会看着是空的。 */
+  thinking: boolean
+  /** 带那 34 个工具的真清单，实测见过它调成一次工具。装得下 ≠ 调成过。 */
+  acts_verified: boolean
+  gate_mb: number
+  resident_mb: number
+  cpu_mb: number
+  tiers: { context: number; needs_free_mb: number; resident_mb: number }[]
+}
+
+/** 「按我这台电脑给一套建议」的返回值。source 说清是谁给的，界面不许含糊。 */
+/** 门槛预检：要是用这个模型 / 这一档，这台机器接不接得住。数字都是当场读的。 */
+export interface GateCheck {
+  ok: boolean
+  reason: string
+  free_mb: number
+  total_mb: number
+  need_mb: number
+  file_mb: number
+  vram_mb: number
+  gpu: string
+  disk_free_mb: number
+  model_label: string
+  /** true = 这一条连「照样加载」都不放行，界面上就不该给那个按钮。 */
+  hard: boolean
+}
+
+export interface LocalAdvice {
+  model: string
+  context: number
+  idle_minutes: number
+  eager: boolean
+  reason: string
+  source: 'ai' | 'rule'
+  note?: string
+  error?: string
+}
+
+export interface ModelServerStatus {
+  phase: 'off' | 'loading' | 'running' | 'failed'
+  detail: string
+  can_run: boolean
+  reason: string
+  model: string
+  model_label: string
+  /** 拨盘上选的那个：'' = 自动（最大的），'none' = 不用离线模型，否则是文件名。 */
+  model_selected: string
+  models: BundledModel[]
+  port: number
+  /** The window the running child was given -- not necessarily the one dialed now. */
+  context: number
+  dialed_context: number
+  /** False when the window cannot hold the tool table: she answers, does not act. */
+  acts: boolean
+  needed_mb: number
+  eager: boolean
+  idle_seconds: number
+  load_ms: number
+  free_mb: number
+  ok?: boolean
   error?: string
 }
 
@@ -300,6 +457,288 @@ export interface MobileDevice {
   name: string
   added_at: number
   last_seen: number
+}
+
+/** 一台**手机**一行。``adb`` 按通道列（插线 + 两个 tcpip 端口是三行），服务端把它们并成一行。 */
+export interface MirrorDevice {
+  serial: string
+  state: string
+  label: string
+  model: string
+  wireless: boolean
+  ready: boolean
+  /** What to do about this row, in Chinese; empty when nothing is wrong. */
+  hint: string
+  /** 这台手机的全部通道（第一个就是 ``serial`` 那个）。只有一行时它是唯一的通道。 */
+  channels: string[]
+}
+
+export interface MirrorTier {
+  id: string
+  label: string
+  /** What this tier costs, so the choice is not a guess. */
+  note: string
+}
+
+/** One way the scrcpy window should sit on the screen. */
+export interface MirrorWindow {
+  id: string
+  label: string
+  note: string
+}
+
+/** One way the phone can reach this computer, with the tradeoff written out. */
+export interface MirrorMode {
+  id: string
+  label: string
+  pros: string
+  cons: string
+}
+
+/** Where the mirror is. The panel polls this, and nothing in it costs a subprocess. */
+export interface MirrorState {
+  phase: string
+  detail: string
+  serial: string
+  available: boolean
+  tier: string
+  tiers: MirrorTier[]
+  mode: string
+  modes: MirrorMode[]
+  window: string
+  windows: MirrorWindow[]
+  stretch: boolean
+  keys: MirrorAction[]
+  swipes: MirrorAction[]
+  audio: boolean
+  keep_screen: boolean
+  seconds: number
+  tail: string[]
+  error?: string
+}
+
+/** 读手机那一屏的回答：文本 + 每条来源说了什么。 */
+export interface MirrorScreenAnswer {
+  text: string
+  error: string
+  sources: string[]
+  allow_vision: boolean
+}
+
+/** 面板上一个按钮：它叫什么、那一下在手机上是什么。后端发什么就画什么，不在前端写死。 */
+export interface MirrorAction {
+  id: string
+  label: string
+  note: string
+}
+
+
+/** 生图：本机 ComfyUI 或云端 API 的一次答复（服务端 ImageAnswer 的镜像）。 */
+export interface ImageAnswer {
+  ok: boolean
+  path: string
+  /** 实际走了哪条：``local`` | ``cloud``。空串是没画成。 */
+  engine: string
+  prompt: string
+  size: string
+  steps: number
+  seed: number
+  seconds: number
+  /** 缩过的预览（data URL）。原图按原样落盘，这一条只是为了让弹窗立刻看得见。 */
+  preview: string
+  error: string
+}
+
+export interface ImageEngineOption {
+  id: string
+  label: string
+  note: string
+}
+
+export interface ImageSizeOption {
+  size: string
+  note: string
+}
+
+/** 本机引擎探到什么。``ok`` 是"有人答话"，不是"刚才画成功过"。 */
+export interface ImageProbe {
+  kind: string
+  url: string
+  ok: boolean
+  detail: string
+  version: string
+  checkpoints: string[]
+  probed_at: number
+}
+
+export interface ImageState {
+  engine: string
+  engines: ImageEngineOption[]
+  sizes: ImageSizeOption[]
+  size: string
+  steps: number
+  comfy_url: string
+  comfy_dir: string
+  cloud_base: string
+  cloud_model: string
+  cloud_key_set: boolean
+  can_start_local: boolean
+  /** 这个包里到底带没带本地引擎：带了我才敢说「替你起一个」。 */
+  vendored_engine: boolean
+  local: ImageProbe | null
+  phase: string
+  detail: string
+  last_path: string
+  last_seconds: number
+  tail: string[]
+  error: string
+}
+
+export interface MirrorDevices {
+  devices: MirrorDevice[]
+  error: string
+}
+
+const MIRROR_TIERS: MirrorTier[] = [
+  {
+    id: 'smooth',
+    label: '流畅优先',
+    note: '画面缩到长边 800、30 帧、4Mbps。弱 WiFi / 老手机选这个，最不容易卡。',
+  },
+  {
+    id: 'balanced',
+    label: '均衡（默认）',
+    note: '长边 1024、60 帧、6Mbps，H.264 各家手机都支持，延迟和清晰度的折中。',
+  },
+  {
+    id: 'sharp',
+    label: '清晰优先',
+    note: '长边 1440、H.265。同带宽下更清楚，但手机要支持 H.265 编码，老机器上延迟反而更高。',
+  },
+  {
+    id: 'native',
+    label: '手机原分辨率',
+    note: '不缩放。只适合 5GHz/6GHz WiFi 或 USB 线，2.4GHz 上基本一定会卡。',
+  },
+]
+
+const MIRROR_WINDOWS: MirrorWindow[] = [
+  {
+    id: 'window',
+    label: '窗口',
+    note: '普通窗口，自己拖大小。竖屏手机在横屏显示器上左右会有黑边，这是比例问题不是坏了。',
+  },
+  {
+    id: 'maximized',
+    label: '铺满（最大化窗口）',
+    note: '把窗口撑到整个屏幕。画面仍按手机比例居中，所以竖屏手机左右依旧有黑边 —— 要连黑边一起填上，勾下面的「拉伸填满」（会变形）。',
+  },
+  {
+    id: 'fullscreen',
+    label: '全屏',
+    note: 'scrcpy 自己进全屏（等同窗口里按 F11）。这一档要重开一次投屏才生效，因为全屏状态是 SDL 持有的，从外面改不可靠。',
+  },
+]
+
+const MIRROR_KEYS: MirrorAction[] = [
+  { id: 'back', label: '返回', note: '等于手机上那下返回键。' },
+  { id: 'home', label: '主页', note: '回桌面。投屏不会断，画面跟着变。' },
+  { id: 'recents', label: '多任务', note: '最近任务那个键。' },
+  { id: 'vol_up', label: '音量 +', note: '媒体音量大一格。投屏放视频时不用伸手去按手机侧键。' },
+  { id: 'vol_down', label: '音量 −', note: '小一格。手机躺在一边够不着的时候用它。' },
+]
+
+const MIRROR_SWIPES: MirrorAction[] = [
+  { id: 'next', label: '下一个（往上滑）', note: '就是手指从下往上划那么一下 —— 抖音、快手翻到下一条视频用它。' },
+  { id: 'prev', label: '上一个（往下滑）', note: '反着划那么一下，回到上一条。' },
+]
+
+const MIRROR_MODES: MirrorMode[] = [
+  {
+    id: 'usb',
+    label: 'USB 线（开 USB 调试）',
+    pros: '最稳的一档：不占 WiFi、延迟最低、不受路由器和邻居信道影响，插上就能投，反手用鼠标操作手机也最跟手。',
+    cons: '要一根能传数据的线（有些线只能充电）；人离电脑就得拔线；手机被线占着，部分老手机换个 USB 口还要重新点一次允许调试。',
+  },
+  {
+    id: 'wifi',
+    label: '同一个 WiFi（无线调试）',
+    pros: '不用线，手机拿在手里也能投；配过一次之后，重连只要点一下「连接」。笔记本在沙发上、主机在桌上的时候只有这一档能用。',
+    cons: '吃路由器：2.4GHz 或隔两堵墙就会卡，画质档要往下退；手机重启或换网络后端口会变，要重新连一次；Android 11 以上要先用「无线调试」的配对码配一次，10 及以下必须先插一次线点「开无线端口」；公司/公共 WiFi 开了 AP 隔离的连不上。',
+  },
+  {
+    id: 'scan',
+    label: '同一个 WiFi（不开无线调试，自动找）',
+    pros:
+      '不用碰「无线调试」那个页面，也不用填 IP 和 6 位配对码：手机插一次线点「开无线端口」之后，端口就固定在 5555，以后每次点「自动找」由电脑把本网段的手机找出来并连上。老手机（Android 10 及以下）只有这一条无线路可走。',
+    cons:
+      '第一次那根线省不掉：不开 USB 调试也不开无线调试，电脑上没有任何软件能让手机把屏幕交出来，这是安卓的安全模型。5555 端口在同一网段里对所有人开放，公司/公共 WiFi 别用这一档；开了 AP 隔离的网段扫不到；手机重启后 tcpip 模式会失效，要再插一次线。',
+  },
+]
+
+/**
+ * A browser tab has no ``adb`` and no phone, so the preview mirrors nothing.
+ *
+ * What it does keep is the bookkeeping: the phase moves off → running → off, the tier
+ * and the two switches persist across calls, and the fps line shows up in 说明 the way
+ * scrcpy's stdout does. A mock that only returns a fixed string cannot be used to test
+ * the panel, and this panel has a state machine worth testing.
+ */
+let mockScreenVision = false
+
+const mockMirror: MirrorState = {
+  phase: 'off',
+  detail: '',
+  serial: '',
+  available: true,
+  tier: 'balanced',
+  tiers: MIRROR_TIERS,
+  mode: 'usb',
+  modes: MIRROR_MODES,
+  window: 'window',
+  windows: MIRROR_WINDOWS,
+  stretch: false,
+  keys: MIRROR_KEYS,
+  swipes: MIRROR_SWIPES,
+  audio: false,
+  keep_screen: true,
+  seconds: 0,
+  tail: [],
+}
+
+function mirrorTune(
+  tier: string,
+  audio: boolean,
+  keepScreen: boolean,
+  mode: string,
+): MirrorState {
+  if (MIRROR_TIERS.some((row) => row.id === tier)) mockMirror.tier = tier
+  if (MIRROR_MODES.some((row) => row.id === mode)) mockMirror.mode = mode
+  mockMirror.audio = audio
+  mockMirror.keep_screen = keepScreen
+  return { ...mockMirror }
+}
+
+function mirrorStart(serial: string): MirrorState {
+  if (mockMirror.phase === 'running' || mockMirror.phase === 'starting') {
+    mockMirror.detail = `已经在了（${mockMirror.serial}）。要先关掉再换设备`
+    return { ...mockMirror }
+  }
+  mockMirror.phase = 'running'
+  mockMirror.serial = serial || 'MOCK-PHONE-1'
+  mockMirror.seconds = 0
+  mockMirror.detail = 'current fps: 60.0'
+  mockMirror.tail = ['scrcpy 5.0.1', 'Device ready', 'current fps: 60.0']
+  return { ...mockMirror }
+}
+
+function mirrorStop(): MirrorState {
+  mockMirror.phase = 'off'
+  mockMirror.serial = ''
+  mockMirror.seconds = 0
+  mockMirror.tail = []
+  mockMirror.detail = '手动停止'
+  return { ...mockMirror }
 }
 
 /** The LAN endpoint's whole truth, as the desktop sees it. */
@@ -386,7 +825,29 @@ export interface ChatReply {
   conversation?: string
   task_id?: string
   cancelled?: boolean
+  tools?: ToolReport
 }
+
+/**
+ * What one answer's request actually carried, as the backend saw it.
+ *
+ * The panel has a 带工具 checkbox and a tool count in the registry, and neither tells you
+ * what went out with *this* request. A 4K local model gets a narrowed pack, or nothing at
+ * all when the window refused the table; without this line those look identical to the
+ * model declining to act, which is how a whole round of "she's useless offline" got
+ * diagnosed wrong until it was written down.
+ */
+export interface ToolReport {
+  /** Tools that went out with the request. */
+  count: number
+  /** Which capability pack was selected, e.g. `runtime+system`. Empty = the whole table. */
+  pack: string
+  /** Tools the model actually invoked, in call order. */
+  used: string[]
+  /** Why there are fewer hands than the checkbox implies: `overflow` | `model` | ''. */
+  degraded: string
+}
+
 
 export interface ChatTurn {
   role: 'user' | 'assistant'
@@ -403,6 +864,8 @@ export interface ChatTurn {
    * history would be the largest thing in every request after it.
    */
   record?: string
+  /** Absent on a user turn and on anything reloaded from the transcript. */
+  tools?: ToolReport
 }
 
 /**
@@ -423,6 +886,22 @@ export interface ConversationCard {
   active: boolean
   task_id: string
   error: string
+  /**
+   * What kind of failure ``error`` is, so the panel can name the next step: ``auth`` /
+   * ``forbidden`` / ``quota`` / ``timeout`` / ``network`` / ``server`` / ``request`` /
+   * ``malformed`` / ``empty`` / ``crash`` / ``pictures``. Optional because it is only ever
+   * sent with a failure, and a page that guessed advice from the wording of ``error``
+   * would go quiet the day that wording changed.
+   */
+  error_kind?: string
+  /**
+   * Something this turn did that the answer itself does not show. ``no_tools`` when the
+   * request had to leave the tool table out to fit the model's context window.
+   *
+   * Separate from ``error_kind`` because it is not a failure — the answer came. Drawing it
+   * as one would teach everyone to ignore the card that reports the real ones.
+   */
+  note?: string
   /**
    * What this conversation still has to ask, in the order it was typed.
    *
@@ -520,6 +999,9 @@ export interface ModelRow {
   source: string
   edited: boolean
   current: boolean
+  /** 自带模型那一行：用哪个模型由「选哪个离线模型」决定，这里加不加都会被盖掉。
+   *  后端给这句话，是为了让界面少一个要抄的 'local' 字面量（抄漏就是又一处各说一套）。 */
+  models_locked?: boolean
 }
 
 /** A row the operator hid: absent from the menu, untouched in the file. */
@@ -550,9 +1032,17 @@ export interface SettingsSnapshot {
   /** Tokens of reasoning one answer may spend -- a real budget, not a 高/中/低 label. */
   thinking_budget: number
   thinking_budget_bounds: number[]
+  /** False for the bundled llama.cpp, which ignores a thinking budget entirely
+   *  (measured r90: 32/128/512/2048 all thought ~850 characters). The row says so
+   *  instead of promising a number that moves nothing. */
+  thinking_budget_honored?: boolean
   /** Past exchanges replayed into each request. */
   history_turns: number
   history_turns_bounds: number[]
+  /** 上面这三格说的是**哪一对模型**（「alpha · alpha-1」），面板照着它写提示。 */
+  tuning_pair?: string
+  /** 这一对单独设过没有。false = 显示的是默认值，别的模型也照这个来。 */
+  tuning_pinned?: boolean
   /** The sentence spoken on the wake word. Empty means she stays quiet. */
   wake_greeting: string
   wake_greeting_default: string
@@ -569,6 +1059,23 @@ export interface SettingsSnapshot {
   thinking_loader_choices: string[]
   /** {id,label} pairs straight from the shell, so a fifth loader cannot render as a raw id. */
   thinking_loader_options?: { id: string; label: string }[]
+  /** What the interface calls her. Leaving the box empty hands back the shipped name. */
+  display_name?: string
+  display_name_default?: string
+  display_name_max?: number
+  /** The bundled offline model's dials. Each tier's note is a measured number. */
+  local_model?: string
+  local_model_label?: string
+  local_models?: BundledModel[]
+  local_context?: number
+  local_context_options?: { id: number; label: string; note: string; needs_free_mb: number }[]
+  local_idle_minutes?: number
+  local_idle_options?: { id: number; label: string }[]
+  local_eager?: boolean
+  local_needs_free_mb?: number
+  local_free_mb?: number
+  /** What the tool table costs, measured: a window under this cannot host it. */
+  local_tool_table_tokens?: number
   /** The section-wide request timeout the rows fall back to. */
   llm_timeout_seconds?: number
   /** The env var the cloud voice-cloning key lives in, and whether it is set. */
@@ -678,6 +1185,13 @@ export interface ProviderChoice {
   current: boolean
 }
 
+/** Is a credential missing *and* required for this row? Asked in four places, and one of
+ * them forgot the "optional" half -- it told the operator the bundled offline model would
+ * fail to answer, because no key was typed into a box that does not need one. */
+export function needsKey(row: Pick<ProviderChoice, 'key_set' | 'key_optional'>): boolean {
+  return !row.key_set && !row.key_optional
+}
+
 /** How hard the model should think, as the four levels the header offers. */
 export type ThinkingLevel = 'off' | 'low' | 'medium' | 'high'
 
@@ -688,8 +1202,12 @@ export interface ModelList {
   model: string
   /** The thinking level remembered for the current provider/model pair. */
   thinking: string
+  /** 面板里填过精确预算时才有值：档位是 custom 时用它画「自定义 8000」。 */
+  thinking_custom_budget?: number | null
   /** Past exchanges replayed for the current pair. */
   turns: number
+  /** Whether the tool table goes out with this pair's next request. */
+  tools: boolean
   thinking_levels: string[]
   turns_bounds: number[]
   /** Per model, what 测一下 found. Absent means nobody has looked at any of them. */
@@ -741,7 +1259,7 @@ export const MODE_LABELS: Record<CollaborationMode, string> = {
   single: '单个模型',
   table: '圆桌轮流',
   boss: '主管分发',
-  vote: '并行三答·互评投票',
+  vote: '独立作答·匿名互评',
 }
 
 /**
@@ -751,17 +1269,18 @@ export const MODE_LABELS: Record<CollaborationMode, string> = {
 export function requestsFor(mode: CollaborationMode, seats: number, rounds = 2): number {
   if (seats <= 0) return 0
   if (mode === 'boss') return seats + 1
-  if (mode === 'vote') return seats * 2
-  if (mode === 'table') return seats * (Math.max(1, rounds) + 1)
+  if (mode === 'vote') return seats === 1 ? 1 : seats * 2
+  if (mode === 'table') return seats * Math.min(3, Math.max(1, rounds)) + 1
   return seats
 }
 
-/** The verdict of changing one of the two per-model knobs. */
+/** The verdict of changing one of the per-model knobs. */
 export interface TuningResult {
   ok: boolean
   error: string
   thinking: string
   turns: number
+  tools: boolean
 }
 
 /** The verdict of adding or removing a model from a provider's list. */
@@ -1119,6 +1638,17 @@ interface PywebviewApi {
   pet_drag(dragging: boolean): Promise<{ ok: boolean }>
   pet_frame(png: string): Promise<{ ok: boolean }>
   pet_arrived(): Promise<{ ok: boolean; error?: string }>
+  pet_assets(): Promise<PetAssets>
+  pet_generate(photo: string, name?: string, style?: string): Promise<PetGenerated>
+  pet_pick(petId: string): Promise<PetAssets>
+  pet_delete(petId: string): Promise<PetAssets>
+  pet_model(): Promise<SilhouetteModel>
+  model_server_status(): Promise<ModelServerStatus>
+  model_server_start(): Promise<ModelServerStatus>
+  model_server_stop(): Promise<ModelServerStatus>
+  local_model_check(model: string, context: number): Promise<GateCheck>
+  local_advice(): Promise<LocalAdvice>
+  local_advice_apply(advice: LocalAdvice): Promise<{ error: string; snapshot: SettingsSnapshot }>
   shell_levels(): Promise<ShellLevels>
   shell_set_tier(tier: number): Promise<ShellLevels>
   mobile_state(): Promise<MobileState>
@@ -1127,6 +1657,38 @@ interface PywebviewApi {
   mobile_revoke(deviceId: string): Promise<{ revoked: boolean; devices: MobileDevice[] }>
   mobile_revoke_all(): Promise<{ revoked: number; devices: MobileDevice[] }>
   mobile_selftest(): Promise<{ plaintext_refused: boolean; note: string }>
+  mirror_state(): Promise<MirrorState>
+  // 生图。参数名照投屏那条禁令一样避开 window/promise/arguments 这些 stub 内部标识符。
+  image_state(): Promise<ImageState>
+  image_probe(): Promise<ImageState>
+  image_generate(prompt: string, size: string): Promise<ImageAnswer>
+  image_tune(engine: string, size: string, steps: number): Promise<ImageState>
+  image_setup(
+    comfy_url: string,
+    comfy_dir: string,
+    cloud_base: string,
+    cloud_model: string,
+  ): Promise<ImageState>
+  mirror_devices(): Promise<MirrorDevices>
+  mirror_start(serial: string): Promise<MirrorState>
+  mirror_stop(): Promise<MirrorState>
+  mirror_connect(address: string): Promise<MirrorState>
+  mirror_pair(address: string, code: string): Promise<MirrorState>
+  mirror_tune(
+    tier: string,
+    audio: boolean,
+    keep_screen: boolean,
+    mode: string,
+  ): Promise<MirrorState>
+  mirror_tcpip(serial: string): Promise<MirrorState>
+  // 形参不许叫 window：pywebview 用 Python 方法的参数名生成 new Function，那个 body 里写的是
+  // window.pywebview._jsApiCallback —— 参数叫 window 就把全局遮蔽掉，这一扇门在打包版里根本调不动。
+  mirror_display(window_mode: string, stretch: boolean): Promise<MirrorState>
+  mirror_key(key: string): Promise<MirrorState>
+  mirror_screen(question: string): Promise<MirrorScreenAnswer>
+  mirror_screen_vision(allow: boolean): Promise<MirrorScreenAnswer>
+  mirror_swipe(direction: string): Promise<MirrorState>
+  mirror_discover(): Promise<MirrorState>
   chat_sessions(): Promise<SessionList>
   chat_new_session(): Promise<SessionList>
   chat_switch(sessionId: string): Promise<SessionList>
@@ -1168,11 +1730,15 @@ interface PywebviewApi {
   state_snapshot(): Promise<UiSnapshot>
   settings_get(): Promise<SettingsSnapshot>
   settings_apply(patch: Record<string, unknown>): Promise<SettingsSnapshot>
-  list_endpoint_models(base_url: string, provider?: string): Promise<EndpointModels>
+  list_endpoint_models(
+    base_url: string,
+    provider?: string,
+    api_key?: string,
+  ): Promise<EndpointModels>
   usage_summary(days: number): Promise<UsageReport>
   chat_models(): Promise<ModelList>
   chat_pick(provider: string, model?: string): Promise<ModelList>
-  chat_tuning(thinking?: string, turns?: number): Promise<TuningResult>
+  chat_tuning(thinking?: string, turns?: number, tools?: boolean): Promise<TuningResult>
   llm_add_model(provider: string, modelId?: string, label?: string): Promise<ModelEditResult>
   llm_remove_model(provider: string, modelId?: string): Promise<ModelEditResult>
   audio_ready(ok: boolean, reason: string, role: string): Promise<AudioOutputState>
@@ -1355,6 +1921,258 @@ let mockAlerts: AlertRow[] = [
   },
 ]
 
+/**
+ * The four rows the shell returns, with the vertex counts measured on a real photo
+ * (a lying white tiger: 211 / 142 / 79 / 42 after the subject is cropped and cut a
+ * second time). Kept as data rather than a formula because the direction is the
+ * point: a looser tolerance has to come back with *fewer* lines, and a mock that got
+ * that backwards is how a picker gets built showing four identical cards.
+ */
+const mockCandidates: [number, number, number][] = [
+  [0.002, 0.1, 211],
+  [0.004, 0.18, 142],
+  [0.008, 0.26, 79],
+  [0.016, 0.36, 42],
+]
+const mockLabels = ['细线', '常规', '粗线', '厚块']
+let mockPets: PetFigureRow[] = []
+let mockCurrentPet = ''
+let mockPetSerial = 0
+
+/** A polygon that gets fewer corners and more thickness as the candidate index grows. */
+const mockTemplates: [string, string][] = [
+  ['坐猫', 'cat'],
+  ['团鸡', 'bird'],
+  ['垂耳狗', 'dog'],
+  ['团子', 'bun'],
+]
+const mockFur = '#c8a04a'
+
+/** Mirrors what ``pet_gallery.py`` reports, for browser checks without a shell. */
+const mockBundled: BundledModel[] = [
+  {
+    file: 'Qwen2.5-7B-Instruct.Q4_K_M.gguf',
+    label: 'Qwen2.5-7B',
+    size_mb: 4466,
+    present: true,
+    selected: true,
+    license: 'Apache-2.0',
+    measured: true,
+    thinking: false,
+    acts_verified: true,
+    gate_mb: 5200,
+    resident_mb: 5061,
+    cpu_mb: 4758,
+    tiers: [
+      { context: 2048, needs_free_mb: 5072, resident_mb: 5034 },
+      { context: 4096, needs_free_mb: 5200, resident_mb: 5061 },
+      { context: 8192, needs_free_mb: 5456, resident_mb: 5182 },
+      { context: 16384, needs_free_mb: 5968, resident_mb: 5226 },
+    ],
+  },
+  {
+    file: 'Qwen3-4B.Q4_K_M.gguf',
+    label: 'Qwen3-4B',
+    size_mb: 2590,
+    present: true,
+    selected: false,
+    license: 'Apache-2.0',
+    measured: true,
+    thinking: true,
+    acts_verified: false,
+    gate_mb: 3400,
+    resident_mb: 2828,
+    cpu_mb: 2700,
+    tiers: [
+      { context: 2048, needs_free_mb: 3300, resident_mb: 2854 },
+      { context: 4096, needs_free_mb: 3400, resident_mb: 2828 },
+      { context: 8192, needs_free_mb: 3600, resident_mb: 2959 },
+      { context: 16384, needs_free_mb: 4100, resident_mb: 3000 },
+    ],
+  },
+  {
+    file: 'Qwen3-1.7B-Q8_0.gguf',
+    label: 'Qwen3-1.7B',
+    size_mb: 1749,
+    present: true,
+    selected: false,
+    license: 'Apache-2.0',
+    measured: true,
+    thinking: true,
+    acts_verified: false,
+    gate_mb: 2300,
+    resident_mb: 2201,
+    cpu_mb: 2121,
+    tiers: [
+      { context: 2048, needs_free_mb: 2200, resident_mb: 2224 },
+      { context: 4096, needs_free_mb: 2300, resident_mb: 2201 },
+      { context: 8192, needs_free_mb: 2450, resident_mb: 2205 },
+      { context: 16384, needs_free_mb: 2700, resident_mb: 2260 },
+    ],
+  },
+  {
+    file: 'Qwen3-0.6B-Q8_0.gguf',
+    label: 'Qwen3-0.6B',
+    size_mb: 610,
+    present: true,
+    selected: false,
+    license: 'Apache-2.0',
+    measured: true,
+    thinking: true,
+    acts_verified: false,
+    gate_mb: 1000,
+    resident_mb: 895,
+    cpu_mb: 974,
+    tiers: [
+      { context: 2048, needs_free_mb: 950, resident_mb: 919 },
+      { context: 4096, needs_free_mb: 1000, resident_mb: 895 },
+      { context: 8192, needs_free_mb: 1100, resident_mb: 900 },
+      { context: 16384, needs_free_mb: 1300, resident_mb: 950 },
+    ],
+  },
+]
+
+let mockModelServer: ModelServerStatus = {
+  phase: 'off',
+  detail: '',
+  can_run: true,
+  reason: '',
+  model: 'Qwen2.5-7B-Instruct.Q4_K_M.gguf',
+  model_label: 'Qwen2.5-7B',
+  model_selected: '',
+  models: mockBundled,
+  port: 0,
+  context: 4096,
+  dialed_context: 4096,
+  acts: false,
+  needed_mb: 5200,
+  eager: false,
+  idle_seconds: 600,
+  load_ms: 0,
+  free_mb: 9000,
+}
+
+const mockGallery: GalleryModel[] = [
+  { id: 'builtin:ShibaInu', key: 'ShibaInu', name: '柴犬', kind: '动物', note: '坐着的那只', bytes: 1752268, clips: 12, url: 'models/ShibaInu.glb' },
+  { id: 'builtin:Fox', key: 'Fox', name: '狐狸', kind: '动物', note: '会回头张望', bytes: 1909976, clips: 12, url: 'models/Fox.glb' },
+  { id: 'builtin:YellowDragon', key: 'YellowDragon', name: '小龙', kind: '幻想', note: '会扑翅膀', bytes: 421472, clips: 4, url: 'models/YellowDragon.glb' },
+  { id: 'builtin:Wizard', key: 'Wizard', name: '小法师', kind: '人物', note: '带法杖', bytes: 2108476, clips: 15, url: 'models/Wizard.glb' },
+]
+
+function mockFigure(
+  name: string,
+  lines: number,
+  depth: number,
+  style = 'outline',
+  template = '',
+): PetFigureRow {
+  const points: string[] = []
+  for (let index = 0; index < lines; index += 1) {
+    const angle = (index / lines) * Math.PI * 2
+    const wobble = 1 + (((index * 7) % 3) - 1) * 0.06
+    points.push(
+      (60 + Math.cos(angle) * 30 * wobble).toFixed(1) + ',' + (84 + Math.sin(angle) * 54 * wobble).toFixed(1),
+    )
+  }
+  const svg =
+    '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="168">' +
+    '<polygon points="' + points.join(' ') + '" fill="none" stroke="#96e2ff" stroke-width="2"/></svg>'
+  mockPetSerial += 1
+  return {
+    id: 'pet:mock' + mockPetSerial.toString().padStart(8, '0'),
+    name,
+    lines,
+    aspect: 0.9,
+    coverage: 0.31,
+    depth,
+    style,
+    colour: style === 'cartoon' ? mockFur : '',
+    template,
+    has_texture: style === 'photo',
+    created_at: new Date().toISOString().slice(0, 19),
+    cost_ms: 700 + mockPetSerial,
+    preview: 'data:image/svg+xml;base64,' + btoa(svg),
+  }
+}
+
+/** 浏览器预览用的假引擎：本机 ComfyUI 在浏览器里根本不存在，所以本地那一档必须
+ * 老实说"这里没有"；云端那一档假装画了一张（存一张真 PNG 的 base64，让预览那条路
+ * 在开发模式下也真的被走一遍），并像后端一样记账：last_path、秒数、上一次的种子。 */
+const MOCK_IMAGE_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAGAAAABgCAIAAABt+uBvAAABRElEQVR4nO3ZMUpEURBE0dvDLMHYdbp80c4UXyCILziFaMfFFOfPd15e3x71+TOOx7cSnh+/PjL7x/GljS1IO/1UwrOHdjp8REys84BMbA7tmNic2zGxjYn1e4gotjGxfvkhoticazKxjYllYv3JdyYT25hYJpaJ9Q9vZrzuyINiFMvE+q8X576LzbkmD4obimVieVDMg2LX/ReTYnOuiWIbimViUSyKdd1BsTnXRLENxTKxKBbFuu6g2JxrotiGYplYFItiXXdQbM41UWxDsUwsikWxrjsoNueaKLahWCYWxaJY1x0Um3NNFNtQLBOLYlGs6w6Kzbkmim0ololFsSjWdQfF5lwTxTYUy8SiWBTruoNic66JYhuKZWJRLIp13UGxOddEsQ3FMrEoFsW67qDYnGui2IZimVgUi2Jdd1BszjW9A3WGD6M/xSE4AAAAAElFTkSuQmCC'
+
+const mockImage: ImageState = {
+  engine: 'auto',
+  engines: [
+    { id: 'auto', label: '自动（本地优先）', note: '浏览器预览里没有本机引擎，所以这一档实际会走云端。' },
+    { id: 'local', label: '只用本地 ComfyUI', note: '浏览器预览里不可能成 —— 这一格就是给你看拒绝长什么样的。' },
+    { id: 'cloud', label: '只用云端 API', note: '预览里按成功处理，一次网都不出。' },
+  ],
+  sizes: [
+    { size: '512x512', note: '最快的一档。作者这台 GTX 1650 实测 22 秒一张。' },
+    { size: '768x768', note: '比 512 慢约两倍多，细节多一截。' },
+    { size: '1024x1024', note: '4 GB 显存上是勉强的：慢，且和别的引擎抢显存时容易崩。' },
+  ],
+  size: '512x512',
+  steps: 20,
+  comfy_url: '',
+  comfy_dir: '',
+  cloud_base: '',
+  cloud_model: '',
+  cloud_key_set: false,
+  can_start_local: false,
+  vendored_engine: false,
+  local: null,
+  phase: 'off',
+  detail: '',
+  last_path: '',
+  last_seconds: 0,
+  tail: [],
+  error: '',
+}
+
+let mockImageSeed = 4242
+
+function mockImageFail(message: string): ImageAnswer {
+  mockImage.phase = 'failed'
+  mockImage.error = message
+  return {
+    ok: false,
+    path: '',
+    engine: '',
+    prompt: '',
+    size: '',
+    steps: 0,
+    seed: 0,
+    seconds: 0,
+    preview: '',
+    error: message,
+  }
+}
+
+const mockImageAnswer = (prompt: string): ImageAnswer => {
+  const size = mockImage.size
+  const seconds = Math.round(size === '512x512' ? 22 : size === '768x768' ? 55 : 120)
+  mockImageSeed += 1
+  mockImage.phase = 'idle'
+  mockImage.detail = '画好了（浏览器预览，没有真的引擎）'
+  mockImage.error = ''
+  mockImage.last_path = `C:\\Users\\你\\生图\\xiaoye_mock_${mockImageSeed}.png`
+  mockImage.last_seconds = seconds
+  return {
+    ok: true,
+    path: mockImage.last_path,
+    engine: 'cloud',
+    prompt,
+    size,
+    steps: mockImage.steps,
+    seed: mockImageSeed,
+    seconds,
+    preview: `data:image/png;base64,${MOCK_IMAGE_PNG}`,
+    error: '',
+  }
+}
+
+
 const mock: PywebviewApi = {
   async snapshot() {
     const jitter = (base: number, spread: number) =>
@@ -1415,7 +2233,14 @@ const mock: PywebviewApi = {
     return { ok: true, count, error: '' }
   },
   async app_info() {
-    return { name: '小夜', version: 'dev', engine: 'browser-mock', built: 'source' }
+    // The preview has to answer the same way the desktop does: whatever name the
+    // operator saved is the name the top bar wears.
+    return {
+      name: mockSettings.display_name || '小夜',
+      version: 'dev',
+      engine: 'browser-mock',
+      built: 'source',
+    }
   },
   async disk_scan() {
     const now = Date.now() / 1000
@@ -1472,6 +2297,19 @@ const mock: PywebviewApi = {
     return mockVoice.talk()
   },
   async chat_ask(text, attachments = []) {
+    const row = mockProviders.find((entry) => entry.name === mockPicked.provider)
+    if (row && needsKey(row)) {
+      // 同步那扇门也一样：桌面版此时根本发不出请求，返回空答案才是撒谎。
+      mockChat.status = 'failed'
+      mockChat.error = `API key environment variable '${row.key_variable}' is not set (provider='${row.name}', variable='${row.key_variable}')`
+      mockChat.error_kind = 'auth'
+      return {
+        question: text,
+        answer: '',
+        error: mockChat.error,
+        reasoning: '',
+      }
+    }
     const answer = '（浏览器预览模式的样例回答）我是小夜。桌面版里这句话来自真实模型。'
     // The desktop transcript is pushed from Python; the mock has to keep its own,
     // or the panel is empty in preview and nobody can tell that from a bug.
@@ -1483,16 +2321,38 @@ const mock: PywebviewApi = {
       reasoning: '',
     }
   },
-  async chat_send(text, attachments = [], conversation = '', _provider = '', model = '') {
+  async chat_send(text, attachments = [], conversation = '', provider = '', model = '') {
     // The preview browser has no Python behind it, so the mock answers on a timer: the
     // question lands at once and the answer arrives a beat later, which is the least
     // this can do without pretending a fake can stream.
+    const row = mockProviders.find((entry) => entry.name === (provider || mockPicked.provider))
+    const keyless = Boolean(row) && needsKey(row!)
     const answer = attachments.length
       ? `（浏览器预览模式的样例回答）我是小夜。带 ${attachments.length} 个附件，桌面版里这句话来自真实模型。`
       : '（浏览器预览模式的样例回答）我是小夜。桌面版里这句话来自真实模型。'
     mockHistory.push({ role: 'user', text })
+    mockChat.status = 'running'
+    mockChat.phase = '思考中'
+    mockChat.error = ''
+    mockChat.error_kind = ''
+    mockChat.note = ''
     window.setTimeout(() => {
-      mockHistory.push({ role: 'assistant', text: answer, model: model || 'mock' })
+      if (keyless && row) {
+        // 和桌面版同一句、同一个 kind：钥匙没填，请求在出门前就被自己拦下了。
+        mockChat.status = 'failed'
+        mockChat.phase = ''
+        mockChat.error = `API key environment variable '${row.key_variable}' is not set (provider='${row.name}', variable='${row.key_variable}')`
+        mockChat.error_kind = 'auth'
+      } else {
+        mockHistory.push({ role: 'assistant', text: answer, model: model || 'mock' })
+        mockChat.status = 'done'
+        mockChat.phase = ''
+        // 这一对勾了「不带工具」，所以这一轮的答案确实没有手：真版本在必须扔掉工具表才
+        // 答得上来时也是这么记的，不是失败，但不能不说。
+        const pair = mockTuning(`${(provider || mockPicked.provider)}\u0000${mockPicked.model}`)
+        mockChat.note = pair.tools ? '' : 'no_tools'
+      }
+      pushMockSnapshot()
     }, 400)
     return {
       ok: true,
@@ -1505,6 +2365,11 @@ const mock: PywebviewApi = {
   },
   async chat_clear() {
     mockHistory.length = 0
+    mockChat.status = 'idle'
+    mockChat.phase = ''
+    mockChat.error = ''
+    mockChat.error_kind = ''
+    mockChat.note = ''
     return { ok: true }
   },
   async chat_cancel() {
@@ -1541,23 +2406,7 @@ const mock: PywebviewApi = {
     return { tasks: [], error: '预览模式没有任务表' }
   },
   async chat_conversations() {
-    return {
-      conversations: [
-        {
-          id: 'hud',
-          title: '当前对话',
-          status: 'idle',
-          phase: '',
-          provider: '',
-          model: '',
-          turns: mockHistory.length,
-          active: true,
-          task_id: '',
-          error: '',
-        },
-      ],
-      error: '预览模式只有一个样例对话',
-    }
+    return { conversations: [mockCard()], error: '预览模式只有一个样例对话' }
   },
   async chat_open() {
     return { conversation: 'hud', conversations: [] }
@@ -1570,16 +2419,7 @@ const mock: PywebviewApi = {
     return { ok: false, error: '预览模式不能分对话选模型', provider, model }
   },
   async state_snapshot() {
-    return {
-      voice_state: mockTurn,
-      voice: mockVoice.status().phase,
-      voice_detail: mockVoice.status().detail,
-      history: [...mockHistory],
-      last_event: 'mock',
-      interrupted: false,
-      conversations: [],
-      streaming: null,
-    }
+    return mockSnapshot()
   },
   async settings_get() {
     return { ...mockSettings }
@@ -1587,16 +2427,21 @@ const mock: PywebviewApi = {
   async settings_apply(patch) {
     return applyMockSettings(patch)
   },
-  async list_endpoint_models(base_url, provider) {
+  async list_endpoint_models(base_url, provider, api_key) {
     // Same verdicts the real shell gives: a dead address says 连不上, a gateway that
     // wants a credential says so, and only a talking endpoint hands back ids.
     const url = String(base_url ?? '').trim()
+    const typed = String(api_key ?? '').trim()
     if (!/^https?:\/\//.test(url)) return { ok: false, models: [], error: '地址必须以 http:// 或 https:// 开头' }
     if (url.includes('11434')) {
       return { ok: true, models: ['qwen2.5:7b-instruct', 'qwen2.5vl:7b', 'llava:7b'], error: '' }
     }
     if (url.includes('1234')) return { ok: true, models: ['loaded-model-q4'], error: '' }
     if (url.includes('8080')) return { ok: true, models: ['gguf-model'], error: '' }
+    if (typed && url.includes('wkapi')) {
+      // 填了钥匙就答 —— 桌面版现在把这一格里的 Key 一起发出去，预览得跟着一样。
+      return { ok: true, models: ['gpt-5.6-sol'], error: '' }
+    }
     if (provider && mockProviders.some((row) => row.name === provider && row.key_set)) {
       return { ok: true, models: mockProviders.find((row) => row.name === provider)!.models.map((m) => m.id), error: '' }
     }
@@ -1618,9 +2463,9 @@ const mock: PywebviewApi = {
     mockPicked.model = wanted ? wanted.id : row.default_model
     return mockModels()
   },
-  async chat_tuning(thinking, turns) {
+  async chat_tuning(thinking, turns, tools) {
     const list = mockModels()
-    const current = { thinking: list.thinking, turns: list.turns }
+    const current = { thinking: list.thinking, turns: list.turns, tools: list.tools }
     if (thinking !== undefined && !mockThinkingLevels.includes(thinking)) {
       return { ok: false, error: `未知的思考强度：${thinking}`, ...current }
     }
@@ -1633,6 +2478,7 @@ const mock: PywebviewApi = {
     const next = {
       thinking: thinking === undefined ? stored.thinking : thinking,
       turns: turns === undefined ? stored.turns : turns,
+      tools: tools === undefined ? stored.tools : tools,
     }
     mockTunings[key] = next
     return { ok: true, error: '', ...next }
@@ -2085,6 +2931,221 @@ const mock: PywebviewApi = {
   async pet_arrived() {
     return { ok: false }
   },
+  async pet_assets() {
+    return {
+      ok: true,
+      pets: mockPets,
+      models: mockGallery,
+      current: mockCurrentPet,
+      can_generate: true,
+      reason: '',
+      error: '',
+    }
+  },
+  async pet_generate(photo: string, name?: string, style?: string) {
+    const base = (name || '照片').slice(0, 16)
+    if (!photo) {
+      return {
+        ok: false,
+        pets: mockPets,
+        current: mockCurrentPet,
+        made: [],
+        cost_ms: 0,
+        segment_ms: 0,
+        error: '没收到照片',
+      }
+    }
+    if (mockPets.length + mockCandidates.length > 12) {
+      return {
+        ok: false,
+        pets: mockPets,
+        current: mockCurrentPet,
+        made: [],
+        cost_ms: 0,
+        segment_ms: 0,
+        error: '最多存 12 个，先删一个再生成',
+      }
+    }
+    const wanted = ['outline', 'photo', 'cartoon'].includes(style || '') ? (style as string) : 'outline'
+    const made =
+      wanted === 'cartoon'
+        ? mockTemplates.map(([label, kind], index) =>
+            mockFigure(base + '·' + label, 30 + index, 0.22, 'cartoon', kind),
+          )
+        : mockCandidates.map(([, depth, lines], index) =>
+            mockFigure(base + '·' + mockLabels[index], lines, depth, wanted),
+          )
+    mockPets = [...mockPets, ...made]
+    return {
+      ok: true,
+      pets: mockPets,
+      current: mockCurrentPet,
+      can_generate: true,
+      reason: '',
+      made: made.map((row) => row.id),
+      cost_ms: 742,
+      segment_ms: 698,
+      error: '',
+    }
+  },
+  async pet_pick(petId: string) {
+    if (petId && !mockPets.some((row) => row.id === petId)) {
+      return {
+        ok: false,
+        pets: mockPets,
+        current: mockCurrentPet,
+        can_generate: true,
+        reason: '',
+        error: '这只宠物已经不在了',
+      }
+    }
+    mockCurrentPet = petId
+    return { ok: true, pets: mockPets, current: mockCurrentPet, can_generate: true, reason: '', error: '' }
+  },
+  async pet_delete(petId: string) {
+    if (!mockPets.some((row) => row.id === petId)) {
+      return {
+        ok: false,
+        pets: mockPets,
+        current: mockCurrentPet,
+        can_generate: true,
+        reason: '',
+        error: '没有这只宠物，或者已经删掉了',
+      }
+    }
+    mockPets = mockPets.filter((row) => row.id !== petId)
+    if (mockCurrentPet === petId) mockCurrentPet = ''
+    return { ok: true, pets: mockPets, current: mockCurrentPet, can_generate: true, reason: '', error: '' }
+  },
+  async model_server_status() {
+    return mockModelServer
+  },
+  async model_server_start() {
+    mockModelServer = { ...mockModelServer, phase: 'running', detail: '', port: 28181, load_ms: 12000 }
+    return mockModelServer
+  },
+  async model_server_stop() {
+    mockModelServer = { ...mockModelServer, phase: 'off', detail: '界面上停掉了', port: 0 }
+    return mockModelServer
+  },
+  async local_model_check(model: string, context: number) {
+    // 和后端 verdict_for 同一套判据：文件比总内存大就是硬拦，「照样加载」也越不过。
+    const row = mockBundled.find((item) => item.file === model)
+    const fileMb = row?.size_mb ?? 0
+    const need = row ? Math.round((row.gate_mb / 4096) * context) : 0
+    const total = Math.round(Math.max(mockModelServer.free_mb, 16384) * 1.6)
+    const hard = fileMb > 0 && fileMb > total
+    return {
+      ok: !hard,
+      reason: hard
+        ? `这个模型文件有 ${(fileMb / 1024).toFixed(1)} GB，比这台机器的总内存 ${(total / 1024).toFixed(0)} GB 还大`
+        : '',
+      free_mb: mockModelServer.free_mb,
+      total_mb: total,
+      need_mb: need,
+      file_mb: fileMb,
+      vram_mb: 4096,
+      gpu: 'Mock GPU',
+      disk_free_mb: 200000,
+      model_label: row?.label ?? '这个模型',
+      hard,
+    }
+  },
+
+  async local_advice() {
+    // 和后端规则引擎同一套算法：空闲除以 1.25 当预算，从大到小挑装得下的那个。
+    const budget = Math.floor(Math.min(mockModelServer.free_mb, 16384 * 0.6) / 1.25)
+    const fit = mockBundled.filter((row) => row.present).find((row) => row.gate_mb <= budget)
+    const canAct = fit !== undefined && fit.tiers.some((tier) => tier.needs_free_mb <= budget && tier.context >= 8192)
+    return {
+      model: fit ? fit.file : 'none',
+      context: canAct ? 8192 : 4096,
+      idle_minutes: budget - (fit?.gate_mb ?? 0) >= 4096 ? 30 : 10,
+      eager: false,
+      reason: fit
+        ? `空闲 ${Math.round(mockModelServer.free_mb / 1024)} GB，留了余量之后 ${fit.label} 装得下（要约 ${fit.gate_mb} MB）`
+        : `空闲只有 ${Math.round(mockModelServer.free_mb / 1024)} GB，最小的都放不下，这一台建议直接用云端模型`,
+      source: 'rule',
+      note: 'mock：这条是本地规则算的',
+    }
+  },
+  async local_advice_apply(advice) {
+    const known = mockBundled.find((row) => row.file === advice.model)
+    if (advice.model && advice.model !== 'none' && !known?.present) {
+      return { error: `「${advice.model}」的文件不在模型目录里，选不了`, snapshot: mockSettings }
+    }
+    if (!known && advice.model !== 'none') {
+      return { error: '这个离线模型这台机器上没有', snapshot: mockSettings }
+    }
+    Object.assign(mockSettings, {
+      local_model: advice.model,
+      local_model_label: known?.label ?? '不用离线模型',
+      local_context: advice.context,
+      local_idle_minutes: advice.idle_minutes,
+      local_eager: advice.eager,
+      local_needs_free_mb: known?.gate_mb ?? 0,
+    })
+    mockModelServer = {
+      ...mockModelServer,
+      model_selected: advice.model,
+      model: advice.model === 'none' ? '' : advice.model,
+      model_label: known?.label ?? '',
+      needed_mb: known?.gate_mb ?? 0,
+      phase: 'off',
+      port: 0,
+    }
+    return { error: '', snapshot: mockSettings }
+  },
+  async pet_model() {
+    const builtin = mockGallery.find((row) => row.id === mockCurrentPet)
+    if (builtin) {
+      return {
+        kind: 'builtin',
+        model: builtin,
+        id: builtin.id,
+        name: builtin.name,
+        depth: 0,
+        style: '',
+        colour: '',
+        template: '',
+        aspect: 1,
+        texture: '',
+        points: [],
+      }
+    }
+    const chosen = mockPets.find((row) => row.id === mockCurrentPet)
+    if (!chosen) {
+      return {
+        kind: '',
+        id: '',
+        name: '',
+        depth: 0,
+        style: '',
+        colour: '',
+        template: '',
+        aspect: 1,
+        texture: '',
+        points: [],
+      }
+    }
+    const points: [number, number][] = []
+    for (let index = 0; index < chosen.lines; index += 1) {
+      const angle = (index / chosen.lines) * Math.PI * 2
+      points.push([Math.cos(angle) * 0.45, Math.sin(angle) * 0.5 + 0.5])
+    }
+    return {
+      kind: 'silhouette',
+      id: chosen.id,
+      name: chosen.name,
+      depth: chosen.depth,
+      style: chosen.style,
+      colour: chosen.colour,
+      template: chosen.template,
+      aspect: chosen.aspect,
+      texture: chosen.has_texture ? chosen.preview : '',
+      points,
+    }
+  },
   async window_toggle_max() {
     maximizedMock = !maximizedMock
     return { error: '', maximized: maximizedMock }
@@ -2113,6 +3174,168 @@ const mock: PywebviewApi = {
   },
   async mobile_selftest() {
     return { plaintext_refused: true, note: '浏览器预览里没有端口可查' }
+  },
+  async mirror_state() {
+    return { ...mockMirror }
+  },
+
+  async image_state() {
+    return { ...mockImage }
+  },
+  async image_probe() {
+    // 浏览器里没有 8188，探测要照实说没找到 —— 面板上那句拒绝就是给用户看这个形状的。
+    mockImage.local = {
+      kind: 'comfyui',
+      url: 'http://127.0.0.1:8188',
+      ok: false,
+      detail: '浏览器预览里没有本机引擎（真的软件会去问 127.0.0.1:8188）',
+      version: '',
+      checkpoints: [],
+      probed_at: 0,
+    }
+    mockImage.error = ''
+    return { ...mockImage }
+  },
+  async image_generate(prompt, size) {
+    const wanted = String(size || '').trim()
+    if (wanted) mockImage.size = wanted
+    if (mockImage.engine === 'local') {
+      return mockImageFail('这一档只用本机 ComfyUI，而它没在跑。要么把引擎切到「自动」，要么把 ComfyUI 开着。')
+    }
+    if (!String(prompt || '').trim()) return mockImageFail('要一句画什么的描述，不能空着。')
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    return mockImageAnswer(String(prompt))
+  },
+  async image_tune(engine, size, steps) {
+    mockImage.engine = String(engine || mockImage.engine)
+    mockImage.size = String(size || mockImage.size)
+    mockImage.steps = Number(steps) || mockImage.steps
+    return { ...mockImage }
+  },
+  async image_setup(comfyUrl, comfyDir, cloudBase, cloudModel) {
+    mockImage.comfy_url = String(comfyUrl || '')
+    mockImage.comfy_dir = String(comfyDir || '')
+    mockImage.cloud_base = String(cloudBase || '')
+    mockImage.cloud_model = String(cloudModel || '')
+    mockImage.cloud_key_set = !!mockImage.cloud_base
+    return { ...mockImage }
+  },
+  async mirror_devices() {
+    return {
+      devices: [
+        {
+          serial: 'MOCK-PHONE-1',
+          state: 'device',
+          label: 'Mock Phone',
+          model: 'Mock Phone',
+          wireless: false,
+          ready: true,
+          hint: '',
+          channels: ['MOCK-PHONE-1'],
+        },
+      ],
+      error: '',
+    }
+  },
+  async mirror_start(serial) {
+    return mirrorStart(String(serial || ''))
+  },
+  async mirror_stop() {
+    return mirrorStop()
+  },
+  async mirror_connect(address) {
+    mockMirror.detail = `已连上 ${address}（浏览器预览，没有真的 adb）`
+    return { ...mockMirror }
+  },
+  async mirror_pair(address, code) {
+    mockMirror.detail = `配对 ${address} / ${code}（浏览器预览，没有真的 adb）`
+    return { ...mockMirror }
+  },
+  async mirror_display(window_mode, stretch) {
+    if (MIRROR_WINDOWS.some((row) => row.id === window_mode)) mockMirror.window = window_mode
+    mockMirror.stretch = !!stretch
+    if (window_mode === 'fullscreen' && mockMirror.phase === 'running') {
+      mockMirror.error = '全屏要重开一次投屏（或者现在这个窗口里按 F11）'
+    } else {
+      mockMirror.error = ''
+    }
+    return { ...mockMirror }
+  },
+  async mirror_screen(question) {
+    const allowVision = mockScreenVision
+    const lines: string[] = []
+    if (mockMirror.phase !== 'running') {
+      return {
+        text: ['这一屏我没读出来：没在投屏，adb 里也没剩下唯一那台。', '来源：读屏幕：没连着能读的手机'].join('\n'),
+        error: '没在投屏，不知道读哪台',
+        sources: ['读屏幕：没连着能读的手机'],
+        allow_vision: allowVision,
+      }
+    }
+    lines.push('手机上现在是：com.android.settings/.SubSettings（浏览器预览，手机自己没报，这是假的）')
+    lines.push('屏幕上的文字（手机自己报的，按出现顺序）：')
+    lines.push('关于平板｜型号 V2309A｜Android 版本 15')
+    if (allowVision) lines.push('看图模型说的：这是一台手机的“关于本机”页（浏览器预览，没有真的发出去）')
+    else lines.push('截图：没拿（没勾「允许把这块屏发给能看图的模型」）')
+    if (question) lines.push(`你问的是：${question}`)
+    lines.push('来源：手机自报 App；无障碍树：读到 3 条文字')
+    return { text: lines.join('\n'), error: '', sources: ['手机自报 App', '无障碍树：读到 3 条文字'], allow_vision: allowVision }
+  },
+  async mirror_screen_vision(allow) {
+    // 与后端同形：这扇门不重新读屏，只回这一格现在的样子。
+    if (typeof allow === 'boolean') mockScreenVision = allow
+    return {
+      text: mockScreenVision ? '能看图的那一档可以收这张屏了' : '不发给模型了：只用手机自己报上来的字和本地 OCR',
+      error: '',
+      sources: [],
+      allow_vision: mockScreenVision,
+    }
+  },
+  async mirror_key(key) {
+    // mock 也要按真后端的规矩记账：没在投屏就拒，并且说清是"不知道发给哪台"，不是"按了没反应"。
+    if (mockMirror.phase !== 'running') {
+      mockMirror.error = '现在没在投屏，不知道这一下要发给哪台手机；先点「开始投屏」'
+      return { ...mockMirror }
+    }
+    const row = MIRROR_KEYS.find((item) => item.id === key)
+    if (!row) {
+      mockMirror.error = `没有「${key}」这个按键`
+      return { ...mockMirror }
+    }
+    mockMirror.error = ''
+    mockMirror.detail = `已发给 ${mockMirror.serial}：${row.label}（浏览器预览，没有真的 adb）`
+    return { ...mockMirror }
+  },
+  async mirror_swipe(direction) {
+    if (mockMirror.phase !== 'running') {
+      mockMirror.error = '现在没在投屏，不知道这一下要发给哪台手机；先点「开始投屏」'
+      return { ...mockMirror }
+    }
+    const row = MIRROR_SWIPES.find((item) => item.id === direction)
+    if (!row) {
+      mockMirror.error = `没有「${direction}」这个滑动方向`
+      return { ...mockMirror }
+    }
+    mockMirror.error = ''
+    mockMirror.detail = `已发给 ${mockMirror.serial}：${row.label}（浏览器预览，没有真的 adb）`
+    return { ...mockMirror }
+  },
+  async mirror_discover() {
+    mockMirror.phase = 'off'
+    mockMirror.serial = ''
+    mockMirror.detail = '扫了本网段的 5555 端口，连上 1 台：192.168.1.23:5555（浏览器预览，没有真的网络）'
+    return { ...mockMirror }
+  },
+  async mirror_tune(tier, audio, keep_screen, mode) {
+    return mirrorTune(String(tier || ''), !!audio, !!keep_screen, String(mode || ''))
+  },
+  async mirror_tcpip(serial) {
+    const target = String(serial || 'MOCK-PHONE-1')
+    mockMirror.phase = 'off'
+    mockMirror.serial = ''
+    mockMirror.tail = []
+    mockMirror.detail = `已让 ${target} 改听 5555 端口，并连上 192.168.1.23:5555（浏览器预览，没有真的 adb）`
+    return { ...mockMirror }
   },
   async activity_log() {
     const now = Date.now() / 1000
@@ -2143,10 +3366,12 @@ const mock: PywebviewApi = {
 const mockThinkingLevels = ['off', 'low', 'medium', 'high']
 
 /** Preview-only memory for the two per-model knobs, keyed the way Python keys it. */
-const mockTunings: Record<string, { thinking: string; turns: number }> = {}
+const mockTunings: Record<string, { thinking: string; turns: number; tools: boolean }> = {}
 
 /** Preview-only selection, so a pick in the browser pass sticks across panels. */
-const mockPicked = { provider: 'qwenai', model: 'qwen3.8-flash' }
+/** What the preview pretends is picked. 本机那个免 Key 的行能答，两家没填 Key 的会拒 ——
+ *  这两条路都要能在预览里点出来，否则「没答上时屏上写什么」只能靠桌面版撞运气。 */
+const mockPicked = { provider: 'ollama', model: 'qwen2.5:7b-instruct' }
 
 /** The preview's providers. Mutated by the add/remove mocks so the panel can be
  *  exercised with a real edit rather than only read. */
@@ -2184,8 +3409,65 @@ const mockProviders: ProviderChoice[] = [
   },
 ]
 
-function mockTuning(key: string): { thinking: string; turns: number } {
-  return mockTunings[key] ?? { thinking: 'medium', turns: 10 }
+/**
+ * What the preview's one conversation is doing, kept like the desktop keeps it.
+ *
+ * The card is the page's only window onto a turn, so a mock that always said ``idle``
+ * could not show the one state that matters when nothing comes back. The failure mirrors
+ * the real one: a provider whose key variable is unset is refused *before* the request
+ * goes out, with the same sentence and the same ``auth`` kind.
+ */
+const mockChat = {
+  status: 'idle' as ConversationCard['status'],
+  phase: '',
+  error: '',
+  error_kind: '',
+  note: '',
+}
+
+function mockCard(): ConversationCard {
+  return {
+    id: 'hud',
+    title: '当前对话',
+    status: mockChat.status,
+    phase: mockChat.phase,
+    provider: mockPicked.provider,
+    model: mockPicked.model,
+    turns: mockHistory.length,
+    active: true,
+    task_id: '',
+    error: mockChat.error,
+    error_kind: mockChat.error_kind,
+    note: mockChat.note,
+  }
+}
+
+function mockSnapshot(): UiSnapshot {
+  return {
+    // 样例那一轮在跑就说「在想」，跑完交还给麦克风那侧记的状态。
+    voice_state: mockChat.status === 'running' ? 'processing' : mockTurn,
+    voice: mockVoice.status().phase,
+    voice_detail: mockVoice.status().detail,
+    history: [...mockHistory],
+    last_event: 'mock',
+    interrupted: false,
+    conversations: [mockCard()],
+    streaming: null,
+  }
+}
+
+/**
+ * 预览里没有 Python 的推送通道，所以样例自己敲这同一个门：``window.__jarvisState``。
+ *
+ * 不这么做的话，预览就只能在点发送的那一瞬间拉一次 —— 那之后无论答案来了还是这一轮
+ * 被拒了，屏上都看不见，等于把这次要验的那张卡片永远藏起来。
+ */
+function pushMockSnapshot(): void {
+  window.__jarvisState?.(mockSnapshot())
+}
+
+function mockTuning(key: string): { thinking: string; turns: number; tools: boolean } {
+  return mockTunings[key] ?? { thinking: 'medium', turns: 10, tools: true }
 }
 
 function mockModels(): ModelList {
@@ -2196,6 +3478,7 @@ function mockModels(): ModelList {
     model: mockPicked.model,
     thinking: mockTuning(`${mockPicked.provider}\u0000${mockPicked.model}`).thinking,
     turns: mockTuning(`${mockPicked.provider}\u0000${mockPicked.model}`).turns,
+    tools: mockTuning(`${mockPicked.provider}\u0000${mockPicked.model}`).tools,
     thinking_levels: mockThinkingLevels,
     turns_bounds: [0, 50],
   }
@@ -2264,6 +3547,7 @@ const mockSettings: SettingsSnapshot = {
   thinking_enabled: false,
   thinking_budget: 2048,
   thinking_budget_bounds: [64, 16000],
+  thinking_budget_honored: true,
   history_turns: 10,
   history_turns_bounds: [0, 50],
   ai_edited: [],
@@ -2278,6 +3562,31 @@ const mockSettings: SettingsSnapshot = {
   wake_keyword_max_chars: 12,
   thinking_loader: 'dots',
   thinking_loader_choices: ['dots', 'matrix', 'ring', 'bars'],
+  display_name: '小夜',
+  display_name_default: '小夜',
+  display_name_max: 12,
+  local_model: '',
+  local_model_label: 'Qwen2.5-7B',
+  local_models: mockBundled,
+  local_context: 4096,
+  local_context_options: [
+    { id: 2048, label: '2K', note: '本机常驻约 4.9 GB（没显卡的机器约 4.5 GB）；装不下 4702 token 的工具清单，这一档她只回答、不动手', needs_free_mb: 5072 },
+    { id: 4096, label: '4K', note: '本机常驻约 4.9 GB（没显卡的机器约 4.6 GB）；装不下 4702 token 的工具清单，这一档她只回答、不动手', needs_free_mb: 5200 },
+    { id: 8192, label: '8K', note: '本机常驻约 5.1 GB（没显卡的机器约 4.9 GB）；装得下那份 4702 token 的工具清单，她能一边答一边动手', needs_free_mb: 5456 },
+    { id: 16384, label: '16K', note: '本机常驻约 5.1 GB（没显卡的机器约 5.3 GB）；装得下那份 4702 token 的工具清单，她能一边答一边动手', needs_free_mb: 5968 },
+  ],
+  local_idle_minutes: 10,
+  local_idle_options: [
+    { id: 0, label: '不自动关（一直占内存）' },
+    { id: 2, label: '2 分钟' },
+    { id: 5, label: '5 分钟' },
+    { id: 10, label: '10 分钟' },
+    { id: 30, label: '30 分钟' },
+  ],
+  local_eager: false,
+  local_needs_free_mb: 5200,
+  local_free_mb: 9000,
+  local_tool_table_tokens: 4702,
   thinking_loader_options: [
     { id: 'dots', label: '三个点（默认）' },
     { id: 'matrix', label: '矩阵雨' },
@@ -2531,20 +3840,42 @@ function mockAddProviders(next: SettingsSnapshot, value: unknown): string {
     const row = (item ?? {}) as Record<string, unknown>
     const name = String(row.name ?? '').trim()
     const url = String(row.base_url ?? '').trim()
-    const model = String(row.model ?? '').trim()
+    // The same folding the shell does: a list of ids (or {id,label}), with the older
+    // single ``model`` still accepted. A mock that quietly kept only the first would
+    // make the multi-model row look broken here and fine on the desktop.
+    const listed: { id: string; label: string }[] = []
+    const seen = new Set<string>()
+    const push = (id: string, label: string): void => {
+      const wanted = id.trim()
+      if (wanted && !seen.has(wanted)) {
+        seen.add(wanted)
+        listed.push({ id: wanted, label: label.trim() || wanted })
+      }
+    }
+    if (Array.isArray(row.models)) {
+      for (const entry of row.models) {
+        if (entry && typeof entry === 'object') {
+          push(String((entry as { id?: unknown }).id ?? ''), String((entry as { label?: unknown }).label ?? ''))
+        } else {
+          push(String(entry ?? ''), '')
+        }
+      }
+    }
+    push(String(row.model ?? ''), '')
     if (!/^[a-z0-9_-]{1,32}$/.test(name)) return '模型名字只能是小写字母、数字、- 和 _，1-32 位'
     if (!/^https?:\/\//.test(url)) return `${name}：地址必须以 http:// 或 https:// 开头`
-    if (!model || /\s/.test(model) || model.length > 150) {
-      return `${name}：模型名不能含空格且不超过 150 字符`
-    }
+    if (!listed.length) return `${name}：至少写一个模型名`
+    const bad = listed.find((spec) => /\s/.test(spec.id) || spec.id.length > 150)
+    if (bad) return `${name}：模型名 ${bad.id} 不能含空格且不超过 150 字符`
     if (known.has(name)) return `已经有叫 ${name} 的模型；要改它就在那一行上改`
     known.add(name)
+    const model = listed[0].id
     const noKey = Boolean(row.key_optional)
     fresh.push({
       name,
       base_url: url,
       model,
-      models: [{ id: model, label: model }],
+      models: listed,
       default_model: model,
       key_env: `${name.toUpperCase().replace(/-/g, '_')}_API_KEY`,
       key_set: !noKey && Boolean(String(row.api_key ?? '').trim()),
@@ -2849,6 +4180,11 @@ export function fetchSnapshot(): Promise<Report> {
  */
 export function acknowledgeAlert(code: string): Promise<{ ok: boolean; error: string }> {
   return bridge().then((target) => target.alerts_ack(code))
+}
+
+/** 顶栏那颗「告警 N」点开的这一格要的数：在着的 + 最近恢复的。 */
+export function fetchAlerts(): Promise<{ active: AlertRow[]; history: AlertRow[]; error: string }> {
+  return bridge().then((target) => target.alerts())
 }
 
 export function acknowledgeAllAlerts(): Promise<{ ok: boolean; count: number; error: string }> {
@@ -3171,6 +4507,61 @@ export function setPetDragging(dragging: boolean): Promise<{ ok: boolean }> {
  * only way this window can be anything other than a rectangle -- colour-key
  * transparency was measured dead twice.
  */
+/** The generated figures, the one showing, and whether a photo can be used now. */
+export function petAssets(): Promise<PetAssets> {
+  return bridge().then((target) => target.pet_assets())
+}
+
+/** One photo in, four figures out. ``photo`` is a data URL the page resized itself. */
+export function petGenerate(
+  photo: string,
+  name?: string,
+  style?: string,
+): Promise<PetGenerated> {
+  return bridge().then((target) => target.pet_generate(photo, name, style))
+}
+
+/** Put one figure on the desktop. Empty string gives her the built-in one back. */
+export function petPick(petId: string): Promise<PetAssets> {
+  return bridge().then((target) => target.pet_pick(petId))
+}
+
+export function petDelete(petId: string): Promise<PetAssets> {
+  return bridge().then((target) => target.pet_delete(petId))
+}
+
+/** The polygon the pet page extrudes. Called on load and whenever the shell says the figure changed. */
+export function modelServerStatus(): Promise<ModelServerStatus> {
+  return bridge().then((target) => target.model_server_status())
+}
+
+export function modelServerStart(): Promise<ModelServerStatus> {
+  return bridge().then((target) => target.model_server_start())
+}
+
+export function modelServerStop(): Promise<ModelServerStatus> {
+  return bridge().then((target) => target.model_server_stop())
+}
+
+/** 让后端看一眼这台机器，回一套该用的离线模型与旋钮。可能要等模型先加载。 */
+/** 选中那一刻先问一句"这台接得住吗"。读的是后端同一份判定，不改任何设置。 */
+export function localModelCheck(model: string, context: number): Promise<GateCheck> {
+  return bridge().then((target) => target.local_model_check(model, context))
+}
+
+export function localAdvice(): Promise<LocalAdvice> {
+  return bridge().then((target) => target.local_advice())
+}
+
+/** 把建议卡按下去。后端会再校验一遍，不在档位里的值一律拒。 */
+export function localAdviceApply(advice: LocalAdvice): Promise<{ error: string; snapshot: SettingsSnapshot }> {
+  return bridge().then((target) => target.local_advice_apply(advice))
+}
+
+export function petModel(): Promise<SilhouetteModel> {
+  return bridge().then((target) => target.pet_model())
+}
+
 export function pushPetFrame(png: string): Promise<{ ok: boolean }> {
   return bridge().then((target) => target.pet_frame(png))
 }
@@ -3412,9 +4803,19 @@ export function saveSettings(patch: Record<string, unknown>): Promise<SettingsSn
   return bridge().then((target) => target.settings_apply(patch))
 }
 
-/** Ask an endpoint which models it serves, so 起始模型 is a pick instead of a copy job. */
-export function listEndpointModels(base_url: string, provider = ''): Promise<EndpointModels> {
-  return bridge().then((target) => target.list_endpoint_models(base_url, provider))
+/**
+ * Ask an endpoint which models it serves, so the model list is a pick instead of a copy job.
+ *
+ * ``api_key`` is the key typed into the add form for a row that does not exist yet -- the
+ * only credential there is for a gateway that guards ``/models``. It goes out as an
+ * argument to one request and is kept nowhere: not in preferences, not in a log line.
+ */
+export function listEndpointModels(
+  base_url: string,
+  provider = '',
+  api_key = '',
+): Promise<EndpointModels> {
+  return bridge().then((target) => target.list_endpoint_models(base_url, provider, api_key))
 }
 
 export function fetchUsage(days: number): Promise<UsageReport> {
@@ -3453,8 +4854,12 @@ export function pickModel(provider: string, model = ''): Promise<ModelList> {
 }
 
 /** Save the thinking level and/or context size remembered for the current model. */
-export function saveTuning(thinking?: string, turns?: number): Promise<TuningResult> {
-  return bridge().then((target) => target.chat_tuning(thinking, turns))
+export function saveTuning(
+  thinking?: string,
+  turns?: number,
+  tools?: boolean,
+): Promise<TuningResult> {
+  return bridge().then((target) => target.chat_tuning(thinking, turns, tools))
 }
 
 /** Add one model to a provider's list. A window edit, not a config.yaml write. */
@@ -3525,4 +4930,140 @@ export function revokeAllDevices(): Promise<{ revoked: number; devices: MobileDe
 /** Measure whether a plaintext request is really refused, instead of asserting it. */
 export function runMobileSelftest(): Promise<{ plaintext_refused: boolean; note: string }> {
   return bridge().then((target) => target.mobile_selftest())
+}
+
+/**
+ * Where the phone mirror is. Cheap and side-effect free: the panel polls it every
+ * second and a half while open, so nothing in here may shell out to ``adb``.
+ */
+export function fetchMirrorState(): Promise<MirrorState> {
+  return bridge().then((target) => target.mirror_state())
+}
+
+/** The phones ``adb`` can see. Slower (it runs adb), so only on open and on 刷新. */
+
+/** 生图那一格的快照。轮询安全：服务端那一侧一个网络请求都不发。 */
+export function fetchImageState(): Promise<ImageState> {
+  return bridge().then((target) => target.image_state())
+}
+
+/** 真去问一次本机有没有 ComfyUI 在跑。只在按键时发，不进轮询。 */
+export function probeImageEngine(): Promise<ImageState> {
+  return bridge().then((target) => target.image_probe())
+}
+
+/** 画一张。慢是常态，所以调用方自己转圈，别挂在 1.5 秒的轮询上。 */
+export function generateImage(prompt: string, size: string): Promise<ImageAnswer> {
+  return bridge().then((target) => target.image_generate(prompt, size))
+}
+
+/** 档位、尺寸、步数一次发齐（分开发会互相盖掉，投屏那两格第 95 轮就是这么坏的）。 */
+export function tuneImage(engine: string, size: string, steps: number): Promise<ImageState> {
+  return bridge().then((target) => target.image_tune(engine, size, steps))
+}
+
+/** 两个地址、一个目录、一个模型名。钥匙不在这儿 —— 它走设置那扇门，只进环境变量。 */
+export function setupImage(
+  comfyUrl: string,
+  comfyDir: string,
+  cloudBase: string,
+  cloudModel: string,
+): Promise<ImageState> {
+  return bridge().then((target) => target.image_setup(comfyUrl, comfyDir, cloudBase, cloudModel))
+}
+
+export function fetchMirrorDevices(): Promise<MirrorDevices> {
+  return bridge().then((target) => target.mirror_devices())
+}
+
+/** Open the scrcpy window. Empty serial means "the one phone that is connected". */
+export function startMirror(serial: string): Promise<MirrorState> {
+  return bridge().then((target) => target.mirror_start(serial))
+}
+
+export function stopMirror(): Promise<MirrorState> {
+  return bridge().then((target) => target.mirror_stop())
+}
+
+/** ``adb connect`` to the address the phone's 无线调试 page is showing. */
+export function connectMirrorWireless(address: string): Promise<MirrorState> {
+  return bridge().then((target) => target.mirror_connect(address))
+}
+
+/** ``adb pair`` with the six-digit code. Both are printed on the phone's dialog. */
+export function pairMirrorWireless(address: string, code: string): Promise<MirrorState> {
+  return bridge().then((target) => target.mirror_pair(address, code))
+}
+
+/**
+ * Remember the picture settings. One call carries all three because the panel always
+ * knows the whole triple, and sending ``undefined`` for "leave that alone" is a shape
+ * pywebview has no good answer for.
+ */
+export function tuneMirror(
+  tier: string,
+  audio: boolean,
+  keepScreen: boolean,
+  mode: string,
+): Promise<MirrorState> {
+  return bridge().then((target) => target.mirror_tune(tier, audio, keepScreen, mode))
+}
+
+/**
+ * ``adb tcpip 5555`` on a plugged-in phone, then connect to the address it reports.
+ *
+ * This is the only way onto WiFi for Android 10 and older, which have no 无线调试
+ * pairing dialog at all.
+ */
+export function openMirrorWirelessPort(serial: string): Promise<MirrorState> {
+  return bridge().then((target) => target.mirror_tcpip(serial))
+}
+
+/**
+ * Choose how big the scrcpy window is, and whether the picture stretches to fill it.
+ *
+ * 铺满 works on the open window; 全屏 is a launch flag, so the answer says when a
+ * restart is what is actually left.
+ */
+export function displayMirrorWindow(windowMode: string, stretch: boolean): Promise<MirrorState> {
+  return bridge().then((target) => target.mirror_display(windowMode, stretch))
+}
+
+/**
+ * Press one of the phone's own three buttons: 返回 / 主页 / 多任务.
+ *
+ * It changes the phone, so the answer says which phone it went to -- or why it could
+ * not say. Never fire this when nothing is mirrored: the backend refuses, and the panel
+ * shows that refusal instead of a silent nothing.
+ */
+export function pressMirrorKey(key: string): Promise<MirrorState> {
+  return bridge().then((target) => target.mirror_key(key))
+}
+
+/**
+ * 读手机那一屏。回答里的 ``sources`` 是重点：哪条路走了、哪条没走、为什么没走，
+ * 界面要能说出来，不然"看不到"和"没权限看"就成了一回事。
+ */
+export function readMirrorScreen(question = ''): Promise<MirrorScreenAnswer> {
+  return bridge().then((target) => target.mirror_screen(question))
+}
+
+/** 那格「允许把这块屏发给能看图的模型」。传 undefined 是只读。 */
+export function setMirrorScreenVision(allow: boolean): Promise<MirrorScreenAnswer> {
+  return bridge().then((target) => target.mirror_screen_vision(allow))
+}
+
+/** Fling the mirrored phone: 'next' 往上滑（抖音下一条）、'prev' 往下滑。 */
+export function swipeMirrorPhone(direction: string): Promise<MirrorState> {
+  return bridge().then((target) => target.mirror_swipe(direction))
+}
+
+/**
+ * Sweep this machine's /24 for phones listening on the tcpip port and connect them.
+ *
+ * Takes a couple of seconds, so the panel shows 正在扫本网段… while it runs. It is a
+ * button, never a timer.
+ */
+export function discoverMirrorPhones(): Promise<MirrorState> {
+  return bridge().then((target) => target.mirror_discover())
 }

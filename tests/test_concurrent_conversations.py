@@ -762,3 +762,51 @@ def test_the_service_still_answers_without_any_of_the_new_wiring() -> None:
     reply = service.ask("今天星期几")
     assert reply.answer == "星期六"
     assert dataclasses.is_dataclass(reply)
+
+
+class TestThePageSendsToTheTabItIsShowing:
+    """最后一跳：页面上按下「发送」，得把**这个会话**钉住的那一对模型带下去。
+
+    后端一直支持点名 ``(provider, model)``，可 ChatPanel 无条件发的是顶栏那两个 ref ——
+    那是全局选择。在 B 会话里把模型换成 deepseek、标签写着 deepseek，问出来的还是 qwen，
+    而用量面板事后给出另一个数（r86 审计抓到的）。
+    """
+
+    def _panel(self) -> str:
+        return (
+            Path(__file__).resolve().parents[1]
+            / "frontend"
+            / "src"
+            / "components"
+            / "ChatPanel.vue"
+        ).read_text(encoding="utf-8")
+
+    def test_a_pinned_tab_sends_its_own_pair(self) -> None:
+        panel = self._panel()
+        start = panel.index("const pinned = Boolean(")
+        send = panel[start : panel.index(": await chatCollaborate(", start)]
+        assert "const tab = activeTab.value" in panel[start - 400 : start]
+        assert "pinned ? (tab?.provider ?? '') : provider.value" in send
+        assert "pinned ? (tab?.model ?? '') : model.value" in send
+        assert "chatSend(" in send, "这两个三元必须落在发送那一次调用里"
+
+    def test_the_door_to_a_second_conversation_is_open_from_the_first(self) -> None:
+        """只有一路对话的时候，「＋ 另开一个对话」也得在屏上。
+
+        那枚按钮长在对话列表那一行里，而这一行以前挂着 `v-if="tabs.length > 1 || showTabStrip"`，
+        后半句 `showTabStrip` 就是 `tabs.value.length > 1` —— 自己和自己重复。真有一张卡片
+        的时候这行连按钮一起吞掉。**打包版实测出厂就给两张卡片**，所以客户还没撞上过：
+        这一条是埋着的雷被拆掉，不是已经发生的故障（第一版我把它写成"多会话永远点不出来"，
+        那是没量就下结论，改回来说实话）。
+        """
+        panel = self._panel()
+        at = panel.index('class="chat__tabs"')
+        nav = panel[panel.rindex("<nav", 0, at) : at]
+        assert "v-if" not in nav, "这一行再挂 v-if，＋ 就会被一起藏掉"
+        assert 'title="另开一个对话"' in panel, "门没了"
+        assert "showTabStrip" not in panel, "那个永远和 tabs.length > 1 同值的开关该删掉"
+
+    def test_an_unpinned_tab_still_follows_the_window(self) -> None:
+        """没钉过的会话照旧跟着顶栏 —— 反过来钉会把新会话也钉死在第一次的那个模型上。"""
+        panel = self._panel()
+        assert "const pinned = Boolean(tab?.provider || tab?.model)" in panel

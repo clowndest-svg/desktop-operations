@@ -44,7 +44,7 @@
           </label>
           <div class="ss__body">
             <strong :title="session.title">{{ session.title }}</strong>
-            <em>{{ session.turns }} 轮 · {{ session.updated_at }}</em>
+            <em>{{ session.turns }} 轮 · {{ stamp(session.updated_at) }}</em>
           </div>
           <span class="ss__ops">
             <button v-if="session.id !== current" class="hud-btn" type="button" :disabled="working" @click="openSession(session.id)">
@@ -84,8 +84,7 @@
       </p>
 
       <p class="ss__note">
-        对话存在本机 SQLite 里（与 token 账本同一个库），不上传。「清空」只是开一场新对话，旧的仍在这里。
-        勾上几场一起删走的，是上面「删除所选」那一格 —— 和单条删除一样要再确认一次。
+        对话存在本机 SQLite 里（与 token 账本同一个库），不上传。「清空」只是开一场新对话，旧的仍在这里。勾上几场一起删走的，是上面「删除所选」那一格 —— 和单条删除一样要再确认一次。
       </p>
     </section>
   </div>
@@ -109,6 +108,7 @@ import {
   switchSession,
   type SessionInfo,
 } from '@/api/bridge'
+import { stamp } from '@/api/time'
 
 const props = defineProps<{ open: boolean }>()
 const emit = defineEmits<{ (e: 'close'): void; (e: 'switched'): void }>()
@@ -335,7 +335,8 @@ watch(
 
 .ss__row {
   display: grid;
-  grid-template-columns: 1fr auto;
+  /* minmax(0, 1fr)：不给 0 下限，长标题会把整行撑开，右边那三枚按钮被挤出弹窗。 */
+  grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 10px;
   align-items: center;
   padding: 6px 9px;
@@ -348,22 +349,34 @@ watch(
   background: rgba(77, 216, 255, 0.07);
 }
 
+/*
+ * 一行摆完：标题、几轮、什么时候聊过，然后才是那三枚按钮。
+ * 以前标题和"4 轮 · 时间"是上下两行，一条对话占两块高度，列表里翻三场就到底了。
+ */
+.ss__body {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
 .ss__body strong {
-  display: block;
   font-size: 12px;
   color: var(--hud-text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 320px;
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 .ss__body em {
-  display: block;
-  margin-top: 2px;
   font-size: 10px;
   font-style: normal;
   color: var(--hud-dim);
+  flex: none;
+  /* 时间戳是这行里最不该被挤掉的一段：宁可省略标题。 */
+  font-variant-numeric: tabular-nums;
 }
 
 .ss__ops {

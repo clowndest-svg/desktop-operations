@@ -54,6 +54,7 @@ DIST_TO_IMPORTS: dict[str, tuple[str, ...]] = {
     "pyinstaller": ("PyInstaller",),
     "apscheduler": ("apscheduler",),
     "rapidocr-onnxruntime": ("rapidocr_onnxruntime",),
+    "onnxruntime": ("onnxruntime",),
     "mss": ("mss",),
     "pillow": ("PIL",),
     "playwright": ("playwright",),

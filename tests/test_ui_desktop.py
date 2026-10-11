@@ -56,7 +56,7 @@ from jarvis.ui.desktop import (
 from jarvis.ui.state_bridge import StateBridge, UiState, UiVoiceState
 from jarvis.workflow.types import TriggerKind as WorkflowTriggerKind
 from jarvis.workflow.types import WorkflowDef, WorkflowRun
-from tests._fakes import FakeLlmClient
+from tests._fakes import FakeLlmClient, json_object
 
 
 class FakeLoop:
@@ -106,13 +106,22 @@ class FakeWindow:
 
 
 class FakeSettings:
-    """The one question the bridge asks the settings store about a typed answer."""
+    """What the bridge asks the settings store: whether a typed answer may be read
+    aloud, and -- before anything decides to load a model -- to push the stored dials
+    into the llm layer. `tunes` is how the tests see that second one actually happened."""
 
     def __init__(self, *, speaks_typed: bool = True) -> None:
         self._speaks_typed = speaks_typed
+        self.tunes = 0
 
     def speaks_typed(self) -> bool:
         return self._speaks_typed
+
+    def tune_local(self) -> Any:
+        from jarvis.llm.local_server import Tuning
+
+        self.tunes += 1
+        return Tuning()
 
 
 class _NoTelemetry:
@@ -150,6 +159,7 @@ def _bridge(
     usage: Any = None,
     alerts: Any = None,
     system: SystemService | None = None,
+    pets: Any = None,
 ) -> HudBridge:
     if system is None:
         system = SystemService(_NoTelemetry(), alerts=alerts)
@@ -178,6 +188,7 @@ def _bridge(
         model_probe=model_probe,
         usage=usage,
         alerts=alerts,
+        pets=pets,
     )
     if turns is not None:
         bridge.attach_turns(turns)
@@ -373,6 +384,7 @@ class TestChatSurface:
             "task_id": "",
             "cancelled": False,
             "record": "",
+            "tools": {"count": 0, "used": [], "pack": "", "degraded": ""},
         }
 
     def test_a_typed_turn_lands_in_the_same_transcript_as_a_spoken_one(self, tmp_path: Any) -> None:
@@ -1060,6 +1072,7 @@ class _FakePet:
         self.grips: list[object] = []
         self.dragging: list[bool] = []
         self.palettes: list[BubblePalette] = []
+        self.figures: list[bool] = []
 
     def report_grip(self, rect: object) -> None:
         self.grips.append(rect)
@@ -1072,6 +1085,96 @@ class _FakePet:
 
     def set_actions(self, actions: object) -> None:
         return None
+
+    def apply_figure(self) -> bool:
+        self.figures.append(True)
+        return True
+
+
+class TestGeneratedPets:
+    """The five doors the 「桌面形象」 panel calls, on a real bridge and a real library.
+
+    The service is the one from the app with only the segmenter faked, so what is
+    exercised here is the wiring: who gets told when the figure changes, what a
+    missing service answers, and whether the reason reaches the page.
+    """
+
+    @staticmethod
+    def _service(tmp_path: Any) -> Any:
+        from jarvis.app.pet_library import PetLibrary
+        from jarvis.app.pet_service import PetService
+        from tests.test_app_pet_service import _data_url, _fake_cut, _fake_shot
+
+        library = PetLibrary(tmp_path / "pets")
+        library.start()
+        service = PetService(
+            library, Preferences(tmp_path / "preferences.json"), cut=_fake_cut, shot=_fake_shot
+        )
+        return service, _data_url()
+
+    def test_every_door_answers_with_a_reason_when_there_is_no_service(self, tmp_path: Any) -> None:
+        bridge = _bridge(tmp_path)
+
+        assert json_object(bridge.pet_assets())["can_generate"] is False
+        assert "宠物生成不可用" in str(json_object(bridge.pet_assets())["reason"])
+        assert json_object(bridge.pet_generate("x"))["ok"] is False
+        assert json_object(bridge.pet_pick("pet:whatever"))["ok"] is False
+        assert json_object(bridge.pet_delete("pet:whatever"))["ok"] is False
+        assert json_object(bridge.pet_model())["points"] == []
+
+    def test_generating_lists_the_four_candidates_without_touching_the_window(
+        self, tmp_path: Any
+    ) -> None:
+        service, photo = self._service(tmp_path)
+        pet = _FakePet()
+        bridge = _bridge(tmp_path, pets=service)
+        bridge.attach_pet(cast(Any, pet))
+
+        answer = json_object(bridge.pet_generate(photo, "白虎"))
+
+        assert answer["ok"] is True
+        assert len(answer["pets"]) == 4
+        assert pet.figures == [], "generating changes nobody's figure; picking does"
+
+    def test_picking_sends_the_page_a_figure_cue(self, tmp_path: Any) -> None:
+        service, photo = self._service(tmp_path)
+        pet = _FakePet()
+        bridge = _bridge(tmp_path, pets=service)
+        bridge.attach_pet(cast(Any, pet))
+        made = json_object(bridge.pet_generate(photo, "白虎"))["made"]
+
+        answer = json_object(bridge.pet_pick(made[1]))
+
+        assert answer["ok"] is True
+        assert answer["current"] == made[1]
+        assert pet.figures == [True]
+        model = json_object(bridge.pet_model())
+        assert model["id"] == made[1]
+        assert len(model["points"]) > 8
+
+    def test_a_bad_photo_answers_on_the_screen_instead_of_raising(self, tmp_path: Any) -> None:
+        service, _ = self._service(tmp_path)
+        bridge = _bridge(tmp_path, pets=service)
+
+        answer = json_object(bridge.pet_generate("data:image/png;base64,###", "白虎"))
+
+        assert answer["ok"] is False
+        assert "没传过来" in str(answer["error"])
+
+    def test_deleting_the_one_on_desktop_cues_the_page_to_go_back(self, tmp_path: Any) -> None:
+        service, photo = self._service(tmp_path)
+        pet = _FakePet()
+        bridge = _bridge(tmp_path, pets=service)
+        bridge.attach_pet(cast(Any, pet))
+        made = json_object(bridge.pet_generate(photo, "白虎"))["made"]
+        json_object(bridge.pet_pick(made[0]))
+
+        answer = json_object(bridge.pet_delete(made[0]))
+
+        assert answer["ok"] is True
+        assert answer["current"] == ""
+        assert len(pet.figures) == 2
+        assert json_object(bridge.pet_model())["points"] == []
 
 
 class TestPetSurface:
@@ -2025,12 +2128,39 @@ class TestTheModelPickersOnTheBridge:
     def test_the_two_knobs_answer_with_the_pair_they_stored(self, tmp_path: Any) -> None:
         bridge, _, _ = self._real(tmp_path)
 
-        assert bridge.chat_tuning(thinking="high", turns=20) == {
+        answer = bridge.chat_tuning(thinking="high", turns=20)
+
+        # 只钉调用方据以行动的那几格：`chat_tuning` 的回答还带回档位、精确预算、
+        # 有没有单独设过（r85 加的），整字典相等会把它们一起钉死。
+        assert {
+            key: answer[key]
+            for key in ("ok", "error", "provider", "model", "thinking", "turns", "tools")
+        } == {
             "ok": True,
             "error": "",
+            "provider": "alpha",
+            "model": "alpha-1",
             "thinking": "high",
             "turns": 20,
+            "tools": True,
         }
+
+    def test_the_tool_knob_is_the_third_one_and_moves_on_its_own(self, tmp_path: Any) -> None:
+        """Turning the tool table off must not rewrite the other two knobs.
+
+        The page sends one knob per call, so a backend that echoed defaults would put
+        the thinking level back to 中度 the moment somebody unchecked 带工具 -- and the
+        one number the operator can check against a bill is the one that silently moved.
+        """
+        bridge, _, _ = self._real(tmp_path)
+        bridge.chat_tuning(thinking="high", turns=20)
+
+        answer = bridge.chat_tuning(tools=False)
+
+        assert answer["tools"] is False
+        assert answer["thinking"] == "high"
+        assert answer["turns"] == 20
+        assert bridge.chat_models()["tools"] is False
 
     def test_a_bad_knob_value_is_refused_with_a_reason(self, tmp_path: Any) -> None:
         bridge, _, _ = self._real(tmp_path)
@@ -3231,3 +3361,329 @@ class TestBatchDeletesOnTheBridge:
 
         assert answer["error"]
         assert library.removed == []
+
+
+class TestATurnThatAnsweredNothingSaysWhy:
+    """模型没回复的那一轮：任务表要落终态，卡片要把原因带到页面上。
+
+    走的是真 ``TurnRegistry`` 和真 ``StateBridge`` ——界面上那张「这句我没答上」读的就是
+    这两个的产物，用替身测等于没测。
+    """
+
+    def test_a_refused_key_lands_as_a_failed_task_and_a_card_with_a_reason(
+        self, tmp_path: Any
+    ) -> None:
+        from jarvis.app.chat_service import ChatService
+        from jarvis.app.turns import STATE_FAILED, TurnRegistry
+        from jarvis.llm.errors import LlmAuthError
+        from jarvis.ui.state_bridge import StateBridge
+
+        refusal = LlmAuthError("'ag-claude' rejected the API key", details={"status": 401})
+
+        class Refuses:
+            """A client that answers nothing, the way a dead key answers.
+
+            Both doors raise: the page's turn streams, so ``complete_stream`` is the one
+            that gets called, and a test that only broke ``complete`` would be testing
+            a path this window never takes.
+            """
+
+            provider_name = "ag-claude"
+            model = "claude-opus-5"
+
+            def complete(self, messages: Any, *, options: Any = None) -> Any:
+                raise refusal
+
+            def complete_stream(
+                self,
+                messages: Any,
+                *,
+                options: Any = None,
+                on_text: Any = None,
+                should_stop: Any = None,
+            ) -> Any:
+                raise refusal
+
+            def stream(self, messages: Any, *, options: Any = None) -> Any:
+                return iter(())
+
+        state = StateBridge()
+        registry = TurnRegistry()
+        chat = ChatService(lambda: Refuses())
+        chat.start()
+        bridge = _bridge(tmp_path, chat=chat, state=state, turns=registry)
+
+        started = bridge.chat_send("hello")
+        task_id = str(started["task_id"])
+        assert registry.wait(task_id, 5.0), "这一轮还挂着，终态无从测起"
+
+        task = registry.get(task_id)
+        assert task is not None
+        assert task.state == STATE_FAILED, "没答上的一轮记成 done，任务表就成了第二个沉默的地方"
+        assert "rejected the API key" in task.error
+
+        card = next(
+            row for row in state.snapshot().conversations if row.id == started["conversation"]
+        )
+        assert card.status == "failed"
+        assert "rejected the API key" in card.error
+        assert card.error_kind == "auth", "界面按这个挑下一步；没有它就只剩一句英文报错"
+        assert card.to_dict()["error_kind"] == "auth", "页面只能从 to_dict 里读到它"
+        assert state.snapshot().voice_state is UiVoiceState.IDLE, "「思考中」得跟着收掉"
+
+    def test_an_answered_turn_still_ends_as_done(self, tmp_path: Any) -> None:
+        """反向那一条：改成「一律 failed」也会让这条红。"""
+        from jarvis.app.chat_service import ChatService
+        from jarvis.app.turns import STATE_DONE, TurnRegistry
+        from jarvis.ui.state_bridge import StateBridge
+        from tests._fakes import FakeLlmClient
+
+        state = StateBridge()
+        registry = TurnRegistry()
+        chat = ChatService(lambda: FakeLlmClient("今天是星期六"))
+        chat.start()
+        bridge = _bridge(tmp_path, chat=chat, state=state, turns=registry)
+
+        started = bridge.chat_send("今天星期几")
+        task_id = str(started["task_id"])
+        assert registry.wait(task_id, 5.0)
+
+        task = registry.get(task_id)
+        assert task is not None and task.state == STATE_DONE
+        card = next(
+            row for row in state.snapshot().conversations if row.id == started["conversation"]
+        )
+        assert card.error_kind == ""
+
+
+class TestListingModelsOfARowThatDoesNotExistYet:
+    """「先把 Key 填上再拉」——而 Key 就填在它上面那一格里。
+
+    添加表单里的这一行还没存过，环境里没有任何它的凭据可查，所以那一格必须跟着请求
+    发出去。这三条钉的是发出去的到底是哪一把：填的优先、没填才回落到环境、以及
+    回落时确实读到了环境里那把。
+    """
+
+    @staticmethod
+    def _capture(monkeypatch: Any) -> dict[str, object]:
+        import jarvis.ui.desktop as desktop
+
+        seen: dict[str, object] = {}
+
+        def fake(
+            base_url: object, *, timeout_seconds: float, api_key: str
+        ) -> tuple[list[str], str]:
+            del base_url, timeout_seconds
+            seen["api_key"] = api_key
+            return ["m-1"], ""
+
+        monkeypatch.setattr(desktop, "list_endpoint_models", fake)
+        return seen
+
+    def test_the_key_typed_in_the_form_goes_out_with_the_request(
+        self, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        bridge = _bridge(tmp_path)
+        seen = self._capture(monkeypatch)
+
+        answer = bridge.list_endpoint_models("http://127.0.0.1:8797/v1", "", "sk-typed")
+
+        assert answer["ok"] is True
+        assert seen["api_key"] == "sk-typed"
+
+    def test_a_typed_key_wins_over_the_one_in_the_environment(
+        self, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        class Settings:
+            def snapshot(self) -> dict[str, object]:
+                return {
+                    "models": [
+                        {"name": "alpha", "key_set": True, "key_env": "ALPHA_API_KEY"},
+                    ]
+                }
+
+        monkeypatch.setenv("ALPHA_API_KEY", "sk-from-env")
+        bridge = _bridge(tmp_path, settings=Settings())
+        seen = self._capture(monkeypatch)
+
+        bridge.list_endpoint_models("http://127.0.0.1:8797/v1", "alpha", "sk-typed")
+
+        assert seen["api_key"] == "sk-typed"
+
+    def test_with_nothing_typed_the_saved_row_is_asked(
+        self, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        class Settings:
+            def snapshot(self) -> dict[str, object]:
+                return {
+                    "models": [
+                        {"name": "alpha", "key_set": True, "key_env": "ALPHA_API_KEY"},
+                    ]
+                }
+
+        monkeypatch.setenv("ALPHA_API_KEY", "sk-from-env")
+        bridge = _bridge(tmp_path, settings=Settings())
+        seen = self._capture(monkeypatch)
+
+        bridge.list_endpoint_models("http://127.0.0.1:8797/v1", "alpha")
+
+        assert seen["api_key"] == "sk-from-env"
+
+    def test_a_row_without_a_key_asks_with_no_authorization(
+        self, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        class Settings:
+            def snapshot(self) -> dict[str, object]:
+                return {"models": [{"name": "alpha", "key_set": False, "key_env": "A_KEY"}]}
+
+        bridge = _bridge(tmp_path, settings=Settings())
+        seen = self._capture(monkeypatch)
+
+        bridge.list_endpoint_models("http://127.0.0.1:8797/v1", "alpha")
+
+        assert seen["api_key"] == ""
+
+
+class TestBundledModelDoor:
+    """「自带模型」那一行的三个口子：读状态、现在加载、停掉。
+
+    The point is not that three methods exist — it is that **reading** the panel never
+    starts a four-gigabyte model, and that a failed start reaches the page as a sentence
+    instead of a spinner that never ends.
+    """
+
+    @staticmethod
+    def _fake_server(monkeypatch: Any) -> Any:
+        from jarvis.llm import local_server
+        from jarvis.llm.local_server import LocalServer
+
+        server = LocalServer()
+        monkeypatch.setattr(local_server, "shared_server", lambda: server)
+        return server
+
+    def test_reading_the_status_starts_nothing(self, tmp_path: Any, monkeypatch: Any) -> None:
+        from jarvis.llm.local_server import ModelPhase
+
+        server = self._fake_server(monkeypatch)
+        bridge = _bridge(tmp_path)
+
+        answer = bridge.model_server_status()
+
+        assert answer["phase"] == ModelPhase.OFF.value
+        assert server._proc is None, "读一下状态就把模型拉起来，面板每刷新一次就吃 5 GB"
+
+    def test_a_failed_start_comes_back_as_a_reason(self, tmp_path: Any, monkeypatch: Any) -> None:
+        from jarvis.llm import local_server as ls
+
+        self._fake_server(monkeypatch)
+        monkeypatch.setattr(ls, "free_memory_mb", lambda: 100)
+        bridge = _bridge(tmp_path)
+
+        answer = bridge.model_server_start()
+
+        assert answer["ok"] is False
+        assert "内存" in str(answer["error"])
+        assert answer["phase"] == "failed"
+
+    def test_stopping_reports_off_and_keeps_nothing_running(
+        self, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        server = self._fake_server(monkeypatch)
+        bridge = _bridge(tmp_path)
+
+        answer = bridge.model_server_stop()
+
+        assert answer["phase"] == "off"
+        assert server._proc is None
+
+
+class TestSheIsCalledWhatYouNamedHer:
+    """The brand in the corner is the setting, not the build."""
+
+    def test_the_title_line_wears_the_stored_name(self, tmp_path: Any) -> None:
+        from types import SimpleNamespace
+
+        bridge = _bridge(tmp_path, settings=SimpleNamespace(display_name=lambda: "阿明"))
+
+        assert bridge.app_info()["name"] == "阿明"
+
+    def test_no_settings_no_invention(self, tmp_path: Any) -> None:
+        bridge = _bridge(tmp_path)
+
+        assert bridge.app_info()["name"] == "小夜"
+
+
+class TestTheEngineReReadsThePreferencesBeforeItDecides:
+    """按下「现在加载」、问出一句话之前，dial 必须按**此刻的偏好**重推一遍。
+
+    `local_server` 按层级规矩不许读偏好，只认 `configure()` 推进来的那份 dial；而 dial
+    过去只在"设置那一侧动手写"的时候被推。于是另一条写偏好的路（一键建议、手机、她自己
+    用 settings 工具改）或者任何一次漏推，都会留下"屏上显示 A、引擎按 B 决定"——
+    B 恰好是 `none` 时，界面上冒出来的就是「设置里选了『不用离线模型』」，
+    而 preferences.json 里明明写着文件名，重启就好（r86 真机抓到的一条）。
+    """
+
+    def _settings(self, tmp_path: Any, file_name: str) -> Any:
+        from jarvis.app.preferences import LOCAL_MODEL
+        from tests.test_app_settings_service import _service
+
+        prefs = Preferences(tmp_path / "preferences.json")
+        prefs.set(LOCAL_MODEL, file_name)
+        settings, _llm, _rec = _service(prefs, {})
+        return settings
+
+    def test_start_pushes_the_dial_it_is_about_to_act_on(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from jarvis.llm import local_server
+
+        wanted = "Qwen3-1.7B-Q8_0.gguf"
+        settings = self._settings(tmp_path, wanted)
+        # 人工把 dial 拧成和偏好不一致 —— 这就是真机上抓到的那个状态
+        local_server.configure(local_server.Tuning(model=local_server.MODEL_NONE))
+        assert local_server.tuning().model == local_server.MODEL_NONE
+
+        seen: dict[str, str] = {}
+
+        def fake_start() -> dict[str, object]:
+            seen["model"] = str(local_server.tuning().model)
+            return {"ok": True, "error": ""}
+
+        monkeypatch.setattr("jarvis.ui.desktop.local_model.start", fake_start)
+        bridge = _bridge(tmp_path, settings=settings)
+
+        assert bridge.model_server_start()["ok"] is True
+        assert seen["model"] == wanted, "按下去的那一刻，引擎读的还是旧 dial"
+
+    def test_the_status_poll_re_reads_too(self, tmp_path: Any) -> None:
+        """那一格每几秒轮一次，所以屏上写的和引擎用的不能是两个来源。
+
+        「停掉」这一条**没有**加这个同步：停止不做任何决定，加上去等于写一行测不出来的代码。
+        """
+        from jarvis.llm import local_server
+
+        wanted = "Qwen3-4B.Q4_K_M.gguf"
+        settings = self._settings(tmp_path, wanted)
+        local_server.configure(local_server.Tuning(model=local_server.MODEL_NONE))
+
+        bridge = _bridge(tmp_path, settings=settings)
+
+        assert bridge.model_server_status()["model_selected"] == wanted
+
+    def test_a_question_re_reads_before_the_engine_might_cold_load(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """打字和说话两扇门都走 `_start_turn`，所以这一句同时管住"问到她的第一条会自己加载"。"""
+        from jarvis.llm import local_server
+
+        wanted = "Qwen3-1.7B-Q8_0.gguf"
+        settings = self._settings(tmp_path, wanted)
+        local_server.configure(local_server.Tuning(model=local_server.MODEL_NONE))
+        chat = ChatService(lambda: FakeLlmClient("星期六"))
+        chat.start()
+        bridge = _bridge(tmp_path, settings=settings, chat=chat)
+        monkeypatch.setattr("jarvis.ui.desktop.local_model.start", lambda: {"ok": True})
+
+        bridge.chat_send("今天星期几", [], "", "", "")
+
+        assert local_server.tuning().model == wanted

@@ -397,18 +397,24 @@ class DiskCleaner:
         return tuple(home / name for name in PROTECTED_USER_DIRS)
 
     def _is_protected(self, path: Path) -> bool:
-        # Normalise separators first: the markers are written with "\" and both
-        # "/" and "\" appear in real Windows paths, so a raw compare would let a
-        # forward-slash path slip past the blocklist.
-        resolved = str(path).lower().replace("/", "\\")
-        if any(marker in resolved for marker in PROTECTED_MARKERS):
-            return True
-        for root in self._protected_dirs:
-            prefix = str(root).lower().replace("/", "\\")
-            if resolved == prefix or resolved.startswith(prefix + "\\"):
+        # Do not follow a symlink/junction, including one in an ancestor. Resolve
+        # dot segments before comparing the protected roots, and fail closed.
+        try:
+            if any(part.is_symlink() or part.is_junction() for part in (path, *path.parents)):
                 return True
-        normalised_files = {str(one).lower().replace("/", "\\") for one in self._protected_files}
-        return resolved in normalised_files
+            resolved = str(path.resolve()).casefold().replace("/", "\\")
+            if any(marker in resolved for marker in PROTECTED_MARKERS):
+                return True
+            for root in self._protected_dirs:
+                prefix = str(root.resolve()).casefold().replace("/", "\\")
+                if resolved == prefix or resolved.startswith(prefix + "\\"):
+                    return True
+            protected_files = {
+                str(one.resolve()).casefold().replace("/", "\\") for one in self._protected_files
+            }
+            return resolved in protected_files
+        except (OSError, RuntimeError):
+            return True
 
     def _walk(
         self, category: str, root: Path, scanned_at: float
@@ -426,6 +432,8 @@ class DiskCleaner:
         """
         items: list[JunkItem] = []
         skipped = 0
+        if self._is_protected(root):
+            return [], 1, False
         try:
             children = sorted(root.iterdir(), key=lambda child: child.name.lower())
         except OSError as exc:

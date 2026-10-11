@@ -69,6 +69,18 @@ class Conversation:
         self.status = STATUS_IDLE
         self.phase = ""
         self.error = ""
+        self.error_kind = ""
+        """Which sort of failure :attr:`error` holds, as a stable token: ``auth``, ``quota``,
+        ``timeout``, ``network`` ... Empty when nobody said. The page draws its next step
+        from this instead of from the wording of a message it cannot see.
+        """
+        self.note = ""
+        """A token for something the turn did that the answer itself does not show.
+
+        ``no_tools`` today: the model answered, so there is no failure to report, but the
+        request that got the answer had to leave the tool table at home -- and a page that
+        stays silent about that lets 「她能帮我打开软件」 keep looking true.
+        """
         self.task_id = ""
         self.turn_count = 0
         self.stored = False
@@ -121,6 +133,8 @@ class Conversation:
             self.history = []
             self.sources = ()
             self.error = ""
+            self.error_kind = ""
+            self.note = ""
             self.turn_count = 0
 
     # -- what the page shows ----------------------------------------------
@@ -132,6 +146,8 @@ class Conversation:
             self.status = STATUS_RUNNING
             self.phase = phase
             self.error = ""
+            self.error_kind = ""
+            self.note = ""
             self.sources = ()
 
     def set_phase(self, phase: str) -> None:
@@ -139,12 +155,31 @@ class Conversation:
             if self.status == STATUS_RUNNING:
                 self.phase = phase
 
-    def end_turn(self, *, status: str, error: str = "", sources: Sequence[str] = ()) -> None:
-        """Close a turn out. ``status`` is running/nothing; anything else lands here."""
+    def end_turn(
+        self,
+        *,
+        status: str,
+        error: str = "",
+        kind: str = "",
+        note: str = "",
+        sources: Sequence[str] = (),
+    ) -> None:
+        """Close a turn out. ``status`` is running/nothing; anything else lands here.
+
+        ``kind`` travels with ``error`` because the two have different readers: the words are
+        for a person to paste to their vendor, the token is for the panel to offer the right
+        next step. One without the other is either unreadable or a guess.
+
+        ``note`` is kept separate from ``error`` on purpose: it is not a fault, and drawing
+        a degraded-but-answered turn as a failure would teach the operator to distrust the
+        card.
+        """
         with self.lock:
             self.status = status
             self.phase = ""
             self.error = error
+            self.error_kind = kind if error else ""
+            self.note = note if status == STATUS_DONE else ""
             self.task_id = ""
             if sources:
                 self.sources = tuple(sources)
@@ -178,6 +213,8 @@ class Conversation:
                 "status": self.status,
                 "phase": self.phase,
                 "error": self.error,
+                "error_kind": self.error_kind,
+                "note": self.note,
                 "task_id": self.task_id,
                 "turns": self.turn_count,
                 "sources": list(self.sources),

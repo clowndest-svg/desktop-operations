@@ -25,6 +25,7 @@ from typing import Any
 
 from jarvis.app.preferences import LLM_CAPS, Preferences
 from jarvis.core.exceptions import JarvisError
+from jarvis.llm import local_server
 from jarvis.llm.client import LlmClient
 from jarvis.llm.types import ChatMessage, GenerationOptions
 
@@ -114,6 +115,12 @@ def probe(client: LlmClient, *, with_vision: bool = True) -> ProbeResult:
     started = time.perf_counter()
     provider, model = client.provider_name, client.model
     options = GenerationOptions(max_tokens=_PROBE_TOKENS, temperature=0.0)
+    if provider == local_server.LOCAL_PROVIDER and local_server.selected_card().thinking:
+        # 自带那份 Qwen3 默认先思考：24 个 token 全落在 reasoning 上，`content` 是空的，
+        # 于是屏上出现「连不上：连接通了，但它一个字也没回」—— 而同一个模型在对话里
+        # 答得好好的，因为对话那条会发 `chat_template_kwargs.enable_thinking=false`。
+        # 测一条对话里用得上的路，就得走那条路本身（r86 用户实拍）。
+        options = replace(options, template_kwargs={"enable_thinking": False})
     try:
         answer = client.complete([ChatMessage.user(_PROBE_QUESTIONS[0])], options=options)
     except JarvisError as exc:
@@ -123,6 +130,15 @@ def probe(client: LlmClient, *, with_vision: bool = True) -> ProbeResult:
         return _failure(client, started, f"{type(exc).__name__}: {exc}")
     text = (answer.content or "").strip()
     if not text:
+        thought = (getattr(answer, "reasoning", "") or "").strip()
+        if thought:
+            # 连接是通的、模型也在说话 —— 只是这 24 个 token 不够它想完。说清是哪一种，
+            # 别把"思考没挤出答案"报成"没回消息"。
+            return _failure(
+                client,
+                started,
+                f"连接通了，但 {len(thought)} 字全用在思考上，没留出回答（把思考关掉再测）",
+            )
         return _failure(client, started, "连接通了，但它一个字也没回")
     if not with_vision:
         return ProbeResult(

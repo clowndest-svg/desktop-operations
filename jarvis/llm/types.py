@@ -122,6 +122,17 @@ class GenerationOptions:
     HUD showed no thinking chain was the request, not the rendering.
     """
 
+    template_kwargs: Mapping[str, object] | None = None
+    """Chat-template arguments, sent as ``chat_template_kwargs``.
+
+    Only our own bundled llama.cpp gets this: it is the one endpoint we know reads it,
+    and a strict OpenAI-compatible provider may reject a field it does not define.
+    Qwen3 needs it -- with the template's ``enable_thinking`` left at its default the
+    model writes the whole reply into the thinking block and ``content`` comes back
+    empty, which on screen is indistinguishable from "she ignored me" (measured r77:
+    105 tokens of reasoning, 0 of answer).
+    """
+
     thinking_budget: int | None = None
     """How many tokens of that reasoning are allowed.
 

@@ -51,6 +51,7 @@ public class MainActivity extends BridgeActivity {
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(XySpeechPlugin.class);
         registerPlugin(XyNetPlugin.class);
+        registerPlugin(XySecurePlugin.class);
         registerPlugin(XyActionPlugin.class);
         super.onCreate(savedInstanceState);
         reportKeyboardHeight();

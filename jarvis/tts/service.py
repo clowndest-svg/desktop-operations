@@ -83,6 +83,13 @@ class TtsService:
         self._engine_factory = engine_factory
         self._voice_router = voice_router
         self._engine: SpeechSynthesizer | None = None
+        self.voice_fallback = ""
+        """Why the last answer was *not* spoken with the selected voice ("" when it was).
+
+        Kept on the service rather than only in the log because the operator is looking
+        at the 音色 panel when it happens: a sentence that comes out in somebody else's
+        voice needs a reason attached, or it reads as "she ignored my choice".
+        """
 
     def _engine_for(self, voice: str | None) -> SpeechSynthesizer:
         """The engine for one utterance, asking the router when the voice needs it.
@@ -161,13 +168,45 @@ class TtsService:
         if not spoken:
             logger.debug("nothing speakable in a %d-character reply; staying silent", len(text))
             return
-        yield from engine.synthesize(
-            spoken,
-            voice=voice,
-            speed=speed,
-            volume=volume,
-            should_stop=should_stop,
-        )
+        if engine is self._engine:
+            yield from engine.synthesize(
+                spoken,
+                voice=voice,
+                speed=speed,
+                volume=volume,
+                should_stop=should_stop,
+            )
+            return
+        # A *routed* engine is a recorded voice: another interpreter on a 4 GB card
+        # (measured rtf 8.2–15.8, plus 26–38 s to load) or a vendor session. When it
+        # fails it must not cost the answer its voice -- "她回答了但没出声" is the single
+        # most confusing failure this panel can produce. So: if nothing was audible yet,
+        # say the sentence with the working engine and leave the reason in the log.
+        emitted = False
+        try:
+            for chunk in engine.synthesize(
+                spoken,
+                voice=voice,
+                speed=speed,
+                volume=volume,
+                should_stop=should_stop,
+            ):
+                emitted = True
+                yield chunk
+        except TtsError as exc:
+            if emitted or self._engine is None:
+                # Half an answer already reached the speakers; replaying it from the top
+                # would say the first words twice, which is worse than stopping.
+                raise
+            self.voice_fallback = f"{voice} 这次没出声：{exc}"
+            logger.warning("%s；这一句改用 %s 说", self.voice_fallback, self._engine.name)
+            yield from self._engine.synthesize(
+                spoken,
+                voice=None,
+                speed=speed,
+                volume=volume,
+                should_stop=should_stop,
+            )
 
     def synthesize_to_bytes(
         self,

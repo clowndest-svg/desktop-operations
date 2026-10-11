@@ -69,9 +69,17 @@ class _Record:
 
 
 class _Knowledge(_Surface):
+    """A knowledge base with somewhere to put her own notes, like the desktop's."""
+
+    notes_dir = Path("notes-under-test")
+
     def retrieve(self, query: str, *, top_k: int = 0) -> list[Any]:
         del query, top_k
         return []
+
+    def ingest_text(self, title: str, text: str, *, source: str = "") -> Any:
+        del title, text, source
+        return None
 
 
 class _Ledger(_Surface):

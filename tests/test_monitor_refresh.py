@@ -16,6 +16,7 @@ Two paths now, and both are pinned here:
 
 from __future__ import annotations
 
+import threading
 import time
 
 import pytest
@@ -524,6 +525,13 @@ class TestTheFastTablePath:
         assert _cpu_of(monitor.snapshot(), 5) is None
 
 
+def _spin_until(deadline: float) -> None:
+    """烧一点 CPU：只为了"这台机器此刻不空闲"这一件事。"""
+    x = 0
+    while time.monotonic() < deadline:
+        x = (x + 1) % 9973
+
+
 class TestTheMachineCpuRead:
     """The ring and the per-core bars, against the real psutil.
 
@@ -549,7 +557,16 @@ class TestTheMachineCpuRead:
 
         monkeypatch.setattr(psutil, "cpu_percent", spy)
 
-        snapshot = SystemMonitor(top_processes=0).snapshot()
+        # 一台完全空闲的机器读出来就是 0.0 —— 那是真话，不是这条测试要抓的东西。
+        # 想钉的是"这一格读的是刚采的 0.05 秒，不是某个线程从没问过的基线"，
+        # 所以自己造一点负载再读：忙碌的机器不会被读成 0。
+        stop = time.monotonic() + 0.4
+        burn = threading.Thread(target=lambda: _spin_until(stop))
+        burn.start()
+        try:
+            snapshot = SystemMonitor(top_processes=0).snapshot()
+        finally:
+            burn.join(timeout=5)
 
         assert seen, "the snapshot must ask for a CPU reading at all"
         assert all(

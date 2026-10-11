@@ -25,6 +25,18 @@ from collections.abc import Sequence
 
 from jarvis.__main__ import main
 
+_ONE_SHOT_MODES: frozenset[str] = frozenset(
+    {"--ask", "--tools", "--memory", "--prompts", "--plan", "--ingest", "--wav"}
+)
+"""Flags that mean "do this one thing and exit", and therefore mean "not the window".
+
+``jarvis.__main__`` checks ``--desktop`` before any of these, so injecting the flag
+unconditionally made every one of them unreachable from the packaged .exe: asking the
+shipped build for ``--tools`` opened the HUD instead. That is not only an inconvenience
+-- it is the reason a packaged artefact cannot be checked from the command line without
+standing next to it to close the window it popped up.
+"""
+
 
 def build_argv(rest: Sequence[str]) -> list[str]:
     """The flags a double-clicked .exe runs with, ahead of whatever was passed in.
@@ -32,8 +44,14 @@ def build_argv(rest: Sequence[str]) -> list[str]:
     Pinned by a test rather than trusted: the shipped program and the developer's
     ``python -m jarvis`` differ by exactly these two tokens, and when they drift the
     only symptom is a feature that works on one machine and refuses on the other.
+
+    ``--voice`` is added regardless because it only *permits* the microphone; the window
+    still needs a press to open it. ``--desktop`` is dropped when the caller asked for a
+    one-shot mode, because that request is the whole point of passing it.
     """
-    return ["--desktop", "--voice", *rest]
+    flags = [token.split("=", 1)[0] for token in rest]
+    desktop = [] if any(flag in _ONE_SHOT_MODES for flag in flags) else ["--desktop"]
+    return [*desktop, "--voice", *rest]
 
 
 if __name__ == "__main__":

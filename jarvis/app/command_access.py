@@ -176,8 +176,19 @@ class CommandAccess:
         wanted = next((mode for mode, number, _l, _d in MODES if number == tier), "")
         if not wanted:
             return {**self.levels(), "error": f"没有这一档：{tier}"}
-        self._prefs.set(SHELL_TIER, tier)
+        persisted = self._prefs.set(SHELL_TIER, tier)
         logger.warning("command-line level set to %s (%s)", wanted, _LABELS[wanted][0])
+        if not persisted:
+            # Tightening still took effect in this process -- that is the direction that
+            # has to win -- but the file did not change, so the next start would come up
+            # with the old, wider level. Saying "已切换" here would be the lie.
+            return {
+                **self.levels(),
+                "error": (
+                    f"这一档已经生效，但没写进磁盘（{self._prefs.unsaved()}）——"
+                    "重启会回到原来那档。检查数据目录是否可写，或点「重试保存」"
+                ),
+            }
         return {"error": "", **self.levels()}
 
     # -- the ledger ----------------------------------------------------------

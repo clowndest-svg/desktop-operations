@@ -14,6 +14,7 @@ import json
 import re
 import socket
 import ssl
+import time
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
@@ -595,3 +596,46 @@ def _section(port: int = 8737) -> Any:
         max_pair_attempts=6,
         max_devices=8,
     )
+
+
+def test_one_incomplete_tls_client_cannot_block_healthy_mobile_clients(tmp_path: Path) -> None:
+    """OPT-03 regression, migrated from the r93 review's loopback probe.
+
+    The gateway used to wrap the *listening* socket, which puts the TLS handshake in
+    the accept loop: a client that opens the port and sends nothing then keeps every
+    real phone out. Bound to 127.0.0.1 on a random port; no LAN, no production service.
+    """
+    gateway = make_gateway(tmp_path, _StubBridge())
+    assert gateway.enable(), gateway.reason
+    held: socket.socket | None = None
+    try:
+        assert _hello(gateway.port) == 200
+        held = socket.create_connection(("127.0.0.1", gateway.port), timeout=1.0)
+        time.sleep(0.08)
+        try:
+            healthy = _hello(gateway.port, timeout=0.6)
+        except OSError:
+            healthy = 0
+        assert healthy == 200, "一条不发握手的连接，把正常手机客户端挤掉了"
+        held.close()
+        held = None
+        assert _hello(gateway.port, timeout=2.0) == 200, "对方一断开就该立刻恢复"
+    finally:
+        if held is not None:
+            held.close()
+        gateway.disable()
+
+
+def _hello(port: int, *, timeout: float = 1.0) -> int:
+    """One authenticated-free ``/hello`` over TLS, trusting the ephemeral test certificate."""
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    connection = http.client.HTTPSConnection("127.0.0.1", port, context=context, timeout=timeout)
+    try:
+        connection.request("GET", "/hello")
+        response = connection.getresponse()
+        response.read()
+        return int(response.status)
+    finally:
+        connection.close()

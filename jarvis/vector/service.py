@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING
 
 from jarvis.core.exceptions import VectorStoreError
@@ -139,6 +139,16 @@ class VectorService:
     def drop(self, collection: str) -> int:
         """Delete an entire collection."""
         return self._index.delete_collection(collection)
+
+    def record_ids(
+        self, collection: str, *, metadata: Mapping[str, object] | None = None
+    ) -> list[str]:
+        """Which records this collection holds, optionally filtered by metadata.
+
+        Keyed by document rather than by "the chunks I currently know about", so an
+        update can delete what the previous version left behind.
+        """
+        return self._index.record_ids(collection, metadata=metadata)
 
     def get(self, collection: str, record_id: str) -> SearchHit | None:
         """Fetch one record's text and metadata without scoring."""

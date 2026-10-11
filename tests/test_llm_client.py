@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import replace
+from typing import Any
 
 import pytest
 
 from jarvis.core.events import UsageEvent
 from jarvis.llm.errors import (
     LlmAuthError,
+    LlmConnectionError,
     LlmError,
     LlmRateLimitError,
     LlmRequestError,
@@ -19,7 +22,11 @@ from jarvis.llm.errors import (
     LlmTimeoutError,
 )
 from jarvis.llm.openai_compat import OpenAiCompatClient, OpenAiCompatSettings
-from jarvis.llm.transport import TransportStatusError, TransportTimeoutError
+from jarvis.llm.transport import (
+    TransportNetworkError,
+    TransportStatusError,
+    TransportTimeoutError,
+)
 from jarvis.llm.types import ChatMessage, GenerationOptions, Role, ToolCall, Usage
 
 ENV = {"TEST_API_KEY": "sk-unit-test"}
@@ -72,6 +79,7 @@ def make_client(
     sleeps: list[float] | None = None,
     *,
     environ: Mapping[str, str] = ENV,
+    base_url: str = "https://api.test.example/v1",
     max_retries: int = 2,
     cost_input_per_1m: float = 0.0,
     cost_output_per_1m: float = 0.0,
@@ -80,7 +88,7 @@ def make_client(
 ) -> OpenAiCompatClient:
     settings = OpenAiCompatSettings(
         provider_name="testai",
-        base_url="https://api.test.example/v1",
+        base_url=base_url,
         model="test-model",
         api_key_env="TEST_API_KEY",
         timeout_seconds=30.0,
@@ -542,8 +550,23 @@ class TestCompleteStream:
             [sse_reasoning("先看温度"), sse_chunk("有点热"), sse_reasoning("再看湿度"), "[DONE]"]
         )
         response = make_client(transport).complete_stream([ChatMessage.user("hi")])
-        assert response.reasoning == "先看温度\n\n再看湿度"
+        # 思考那一路和回答一样是**增量流**：拼回去不许插分隔符。以前这里断言的是
+        # "先看温度\n\n再看湿度"，那条断言把 bug 写成了规矩 —— 真机上 Qwen3 一个 token
+        # 一个 chunk，屏上"思考过程"就成了每行一两个字（回答那段是 "".join，正常）。
+        assert response.reasoning == "先看温度再看湿度"
         assert response.content == "有点热"
+
+    def test_a_thought_streamed_one_character_at_a_time_stays_one_paragraph(self) -> None:
+        transport = FakeTransport()
+        pieces = list("它先想了一下天气")
+        transport.sse_replies.append(
+            [sse_reasoning(piece) for piece in pieces] + [sse_chunk("好"), "[DONE]"]
+        )
+
+        response = make_client(transport).complete_stream([ChatMessage.user("hi")])
+
+        assert response.reasoning == "".join(pieces)
+        assert "\n" not in response.reasoning, "一个字一行就是这么来的"
 
     def test_tool_calls_arrive_in_pieces_and_leave_as_whole_calls(self) -> None:
         transport = FakeTransport()
@@ -748,3 +771,335 @@ class TestPerProviderTimeout:
         client = service.client_for("slow")
         assert isinstance(client, OpenAiCompatClient)
         assert client._settings.timeout_seconds == 240.0
+
+
+class TestRefusedStatusesSayDifferentThings:
+    """401 和 403 指的下一步不一样，所以不能都叫「Key 被拒了」。
+
+    真撞到的：一家网关对 403 回的是「该令牌无权访问模型 gpt-6.1-sol」—— 钥匙是好的，
+    是这把钥匙没被开这个模型。这时候让人重贴 Key，是把人往错的地方支使。
+    """
+
+    def test_401_is_the_key_being_rejected(self) -> None:
+        from jarvis.llm.errors import LlmAuthError
+
+        client = _refusing_client(401, "unauthorized")
+        with pytest.raises(LlmAuthError) as caught:
+            client.complete([ChatMessage.user("hi")])
+        assert type(caught.value) is LlmAuthError
+        assert caught.value.kind == "auth"
+        assert "rejected the API key" in str(caught.value)
+
+    def test_403_is_this_key_not_being_allowed_that_model(self) -> None:
+        from jarvis.llm.errors import LlmAuthError, LlmPermissionError
+
+        client = _refusing_client(403, "该令牌无权访问模型 gpt-6.1-sol")
+        with pytest.raises(LlmPermissionError) as caught:
+            client.complete([ChatMessage.user("hi")])
+        # Still auth-shaped for every caller that groups "do not retry these".
+        assert isinstance(caught.value, LlmAuthError)
+        assert caught.value.kind == "forbidden"
+        assert "refused this model" in str(caught.value)
+        assert "status=403" in str(caught.value)
+
+    def test_the_refusal_body_travels_for_the_fold(self) -> None:
+        from jarvis.llm.errors import LlmPermissionError
+
+        client = _refusing_client(403, "该令牌无权访问模型 gpt-6.1-sol")
+        with pytest.raises(LlmPermissionError) as caught:
+            client.complete([ChatMessage.user("hi")])
+        assert "gpt-6.1-sol" in str(caught.value)
+
+
+def _refusing_client(status: int, body: str) -> OpenAiCompatClient:
+    """A client whose every request is refused with this status and body."""
+    from jarvis.llm.openai_compat import OpenAiCompatClient, OpenAiCompatSettings
+    from jarvis.llm.transport import TransportStatusError
+
+    class Refusing:
+        def post_json(self, url: str, *, headers: Any, payload: Any, timeout: float) -> Any:
+            raise TransportStatusError(status, body)
+
+        def post_sse(self, url: str, *, headers: Any, payload: Any, timeout: float) -> Any:
+            raise TransportStatusError(status, body)
+
+    return OpenAiCompatClient(
+        OpenAiCompatSettings(
+            provider_name="wkapi",
+            base_url="https://wkapi.work/v1",
+            model="gpt-6.1-sol",
+            api_key_env="WK_API_KEY",
+            timeout_seconds=9.0,
+            max_retries=0,
+            retry_backoff_seconds=0.0,
+            cost_input_per_1m=0.0,
+            cost_output_per_1m=0.0,
+        ),
+        Refusing(),
+        environ={"WK_API_KEY": "sk-not-the-real-one"},
+    )
+
+
+class TestAPromptThatDoesNotFitItsModel:
+    """本地端点回的那一句 400，和"这个地址不会流式"是两件事。
+
+    真撞到的：llama.cpp 的服务对一句「你好」回 400 exceed_context_size_error，而当时的
+    流式回退逻辑把任何"首包之前就失败"都记成"这家不支持流式"—— 一个粘住的开关，
+    之后每一轮都失去停止按钮，屏上还不显示为什么。
+    """
+
+    LLAMA_CPP = (
+        '{"error":{"code":400,"message":"This request (4702 tokens) exceeds the '
+        'available context size (4096 tokens), try increasing it",'
+        '"type":"exceed_context_size_error","n_prompt_tokens":4702,"n_ctx":4096}}'
+    )
+
+    def test_the_refusal_carries_the_two_numbers_the_server_printed(self) -> None:
+        from jarvis.llm.errors import LlmContextOverflowError, LlmRequestError
+
+        client = _refusing_client(400, self.LLAMA_CPP)
+        with pytest.raises(LlmContextOverflowError) as caught:
+            client.complete([ChatMessage.user("你好")])
+        assert caught.value.kind == "overflow"
+        assert isinstance(caught.value, LlmRequestError)
+        assert caught.value.prompt_tokens == 4702
+        assert caught.value.context_tokens == 4096
+        assert "4702" in str(caught.value) and "4096" in str(caught.value)
+
+    def test_a_different_vendor_wording_is_the_same_kind(self) -> None:
+        """OpenAI/vLLM 那套说法也要认，但它们把两个数字写在相反的位置。"""
+        from jarvis.llm.errors import LlmContextOverflowError
+
+        client = _refusing_client(
+            400,
+            '{"error":{"message":"This model\'s maximum context length is 4096 tokens. '
+            'However, you requested 5011 tokens in your messages.","type":'
+            '"invalid_request_error"}}',
+        )
+        with pytest.raises(LlmContextOverflowError) as caught:
+            client.complete([ChatMessage.user("你好")])
+        assert caught.value.kind == "overflow"
+        # 没有字段名可对，就不猜顺序：宁可屏上少两个数字，不少一个可信的。
+        assert caught.value.prompt_tokens is None
+        assert caught.value.context_tokens is None
+
+    def test_an_ordinary_bad_request_is_still_just_a_bad_request(self) -> None:
+        from jarvis.llm.errors import LlmContextOverflowError, LlmRequestError
+
+        client = _refusing_client(400, '{"error":{"message":"model not found"}}')
+        with pytest.raises(LlmRequestError) as caught:
+            client.complete([ChatMessage.user("你好")])
+        assert type(caught.value) is LlmRequestError
+        assert not isinstance(caught.value, LlmContextOverflowError)
+
+    def test_running_out_of_context_does_not_switch_streaming_off(self) -> None:
+        from jarvis.llm.errors import LlmContextOverflowError
+
+        client = _refusing_client(400, self.LLAMA_CPP)
+        with pytest.raises(LlmContextOverflowError):
+            client.complete_stream([ChatMessage.user("你好")])
+        assert client._stream_rejected is False
+        assert client._include_usage is True
+
+    def test_a_real_streaming_refusal_still_switches_off(self) -> None:
+        """反方向也要钉住：这一格开关是为真正的"这里不支持 SSE"准备的。"""
+        from jarvis.llm.errors import LlmError
+
+        client = _refusing_client(400, '{"error":{"message":"stream is not supported"}}')
+        with pytest.raises(LlmError):
+            client.complete_stream([ChatMessage.user("你好")])
+        assert client._stream_rejected is True
+
+
+class _ServerThatOnlyAnswers:
+    """自带模型那一行只许被"问"，不许被"起"：这里只给 endpoint()，多调一个方法就炸。"""
+
+    def __init__(self, url: str) -> None:
+        self._url = url
+
+    def endpoint(self) -> str | None:
+        return self._url
+
+
+REFUSED = "[WinError 10061] 由于目标计算机积极拒绝，无法连接。"
+
+
+def _refused(monkeypatch: pytest.MonkeyPatch, base_url: str, running: str | None) -> str:
+    from jarvis.llm import local_server
+
+    monkeypatch.setattr(
+        local_server, "shared_server", lambda: _ServerThatOnlyAnswers(running or "")
+    )
+    transport = FakeTransport()
+    transport.json_replies = [TransportNetworkError(REFUSED)]
+    client = make_client(transport, base_url=base_url, max_retries=0, key_optional=True)
+    with pytest.raises(LlmConnectionError) as got:
+        client.complete([ChatMessage.user("hi")])
+    return str(got.value)
+
+
+def test_a_refused_local_port_names_both_ports(monkeypatch: pytest.MonkeyPatch) -> None:
+    """用户自己加的那行连 18080，自带模型在 28181 上跑着 —— 报错要把两个端口都写出来。"""
+    text = _refused(monkeypatch, "http://127.0.0.1:18080/v1", running="http://127.0.0.1:28181/v1")
+    assert "127.0.0.1:18080" in text, text
+    assert "127.0.0.1:28181" in text, text
+    assert "两个不是同一个地址" in text, text
+
+
+def test_a_refused_port_with_nothing_running_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    """自带模型没在跑：就事论事说"这个端口没人听"，不要编出第二个端口。"""
+    text = _refused(monkeypatch, "http://127.0.0.1:18080/v1", running=None)
+    assert "127.0.0.1:18080" in text and "没有东西在听" in text, text
+    assert "28181" not in text, "自带模型没跑，不许凭空报一个端口"
+
+
+def test_the_bundled_port_itself_being_dead_says_how_to_recover(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """连的就是自带那个端口却连不上：说明那个进程已经死了，要给出"停掉再现在加载"。"""
+    text = _refused(monkeypatch, "http://127.0.0.1:28181/v1", running="http://127.0.0.1:28181/v1")
+    assert "停掉" in text and "现在加载" in text, text
+
+
+def test_a_cloud_endpoint_that_refuses_is_not_blamed_on_the_bundled_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """云端那一家连不上，扯自带模型只会把人带偏 —— 这种报错一个字都不许加。"""
+    text = _refused(monkeypatch, "https://api.test.example/v1", running="http://127.0.0.1:28181/v1")
+    # 一个字都不许多：云端地址连不上，扯自带模型只会把人往错的方向带
+    assert text == f"cannot reach 'testai': {REFUSED} (provider='testai', model='test-model')", text
+
+
+class _Reaper:
+    """假服务器：只记 begin/end 的顺序，别的什么都不干。"""
+
+    def __init__(self) -> None:
+        self.log: list[str] = []
+
+    def begin_request(self) -> None:
+        self.log.append("begin")
+
+    def end_request(self) -> None:
+        self.log.append("end")
+
+
+def _loopback_client(
+    monkeypatch: pytest.MonkeyPatch, *, json_reply: dict[str, object], sse_lines: list[str]
+) -> tuple[OpenAiCompatClient, _Reaper]:
+    """一条发给 127.0.0.1:28181 的问话，记账本换成能看顺序的假服务器。"""
+    from jarvis.llm import local_server
+
+    reaper = _Reaper()
+    monkeypatch.setattr(local_server, "shared_server", lambda: reaper)
+    transport = FakeTransport()
+    transport.json_replies = [json_reply]
+    transport.sse_replies = [sse_lines]
+    return make_client(transport, base_url="http://127.0.0.1:28181/v1"), reaper
+
+
+def test_a_bundled_request_holds_the_idle_reaper(monkeypatch: pytest.MonkeyPatch) -> None:
+    """发给自带模型的每一发，前后各记一次账 —— 少一次就是那条 10054。"""
+    client, reaper = _loopback_client(monkeypatch, json_reply=ok_response("好"), sse_lines=[])
+    client._settings = replace(client._settings, bundled=True)
+
+    client.complete([ChatMessage.user("hi")])
+
+    assert reaper.log == ["begin", "end"]
+
+
+def test_an_abandoned_stream_still_releases_the_hold(monkeypatch: pytest.MonkeyPatch) -> None:
+    """人中途掐掉回答：账也要还。不然计数器只涨不落，自带模型永远不会自动关。"""
+    client, reaper = _loopback_client(
+        monkeypatch,
+        json_reply=ok_response("用不到"),
+        sse_lines=[sse_chunk("第一句"), sse_chunk("第二句"), "[DONE]"],
+    )
+    client._settings = replace(client._settings, bundled=True)
+
+    stream = client.stream([ChatMessage.user("hi")])
+    assert next(stream).text == "第一句"
+    assert reaper.log == ["begin"], "还在答话，握着的那份不许先放"
+    close = getattr(stream, "close", None)
+    assert callable(close)
+    close()
+
+    assert reaper.log == ["begin", "end"]
+
+
+def test_a_cloud_request_does_not_touch_the_bundled_reaper(monkeypatch: pytest.MonkeyPatch) -> None:
+    """云端那一家的问话与自带模型的看门狗无关，一次账都不许记。"""
+    client, reaper = _loopback_client(monkeypatch, json_reply=ok_response("好"), sse_lines=[])
+
+    client.complete([ChatMessage.user("hi")])
+
+    assert reaper.log == []
+
+
+class _SilentTransport:
+    """A stream that is *legally* open but says nothing -- a model that is still thinking."""
+
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def post_json(self, *args: object, **kwargs: object) -> Any:
+        raise AssertionError("取消的这条路上不该有非流式重发")
+
+    def post_sse(self, *args: object, **kwargs: object) -> Any:
+        self.entered.set()
+        if not self.release.wait(3.0):
+            raise AssertionError("测试自己没把流放开")
+        yield '{"model":"synthetic","choices":[{"delta":{"content":"synthetic response"}}]}'
+        yield "[DONE]"
+
+
+def test_stop_works_while_waiting_for_the_first_chunk() -> None:
+    """OPT-05 regression, migrated from the r93 review's probe.
+
+    The loop used to check the stop flag only *after* a chunk arrived, so 停止 on a
+    request that had not produced its first token did nothing until the model spoke.
+    """
+    transport = _SilentTransport()
+    client = OpenAiCompatClient(
+        OpenAiCompatSettings(
+            provider_name="synthetic",
+            base_url="https://synthetic.invalid/v1",
+            model="synthetic",
+            api_key_env="NO_REAL_KEY",
+            timeout_seconds=60,
+            max_retries=0,
+            retry_backoff_seconds=0,
+            key_optional=True,
+        ),
+        transport=transport,
+        environ={},
+    )
+    stop = threading.Event()
+    done = threading.Event()
+    answers: list[Any] = []
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            answers.append(
+                client.complete_stream(
+                    [ChatMessage.user("synthetic prompt")], should_stop=stop.is_set
+                )
+            )
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            done.set()
+
+    worker = threading.Thread(target=run, name="cancel-probe", daemon=True)
+    worker.start()
+    try:
+        assert transport.entered.wait(1.0)
+        stop.set()
+        answered = done.wait(0.35)
+    finally:
+        transport.release.set()
+        worker.join(2.0)
+    assert not errors, repr(errors)
+    assert answers and answers[0].finish_reason == "cancelled"
+    assert answered, "首片段没来之前，停止没被看见——那正是 r93 的毛病"

@@ -224,3 +224,47 @@ class TestDigest:
         service.stop()
 
         assert service.digest() == ""
+
+
+class TestApprovalIntegrity:
+    def test_a_forged_path_is_not_an_approval(self, service: DiskService, tmp_path: Path) -> None:
+        service.start()
+        row = dict(_rows(service.plan())[0])
+        private = tmp_path / "not-scanned.txt"
+        private.write_text("keep me", encoding="utf-8")
+        row.update(path=str(private), kind="entry", is_directory=False, member_count=1, sample=[])
+        outcome = service.clean([row], confirmed=True)
+        assert private.exists(), "a well-shaped forged row must never authorize another path"
+        assert not outcome.deleted
+        assert outcome.failed
+
+    def test_a_loose_files_row_cannot_be_downgraded_to_rmtree(
+        self, service: DiskService, root: Path
+    ) -> None:
+        service.start()
+        row = dict(_rows(service.plan())[0])
+        row.update(kind="entry", member_count=1, sample=[])
+        outcome = service.clean([row], confirmed=True)
+        assert root.is_dir(), "changing kind must not turn an aggregate into rmtree"
+        assert not outcome.deleted
+        assert outcome.failed
+
+    def test_an_approval_is_consumed_once(self, service: DiskService, root: Path) -> None:
+        service.start()
+        row = dict(_rows(service.plan())[0])
+        assert service.clean([row], confirmed=True).deleted
+        replacement = root / "new-content.tmp"
+        replacement.write_text("do not delete", encoding="utf-8")
+        old = float(row["scanned_at"]) - 100
+        os.utime(replacement, (old, old))
+        outcome = service.clean([row], confirmed=True)
+        assert replacement.exists()
+        assert not outcome.deleted
+
+    def test_new_scan_invalidates_previous_approval(self, service: DiskService) -> None:
+        service.start()
+        old = dict(_rows(service.plan())[0])
+        service.plan()
+        outcome = service.clean([old], confirmed=True)
+        assert not outcome.deleted
+        assert outcome.failed

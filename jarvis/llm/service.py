@@ -15,11 +15,14 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 
 from jarvis.config.schema import LlmSection, ModelSpec, ProviderSection
 from jarvis.core.events import UsageEvent
 from jarvis.core.exceptions import ConfigurationError
+from jarvis.llm import local_server
 from jarvis.llm.client import LlmClient
+from jarvis.llm.local_server import LOCAL_PROVIDER
 from jarvis.llm.openai_compat import OpenAiCompatClient, OpenAiCompatSettings
 from jarvis.llm.transport import HttpTransport
 
@@ -155,7 +158,28 @@ class LlmService:
                 details={"configured": sorted(section.providers)},
             )
         spec = provider.model_spec(model_id)
+        if provider_name == LOCAL_PROVIDER:
+            # The bundled model is a child process, and this is the one place every
+            # request path (chat, voice, round table, the prober) passes through, so
+            # "start her if she is not up" lives here and nowhere else.
+            started, reason = local_server.shared_server().ensure_running()
+            if not started:
+                raise ConfigurationError(
+                    reason or "自带模型起不来",
+                    details={"provider": provider_name},
+                )
+            provider = replace(provider, base_url=local_server.endpoint())
+            # 那一行不再自己决定用哪个模型：发出去的名字就是「选哪个离线模型」选中那张卡的别名。
+            # 之前它一直发 defaults.yaml 里的 qwen2.5-7b，而实际加载的是 Qwen3-4B —— 报错尾巴那句
+            # (provider='local', model='qwen2.5-7b') 就是两处各说一套的证据。
+            card = local_server.selected_card()
+            spec = ModelSpec(id=card.alias, label=f"自带·{card.label}（离线）")
         key = f"{provider_name}\x00{spec.id}"
+        if provider_name == LOCAL_PROVIDER:
+            # The port is part of the identity for the bundled provider: llama.cpp may
+            # bind a different one after a restart, and a cached client aimed at the old
+            # port would look like the model had died.
+            key = f"{key}\x00{provider.base_url}"
         cached = self._clients.get(key)
         if cached is not None:
             return cached
@@ -182,6 +206,7 @@ class LlmService:
             cost_input_per_1m=provider.cost_input_per_1m,
             cost_output_per_1m=provider.cost_output_per_1m,
             key_optional=provider.key_optional,
+            bundled=provider.name == LOCAL_PROVIDER,
         )
         if self._transport is not None:
             return OpenAiCompatClient(

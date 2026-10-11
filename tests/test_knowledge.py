@@ -23,7 +23,7 @@ from jarvis.knowledge import (
     split_units,
 )
 from jarvis.llm.types import ChatMessage, ChatResponse, GenerationOptions, StreamChunk
-from jarvis.vector import HashingEmbedder, VectorService
+from jarvis.vector import HashingEmbedder, VectorEntry, VectorService
 
 MANUAL = """# 备份指南
 
@@ -550,6 +550,9 @@ class TestManagement:
             def forget(self, *_: object, **__: object) -> int:
                 return 0
 
+            def record_ids(self, *_: object, **__: object) -> list[str]:
+                return []
+
             def drop(self, *_: object, **__: object) -> int:
                 return 0
 
@@ -567,3 +570,85 @@ class TestManagement:
         assert service.stats()["chunks"] != 0
         # Retrieval still works through the keyword path.
         assert service.retrieve("rsync", min_score=0.0)
+
+
+class TestIndexFollowsTheDocument:
+    """OPT-01 regression: a shorter version must not leave its old tail retrievable.
+
+    Vectors used to be deleted by "the chunk ids I currently know about", so chunk #4
+    of a document that got shorter stayed in the index and kept answering searches
+    with text that was no longer in the database -- and ``forget`` could not clear it
+    either, for the same reason. Migrated from the r93 review's probe.
+    """
+
+    @staticmethod
+    def _shrink(service: KnowledgeService, source: Path) -> str:
+        source.write_text(
+            ("ordinary public documentation paragraph " * 15)
+            + "\n\n"
+            + ("OBSOLETE_ZEBRA_VALUE " * 18),
+            encoding="utf-8",
+        )
+        first = service.ingest(source)
+        assert first.chunks > 1 and not first.error
+        assert any(
+            "OBSOLETE_ZEBRA_VALUE" in hit.text for hit in service.retrieve("OBSOLETE_ZEBRA_VALUE")
+        )
+        source.write_text("Only current public instructions remain.", encoding="utf-8")
+        updated = service.ingest(source)
+        assert updated.chunks == 1 and not updated.error
+        return str(updated.doc_id)
+
+    def test_a_shorter_replacement_stops_returning_the_removed_tail(self, tmp_path: Path) -> None:
+        service = _service(tmp_path, chunk_size=160, chunk_overlap=0, min_score=0.0, top_k=10)
+        try:
+            self._shrink(service, tmp_path / "manual.md")
+            assert not any(
+                "OBSOLETE_ZEBRA_VALUE" in hit.text
+                for hit in service.retrieve("OBSOLETE_ZEBRA_VALUE")
+            ), "SQL 里只剩一条切片，向量检索还在返回删掉的旧文本"
+        finally:
+            service.stop()
+
+    def test_forget_clears_every_vector_the_document_ever_owned(self, tmp_path: Path) -> None:
+        service = _service(tmp_path, chunk_size=160, chunk_overlap=0, min_score=0.0, top_k=10)
+        try:
+            doc_id = self._shrink(service, tmp_path / "manual.md")
+            assert service.forget(doc_id)
+            assert service.documents() == []
+            assert (
+                service.retrieve("OBSOLETE_ZEBRA_VALUE") == []
+            ), "文档已经忘了、列表也空了，孤儿向量还在把原文交给模型"
+        finally:
+            service.stop()
+
+    def test_orphans_left_by_the_old_build_are_repaired_on_boot(self, tmp_path: Path) -> None:
+        """The bad vectors are already in users' files; starting must clean them."""
+        service = _service(tmp_path, chunk_size=160, chunk_overlap=0, min_score=0.0, top_k=10)
+        try:
+            doc_id = self._shrink(service, tmp_path / "manual.md")
+            service._vector.index(
+                "knowledge",
+                [
+                    VectorEntry(
+                        record_id=f"{doc_id}#9",
+                        text="OBSOLETE_ZEBRA_VALUE from a version nobody kept",
+                        metadata={
+                            "doc_id": doc_id,
+                            "source": "manual.md",
+                            "title": "手册",
+                            "ordinal": 9,
+                        },
+                    )
+                ],
+            )
+            # The retrieval filter is what protects the user *today*; the repair is
+            # what stops the orphan from sitting in the index forever. Both halves.
+            hits = service.retrieve("OBSOLETE_ZEBRA_VALUE")
+            assert not any(
+                "OBSOLETE_ZEBRA_VALUE" in hit.text for hit in hits
+            ), "检索层就该先挡住过期命中"
+            assert service.repair_index()["removed"] == 1, "启动自检要把旧版本残留清出去"
+            assert service.repair_index()["removed"] == 0, "清过一次不该再报一遍"
+        finally:
+            service.stop()

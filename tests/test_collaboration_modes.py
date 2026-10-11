@@ -132,7 +132,7 @@ class FlakyRecorder(ModeRecorder):
 
 class TestThePrice:
     def test_each_shape_costs_what_the_page_says_it_costs(self) -> None:
-        assert requests_for(MODE_TABLE, 3, 2) == 9
+        assert requests_for(MODE_TABLE, 3, 2) == 7
         assert requests_for(MODE_BOSS, 3, 2) == 4, "拆 1 + 干 2 + 收 1：主管不领活"
         assert requests_for(MODE_VOTE, 3, 2) == 6
         assert requests_for(MODE_SINGLE, 1) == 1
@@ -315,3 +315,23 @@ class TestTheDoorPicksTheShape:
         assert len(recorder.asked) == 2, "拆单 + 第一家干活，之后就别再花钱了"
         assert len(result.speeches) == 2
         assert "停在 1/2 家" in result.record
+
+
+def test_table_cost_is_the_number_of_actual_calls() -> None:
+    recorder = ModeRecorder()
+    outcome = Collaboration(recorder.client_for).run(MODE_TABLE, "test", [A, B, C], rounds=2)
+    assert outcome.answer
+    assert len(recorder.asked) == requests_for(MODE_TABLE, 3, 2) == 7
+
+
+def test_single_seat_vote_does_not_charge_for_a_review() -> None:
+    recorder = ModeRecorder()
+    Collaboration(recorder.client_for).run(MODE_VOTE, "test", [A])
+    assert len(recorder.asked) == requests_for(MODE_VOTE, 1) == 1
+
+
+def test_zero_and_excessive_rounds_have_the_same_clamp_in_quote_and_engine() -> None:
+    for rounds in (0, -1, 999):
+        recorder = ModeRecorder()
+        Collaboration(recorder.client_for).run(MODE_TABLE, "test", [A, B], rounds=rounds)
+        assert len(recorder.asked) == requests_for(MODE_TABLE, 2, rounds)

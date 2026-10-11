@@ -207,6 +207,22 @@ class KnowledgeRepository(Repository):
         """Fetch one chunk row."""
         return self.query_one("SELECT * FROM kb_chunks WHERE chunk_id = ?", (chunk_id,))
 
+    def existing_chunk_ids(self, chunk_ids: Sequence[str]) -> set[str]:
+        """Which of these chunk ids still have a row.
+
+        Batched because SQLite caps the number of parameters per statement, and this
+        runs on every search with the candidate set from both retrievers.
+        """
+        found: set[str] = set()
+        for start in range(0, len(chunk_ids), 400):
+            batch = list(chunk_ids[start : start + 400])
+            if not batch:
+                continue
+            marks = ",".join("?" for _ in batch)
+            rows = self.query(f"SELECT chunk_id FROM kb_chunks WHERE chunk_id IN ({marks})", batch)
+            found.update(str(row["chunk_id"]) for row in rows)
+        return found
+
     def chunks_of(self, doc_id: str) -> list[Row]:
         """Every chunk of a document, in order."""
         return self.query("SELECT * FROM kb_chunks WHERE doc_id = ? ORDER BY ordinal", (doc_id,))

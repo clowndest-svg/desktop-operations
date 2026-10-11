@@ -141,6 +141,40 @@ class AppPaths:
         """
         return self.data_dir / "voices"
 
+    @property
+    def pets_dir(self) -> Path:
+        """Silhouettes generated from photos, plus their index and previews.
+
+        Beside ``voices_dir`` and for the same reason: this is work the operator
+        made, so it has to be a directory they can open and empty. The photos
+        themselves are not here -- :mod:`jarvis.app.pet_library` keeps only the
+        traced outline, which is all a mesh needs and none of a person's privacy.
+        """
+        return self.data_dir / "pets"
+
+    @property
+    def notes_dir(self) -> Path:
+        """Notes she wrote herself, one ``.md`` each, ingested into the knowledge base.
+
+        Beside ``voices_dir`` and ``pets_dir`` for the same reason: this is content the
+        assistant produced, so it has to be a directory a person can open, read and
+        empty. It is deliberately *not* under ``file_roots`` -- the file tools must not
+        be able to overwrite the corpus by writing into it twice, which is how a
+        "remember this" that silently rewrote an imported manual would happen.
+        """
+        return self.data_dir / "笔记"
+
+    @property
+    def images_dir(self) -> Path:
+        """Pictures this program generated, one file each.
+
+        Beside ``pets_dir`` and ``notes_dir`` for the same reason: it is work the
+        assistant made, so it has to be a directory a person can open, keep and empty.
+        ComfyUI writes its own ``output/`` inside its own tree; this is the copy the
+        operator was actually handed, and the one the panel and the tools point at.
+        """
+        return self.data_dir / "生图"
+
     def ensure(self) -> None:
         """Create every directory of the layout (idempotent)."""
         for directory in (
@@ -151,6 +185,8 @@ class AppPaths:
             self.models_dir,
             self.cache_dir,
             self.audit_dir,
+            self.pets_dir,
+            self.images_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
 

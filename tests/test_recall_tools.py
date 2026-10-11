@@ -116,7 +116,14 @@ def _manual(tmp_path: Path) -> Path:
 def _knowledge_service(
     store: SqliteStore, vector: VectorService, tmp_path: Path, *, enabled: bool = True
 ) -> KnowledgeService:
-    service = KnowledgeService(store, vector, lambda: _knowledge_section(enabled=enabled))
+    # ``notes_dir`` is what the desktop always passes; without it ``add_knowledge`` is
+    # not offered at all, and half of these tests would be about a tool that is absent.
+    service = KnowledgeService(
+        store,
+        vector,
+        lambda: _knowledge_section(enabled=enabled),
+        notes_dir=tmp_path / "笔记",
+    )
     service.start()
     service.ingest(_manual(tmp_path))
     return service
@@ -161,19 +168,29 @@ class TestRegistrationGates:
 
         assert assistant_tools.build(knowledge=cast(Any, disabled)) == []
 
-    def test_the_three_tools_appear_once_the_stores_are_up(self, stack: dict[str, Any]) -> None:
+    def test_the_four_tools_appear_once_the_stores_are_up(self, stack: dict[str, Any]) -> None:
         assert set(stack["registry"].names()) == {
             "memory_search",
             "remember",
             "knowledge_search",
+            "add_knowledge",
         }
 
-    def test_every_one_of_them_is_safe(self, stack: dict[str, Any]) -> None:
-        """Reading her own notes and adding one row to her own database is not a
-        machine-touching capability. If a parameter ever reaches for something else,
-        this is where that has to be argued."""
-        for spec in stack["registry"].specs():
-            assert spec.risk.value == "safe", spec.name
+    def test_reads_are_safe_and_the_one_write_is_caution_and_no_more(
+        self, stack: dict[str, Any]
+    ) -> None:
+        """Reading her own notes is not a machine-touching capability; writing one is.
+
+        ``add_knowledge`` creates a file, which is this project's own definition of
+        CAUTION -- a side effect, nothing irreversible. It must not climb to DANGEROUS:
+        that path asks for a per-call ``confirmed`` the chat loop has no way to supply,
+        so a DANGEROUS label would make the tool permanently refuse while still being
+        advertised. ``run_shell`` is exactly that mistake already made once.
+        """
+        by_name = {spec.name: spec.risk.value for spec in stack["registry"].specs()}
+        assert by_name.pop("add_knowledge") == "caution"
+        assert set(by_name) == {"memory_search", "remember", "knowledge_search"}
+        assert set(by_name.values()) == {"safe"}
 
 
 class TestKnowledgeSearch:
@@ -307,16 +324,57 @@ class TestThroughTheChatDoor:
         self, tmp_path: Path
     ) -> None:
         """The retrieval term used to be the user's own sentence, and nothing said the
-        search had missed. Now the miss is visible and names the way out."""
+        search had missed. Now the miss is visible and names the way out.
+
+        The tool service is wired on purpose: r88 made the pointer conditional on
+        ``knowledge_search`` actually going out with the request, and a chat service
+        with no tools at all is exactly the case where 「再查一次」 would be a lie.
+        """
         store = _store(tmp_path)
         vector = _vector(store)
         knowledge = _knowledge_service(store, vector, tmp_path)
+        service = ToolService(
+            _tools_section,
+            monitor_factory=lambda: SystemMonitor(top_processes=5),
+            cleaner_factory=lambda: DiskCleaner(tmp_path / "audit.jsonl"),
+            knowledge=knowledge,
+        )
+        service.start()
         client = _RecordingClient("答")
-        chat = ChatService(lambda: client, knowledge_provider=lambda: knowledge, session_id="t")
+        chat = ChatService(
+            lambda: client,
+            knowledge_provider=lambda: knowledge,
+            tool_provider=lambda: service,
+            session_id="t",
+        )
         chat.start()
         try:
             chat.ask("接着上次那个说")
             assert "knowledge_search" in client.calls[-1][-1].content
+        finally:
+            service.stop()
+            store.stop()
+
+    def test_the_pointer_is_withheld_when_no_tool_table_goes_out(self, tmp_path: Path) -> None:
+        """She is not told to call a tool she was never given.
+
+        This is the half the r87 screenshot was missing: the pointer went onto every
+        question, so a 4B model latched onto 资料库 and answered 「打开记事本」 with
+        「资料库里没有关于“打开记事本”」. Same sentence, no tools wired, no pointer.
+        """
+        store = _store(tmp_path)
+        vector = _vector(store)
+        knowledge = _knowledge_service(store, vector, tmp_path)
+        client = _RecordingClient("答")
+        chat = ChatService(
+            lambda: client,
+            knowledge_provider=lambda: knowledge,
+            session_id="t",
+        )
+        chat.start()
+        try:
+            chat.ask("接着上次那个说")
+            assert client.calls[-1][-1].content == "接着上次那个说"
         finally:
             store.stop()
 

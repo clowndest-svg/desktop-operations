@@ -58,7 +58,19 @@
       "this machine is past a line you drew" and "I could not finish reading it" are
       different claims and a person reacts to them differently.
     -->
-    <div class="ov__cell ov__cell--still">
+    <!--
+      这一格也点得开同一张告警弹窗：旁边三格（提醒/用量/动作）点了都开花，只有它点了没反应。
+      认账那两颗留在原地（@click.stop）——「知道了」是就地记一笔，不该把弹窗叫出来。
+    -->
+    <div
+      class="ov__cell"
+      role="button"
+      tabindex="0"
+      title="点开看是哪几条、现在多少、线在哪"
+      @click="emit('alerts')"
+      @keydown.enter="emit('alerts')"
+      @keydown.space.prevent="emit('alerts')"
+    >
       <h4 class="hud-label ov__title ov__title--row">
         告警 · ALERTS
         <button
@@ -66,7 +78,7 @@
           class="ov__act"
           type="button"
           title="把这一批都记成已看过"
-          @click="ackAll"
+          @click.stop="ackAll"
         >
           全部知道了
         </button>
@@ -76,7 +88,7 @@
           <span class="ov__text" :class="row.severity === 'critical' ? 'ov__bad' : 'ov__warn'">
             {{ row.message }}
           </span>
-          <button class="ov__act" type="button" title="这条我认了，恢复了再提醒我" @click="ack(row.code)">
+          <button class="ov__act" type="button" title="这条我认了，恢复了再提醒我" @click.stop="ack(row.code)">
             知道了
           </button>
         </li>
@@ -122,6 +134,7 @@ const emit = defineEmits<{
   (e: 'reminders'): void
   (e: 'usage'): void
   (e: 'actions'): void
+  (e: 'alerts'): void
 }>()
 
 const system = useSystemStore()
@@ -244,12 +257,10 @@ onBeforeUnmount(() => {
   border-color: rgba(77, 216, 255, 0.4);
 }
 
-.ov__cell--still {
-  cursor: default;
-}
-
-.ov__cell--still:hover {
-  border-color: var(--hud-line);
+/* 这一格是可点的 div（里面还嵌着「知道了」，button 不能套 button），键盘焦点得看得见。 */
+.ov__cell:focus-visible {
+  outline: 1px solid rgba(77, 216, 255, 0.55);
+  outline-offset: 1px;
 }
 
 .ov__title {

@@ -11,18 +11,23 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import urllib.error
 import urllib.request
 from collections.abc import Generator, Iterator
 from email.message import Message
+from typing import Any
 
 import pytest
 
+from jarvis.core.constants import USER_AGENT
+from jarvis.llm import transport
 from jarvis.llm.transport import (
     TransportNetworkError,
     TransportStatusError,
     TransportTimeoutError,
     UrllibTransport,
+    is_local_address,
 )
 
 
@@ -192,7 +197,32 @@ class TestPostSse:
         assert headers["authorization"] == "Bearer k"
         assert headers["accept"] == "text/event-stream"
         assert headers["content-type"] == "application/json"
+        # Without this the stdlib announces ``Python-urllib``, and a Cloudflare-fronted
+        # gateway answers that with 403 "error code: 1010" -- which reaches the operator
+        # as 「连不上」 about an endpoint that is perfectly healthy.
+        assert headers["user-agent"] == USER_AGENT
         assert request.method == "POST"
+
+    def test_a_caller_that_names_itself_is_not_overridden(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The default is a floor, not a mask.
+
+        A caller that sets its own ``User-Agent`` -- some gateways route on it, and a
+        support ticket needs to be traceable -- must get what it asked for rather than
+        whatever this library prefers to be called.
+        """
+        fake = make_transport(monkeypatch, FakeResponse(sse_lines("[DONE]")))
+        list(
+            UrllibTransport().post_sse(
+                "https://api.test.example/v1/chat/completions",
+                headers={"Authorization": "Bearer k", "User-Agent": "partner-agent/2"},
+                payload={"model": "m"},
+                timeout=5,
+            )
+        )
+        sent = {name.lower(): value for name, value in fake.requests[0].header_items()}
+        assert sent["user-agent"] == "partner-agent/2"
 
 
 class TestPostJson:
@@ -225,3 +255,117 @@ class TestPostJson:
                 timeout=5,
             )
         assert excinfo.value.status == 200
+
+
+class TestLocalEndpointsSkipTheSystemProxy:
+    """设了 ``HTTP_PROXY`` 的机器上，"她连不上我的 Ollama"通常是代理的锅。
+
+    实测：环境里有 ``HTTP_PROXY`` 时，stdlib 会把 ``http://127.0.0.1:55555`` 也交给代理，
+    代理回 502 —— 于是界面说「厂商自己返回 5xx」，而"厂商"就是这台机器自己。
+    """
+
+    @pytest.mark.parametrize(
+        ("url", "local"),
+        [
+            ("http://127.0.0.1:11434/v1/chat/completions", True),
+            ("http://localhost:1234/v1", True),
+            ("http://[::1]:8080/v1", True),
+            ("http://127.5.5.5:8000/v1", True),
+            ("https://api.deepseek.com/v1/chat/completions", False),
+            ("http://192.168.1.20:11434/v1", False),
+            ("http://llama-box.internal:8080/v1", False),
+        ],
+    )
+    def test_only_this_machine_counts_as_local(self, url: str, local: bool) -> None:
+        assert is_local_address(url) is local
+
+    def test_a_loopback_request_is_opened_with_no_proxy_at_all(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: dict[str, object] = {}
+
+        def fake_build_opener(*handlers: object) -> Any:
+            seen["handlers"] = handlers
+
+            class _Opener:
+                def open(self, request, timeout=None):  # type: ignore[no-untyped-def]
+                    seen["opened"] = request.full_url
+                    return FakeResponse([b"data:[DONE]\n"])
+
+            return _Opener()
+
+        def never(*args: object, **kwargs: object) -> None:
+            raise AssertionError("本机的地址不该走 urlopen（那才会用系统代理）")
+
+        monkeypatch.setattr("urllib.request.build_opener", fake_build_opener)
+        monkeypatch.setattr("urllib.request.urlopen", never)
+        monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:7897")
+
+        drain("http://127.0.0.1:11434/v1/chat/completions")
+
+        handlers = seen.get("handlers")
+        assert isinstance(handlers, tuple) and handlers, "没换 opener，代理还是照走"
+        proxy_handler = handlers[0]
+        assert isinstance(proxy_handler, urllib.request.ProxyHandler)
+        assert vars(proxy_handler)["proxies"] == {}
+        assert seen.get("opened") == "http://127.0.0.1:11434/v1/chat/completions"
+
+    def test_a_remote_endpoint_still_uses_the_system_proxy(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """云端那几家常常**就是**要靠代理才出得去，这条不能顺手一起改掉。"""
+        called: list[str] = []
+
+        def open_remote(*args: Any, **kwargs: Any) -> FakeResponse:
+            called.append("urlopen")
+            return FakeResponse([b"data:[DONE]\n"])
+
+        monkeypatch.setattr("urllib.request.urlopen", open_remote)
+        monkeypatch.setattr(
+            "urllib.request.build_opener", lambda *a: pytest.fail("远端地址不该另建 opener")
+        )
+        monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:7897")
+
+        drain("https://api.test.example/v1/chat/completions")
+
+        assert called == ["urlopen"]
+
+    def test_skipping_the_proxy_says_so_once(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        caplog.set_level(logging.INFO, logger="jarvis.llm.transport")
+        monkeypatch.setattr(transport, "_notice_given", False)
+        monkeypatch.setattr("urllib.request.build_opener", lambda *a: _QuietOpener())
+        monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:7897")
+
+        for _ in range(3):
+            drain("http://localhost:1234/v1/chat/completions")
+
+        notes = [r for r in caplog.records if "不走系统代理" in r.getMessage()]
+        assert len(notes) == 1, "每次请求都念一遍是噪音，一次都不念是静默改行为"
+
+    def test_no_notice_when_there_is_no_proxy_to_skip(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        caplog.set_level(logging.INFO, logger="jarvis.llm.transport")
+        monkeypatch.setattr(transport, "_notice_given", False)
+        monkeypatch.setattr("urllib.request.build_opener", lambda *a: _QuietOpener())
+        for name in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"):
+            monkeypatch.delenv(name, raising=False)
+
+        drain("http://127.0.0.1:11434/v1/chat/completions")
+
+        assert not [r for r in caplog.records if "不走系统代理" in r.getMessage()]
+
+
+class _QuietOpener:
+    """An opener stand-in that answers like a server with nothing to say."""
+
+    def open(self, request, timeout=None):  # type: ignore[no-untyped-def]
+        return FakeResponse([b"data:[DONE]\n"])
+
+
+def drain(url: str) -> None:
+    """Actually run one ``post_sse``: it is a generator, so nothing happens until read."""
+
+    list(UrllibTransport().post_sse(url, headers={}, payload={}, timeout=5.0))

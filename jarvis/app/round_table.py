@@ -193,7 +193,7 @@ class RoundTable:
                 record="",
                 error=f"一桌最多 {MAX_SEATS} 家，多出来的没坐下",
             )
-        rounds = max(1, min(int(rounds or DEFAULT_ROUNDS), self._max_rounds))
+        rounds = max(1, min(int(rounds), self._max_rounds))
         stop = should_stop or _never
         speeches: list[Speech] = []
         floor = 0

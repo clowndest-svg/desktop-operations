@@ -146,6 +146,13 @@ starts shipping PNGs. Nothing else about the figure changes, which is the point 
 the same Three.js scene, the same mouth, the same skins.
 """
 
+FIGURE_SCRIPT = "window.__jarvisPet && window.__jarvisPet('figure');"
+"""The chosen figure changed under her: come and ask what to draw now.
+
+A cue and not the polygon itself -- the page pulls the points over the bridge, so a
+pet window that was closed when the choice was made still gets it on the next start.
+"""
+
 POINTER_SCRIPT = "window.__jarvisPetPointer && window.__jarvisPetPointer({x:.3f}, {y:.3f});"
 """Where the OS pointer is, as -1..1 of the pet's own box.
 
@@ -281,7 +288,9 @@ class PetController:
         on_action: Callable[[str], object] | None = None,
         width: int = PET_WIDTH,
         height: int = PET_HEIGHT,
+        title: str = PET_TITLE,
     ) -> None:
+        self._title = title
         self._base_url = base_url
         self._bridge = bridge
         self._on_active_change = on_active_change
@@ -498,7 +507,7 @@ class PetController:
         x, y = pet_origin(screen[0], screen[1], self._width, self._height)
         try:
             window: Any = webview.create_window(
-                title=PET_TITLE,
+                title=self._title,
                 url=f"{self._base_url.rstrip('/')}/?mode=pet",
                 js_api=self._bridge,
                 width=self._width,
@@ -639,6 +648,18 @@ class PetController:
         if self._window is None:
             return False
         self._command(f"window.__jarvisSetSkin && window.__jarvisSetSkin({json.dumps(skin_id)})")
+        return True
+
+    def apply_figure(self) -> bool:
+        """Tell the running page its figure was swapped for a generated one.
+
+        ``False`` when no window is up: that is not a failure to report, it is the
+        ordinary case where the pet is switched off, and the page asks on its own
+        as soon as it starts.
+        """
+        if self._window is None:
+            return False
+        self._command(FIGURE_SCRIPT)
         return True
 
     def set_caption(self, text: str) -> None:

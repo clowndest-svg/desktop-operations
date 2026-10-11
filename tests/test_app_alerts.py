@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
 
@@ -46,19 +47,27 @@ def snapshot(
     cpu: float | None = 10.0,
     memory: float | None = 30.0,
     swap: float = 0.0,
-    disks: tuple[tuple[str, int], ...] = (("C:", 500 * 1024**3),),
+    disks: tuple[tuple[object, ...], ...] = (("C:", 500 * 1024**3),),
 ) -> Any:
     import types
+
+    rows = []
+    for row in disks:
+        # (挂载点, 剩余字节) 就够旧用例用；带上第 3/4 项才有文件系统类型和总容量 ——
+        # 少了这两个，"这张盘删得动吗"那条判据就没法测。
+        attrs: dict[str, object] = {"mount": row[0], "free_bytes": row[1], "percent": 0.0}
+        if len(row) > 2:
+            attrs["fstype"] = row[2]
+        if len(row) > 3:
+            attrs["total_bytes"] = row[3]
+        rows.append(types.SimpleNamespace(**attrs))
 
     return types.SimpleNamespace(
         cpu=None if cpu is None else types.SimpleNamespace(percent=cpu, cores=12),
         memory=(
             None if memory is None else types.SimpleNamespace(percent=memory, swap_percent=swap)
         ),
-        disks=tuple(
-            types.SimpleNamespace(mount=mount, free_bytes=free, percent=0.0)
-            for mount, free in disks
-        ),
+        disks=tuple(rows),
         warnings=(),
     )
 
@@ -173,6 +182,34 @@ class TestSubjects:
         service, tick = _service()
         assert _fire(service, tick, snapshot(swap=0.0, memory=99.0)) != []
         assert "swap" not in [alert.code for alert in service.active()]
+
+
+class TestThePageFacingClockIsWallClock:
+    """``to_dict`` 出门的时间戳必须是 epoch —— 界面拿它和 ``Date.now()`` 相减。
+
+    r100 打包版实测：引擎内部走 monotonic，弹窗把它当 epoch 减，屏上写的是
+    「已持续 497622 小时」。引擎内部用哪把钟是它的自由，出口给墙钟是界面的前提；
+    这层转换放错地方（比如塞进前端）就会在下一个消费者那里再犯一次。
+    """
+
+    def test_since_leaves_as_epoch_while_the_engine_keeps_monotonic(self) -> None:
+        # 这条必须用**真** monotonic：换 epoch 的换算就发生在两把钟之间，
+        # 用测试拨的假钟测它，等于把换算的两端都换成假的，测了个寂寞。
+        service = AlertService(None, clock=time.monotonic, sustain_seconds=0.0)
+        fired = list(service.evaluate(snapshot(cpu=99.0)))
+        alert = fired[0]
+        assert alert.since == pytest.approx(time.monotonic(), abs=1.0), "引擎内部照旧吃 monotonic"
+        row = alert.to_dict()
+        assert abs(row["since"] - time.time()) < 5, "出口必须是墙钟（epoch），不是 monotonic"
+        assert abs(row["last_seen"] - time.time()) < 5
+
+    def test_a_recovered_alert_leaves_as_epoch_too(self) -> None:
+        service = AlertService(None, clock=time.monotonic, sustain_seconds=0.0)
+        service.evaluate(snapshot(disks=(("C:", 2 * 1024**3),)))
+        service.evaluate(snapshot(disks=()))
+        rows = service.history()
+        assert [alert.code for alert in rows] == ["disk:C:"], "恢复的应该进历史"
+        assert abs(rows[0].to_dict()["last_seen"] - time.time()) < 5
 
 
 class TestSeverityAndVoice:
@@ -441,3 +478,45 @@ class TestSheCanReadHerOwnAlerts:
 
         assert "只有人能点" in text
         assert service.registry is not None
+
+
+class TestDisksThatCannotBeCleaned:
+    """剩余空间这条线只对"删东西能改变的数字"有意义。
+
+    实测撞到的：一张挂载的虚拟光盘 ``F:\\`` —— CDFS、总共 2.5 MB、已用 100%，
+    按默认告警线（剩 20 GB）它**永远**是一条 critical。屏幕上常驻一颗红点的下场
+    是人都学会跳过它，于是真那条也没人看了。
+    """
+
+    def test_an_optical_volume_never_opens_a_disk_alert(self) -> None:
+        service, tick = _service()
+        fired = _fire(
+            service,
+            tick,
+            snapshot(disks=(("C:", 500 * 1024**3), ("F:", 0, "CDFS", 2_621_440))),
+        )
+        assert [alert.code for alert in fired] == []
+        bare = snapshot(cpu=None, memory=None, disks=(("F:", 0, "CDFS", 2_621_440),))
+        assert [reading.subject for reading in readings_of(bare)] == []
+        udf = snapshot(cpu=None, memory=None, disks=(("G:", 0, "udf", 4 * 1024**3),))
+        assert readings_of(udf) == []
+
+    def test_a_volume_smaller_than_the_line_is_not_a_full_disk(self) -> None:
+        """整卷 2.5 MB 的 NTFS（软盘/镜像/临时 RAM 盘）同理：报"剩多少"没有意义。"""
+        tiny = snapshot(cpu=None, memory=None, disks=(("H:", 0, "NTFS", 2_621_440),))
+        assert readings_of(tiny) == []
+
+    def test_a_real_drive_still_reports(self) -> None:
+        """过滤只闭掉改不动的那些 —— 把真盘也一起弄哑是更糟的 bug。"""
+        service, tick = _service()
+        fired = _fire(
+            service,
+            tick,
+            snapshot(disks=(("D:", 2 * 1024**3, "NTFS", 976 * 1024**3),)),
+        )
+        assert [alert.code for alert in fired] == ["disk:D:"]
+
+    def test_a_disk_row_without_fstype_stays_watchable(self) -> None:
+        """老快照（只有 mount + free_bytes）不许因为没带类型就静默消失。"""
+        readings = readings_of(snapshot(cpu=None, memory=None, disks=(("C:", 2 * 1024**3),)))
+        assert [(reading.subject, reading.value) for reading in readings] == [("C:", 2.0)]

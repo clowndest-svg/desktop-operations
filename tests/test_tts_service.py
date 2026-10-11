@@ -241,3 +241,75 @@ class TestVoiceRouting:
 
         assert default.texts == ["你好"]
         assert routed.texts == []
+
+
+class FlakyTtsEngine(FakeTtsEngine):
+    """A cloned-voice engine that dies after ``after`` chunks have been handed out."""
+
+    def __init__(self, after: int) -> None:
+        super().__init__()
+        self._after = after
+
+    def synthesize(
+        self,
+        text: str,
+        *,
+        voice: str | None = None,
+        speed: float | None = None,
+        volume: float | None = None,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> Iterator[AudioChunk]:
+        self.texts.append(text)
+        for _index in range(self._after):
+            yield AudioChunk(audio=b"x" * 320, sample_rate=16_000, is_final=False)
+        raise TtsError("离线语音这次太慢了，超过了等待上限 (花了 12.0 秒，一毫秒音频都没做出来)")
+
+
+class TestAClonedVoiceMustNotCostTheAnswerItsVoice:
+    """ "她回答了但没出声"是这台机器上真发生过的事，也是最难查的一种失败。
+
+    离线复刻实测 8.2–15.8 倍实时：等 120 秒才出声的回答，等于没有回答。
+    """
+
+    @staticmethod
+    def _service(routed: FakeTtsEngine) -> tuple[TtsService, FakeTtsEngine]:
+        default = FakeTtsEngine()
+        service = TtsService(
+            lambda: settings(enabled=True),
+            engine_factory=lambda s: default,
+            voice_router=lambda voice: routed if voice.startswith("clone:") else None,
+        )
+        service.start()
+        return service, default
+
+    def test_nothing_audible_yet_falls_back_and_says_why(self) -> None:
+        service, default = self._service(FlakyTtsEngine(after=0))
+
+        chunks = list(service.synthesize("你好", voice="clone:25f32b03e146"))
+
+        assert default.texts == ["你好"], "一个字都没出声时，这一句应该改用能出声的声音说"
+        assert chunks, "回退之后必须有音频"
+        assert "clone:25f32b03e146" in service.voice_fallback
+        assert "太慢" in service.voice_fallback
+
+    def test_half_an_answer_is_not_replayed(self) -> None:
+        """已经播出去一半再改口，等于把开头说两遍 —— 那时宁可让它停在这里。"""
+        service, default = self._service(FlakyTtsEngine(after=1))
+
+        with pytest.raises(TtsError):
+            list(service.synthesize("你好", voice="clone:25f32b03e146"))
+
+        assert default.texts == []
+        assert service.voice_fallback == ""
+
+    def test_a_stock_voice_failure_is_not_routed_anywhere(self) -> None:
+        """普通音色出问题就是引擎出问题，别悄悄换个声音还装作正常。"""
+        service, default = self._service(FlakyTtsEngine(after=0))
+        default.synthesize = (  # type: ignore[method-assign]
+            lambda *a, **k: (_ for _ in ()).throw(TtsError("edge 挂了"))
+        )
+
+        with pytest.raises(TtsError):
+            list(service.synthesize("你好", voice="zh-CN-XiaoxiaoNeural"))
+
+        assert service.voice_fallback == ""

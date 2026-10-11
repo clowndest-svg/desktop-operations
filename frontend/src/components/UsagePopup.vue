@@ -20,6 +20,7 @@
         </div>
       </header>
 
+      <div class="usage__body">
       <p v-if="loadError" class="usage__error">{{ loadError }}</p>
       <p v-if="loading && !totals" class="usage__loading">读取中…</p>
 
@@ -55,8 +56,7 @@
 
         <p class="usage__note">
           <template v-if="!totals.cache_data_reported">
-            本窗口 {{ totals.calls_without_cache_data }} 次调用没有一个返回缓存字段。
-            这是「没有读数」，不是「没命中」——两者不一样，前者要换 provider 或等它开始上报。
+            本窗口 {{ totals.calls_without_cache_data }} 次调用没有一个返回缓存字段。这是「没有读数」，不是「没命中」——两者不一样，前者要换 provider 或等它开始上报。
           </template>
           <template v-else>
             缓存 {{ totals.cached_tokens.toLocaleString() }} / 输入
@@ -156,8 +156,7 @@
         <p v-else-if="!loading" class="usage__loading">还没有按模型分开的记录。</p>
 
         <p v-if="!days && totals" class="usage__note">
-          从始至终这一段不画每日柱：一天一根、跑过一年就是几百根，那不是图。总数、输入/输出、
-          调用次数、缓存命中和各模型占比这里都是全量的。
+          从始至终这一段不画每日柱：一天一根、跑过一年就是几百根，那不是图。总数、输入/输出、调用次数、缓存命中和各模型占比这里都是全量的。
         </p>
         <div v-else-if="daily.length" class="usage__chart" role="img" :aria-label="chartLabel">
           <div v-for="row in daily" :key="row.day" class="usage__col" :title="tipFor(row)">
@@ -176,6 +175,7 @@
           <span class="hud-label">缺口 = 那天没有任何记录（不是 0）</span>
         </div>
       </template>
+      </div>
     </section>
   </div>
 </template>
@@ -397,13 +397,26 @@ watch(
      the table scrolls inside its own wrapper rather than being cut. */
   width: min(900px, 94vw);
   max-height: 88vh;
-  overflow: auto;
+  display: flex;
+  flex-direction: column;
   padding: 16px 20px 20px;
   border: 1px solid var(--hud-line);
   border-top: 1px solid rgba(77, 216, 255, 0.45);
   border-radius: var(--hud-radius);
   background: linear-gradient(180deg, rgba(10, 24, 40, 0.96), rgba(4, 8, 14, 0.98));
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+}
+
+/*
+ * The range chips and 关闭 live in the head, which is a sibling of this rather than a
+ * child, so pulling the scrollbar cannot take them out of reach. Left as block flow on
+ * purpose: these sections space themselves with adjacent margins, and a flex column
+ * would add every one of those pairs together.
+ */
+.usage__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .usage__head {

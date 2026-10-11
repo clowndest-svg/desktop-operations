@@ -56,12 +56,15 @@ class ToolPolicy:
         if PERMISSION_SHELL in spec.permissions and not settings.allow_shell:
             return (
                 f"工具 {spec.name} 需要执行系统命令，但配置里 tools.allow_shell 为 false。"
-                "请让操作者显式开启后再试。"
+                "这一条不在界面上，只能由操作者改 config.yaml 的 tools.allow_shell。"
+                "如果只是要跑一条命令，让用户在「控制」→「命令行」里选档位，那条走 "
+                "run_powershell。"
             )
         if PERMISSION_WRITE in spec.permissions and not settings.allow_write:
             return (
                 f"工具 {spec.name} 会写入磁盘，但配置里 tools.allow_write 为 false。"
-                "请让操作者显式开启后再试。"
+                "这一条不在界面上，只能由操作者改 config.yaml 的 tools.allow_write —— "
+                "照实告诉用户去哪儿改，别改口说这个功能不存在。"
             )
         if spec.risk is RiskLevel.DANGEROUS and settings.confirm_dangerous and not confirmed:
             return f"工具 {spec.name} 属于危险操作，需要用户确认后才会执行。"

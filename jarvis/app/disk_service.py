@@ -8,6 +8,8 @@ the exact paths a human ticked — with confirmation re-checked at the tool.
 from __future__ import annotations
 
 import logging
+import secrets
+import threading
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -130,6 +132,8 @@ class DiskService:
         self._cleaner_factory = cleaner_factory
         self._cleaner: DiskCleaner | None = None
         self._last: DiskPlan | None = None
+        self._lock = threading.RLock()
+        self._approved: dict[str, JunkItem] = {}
 
     def start(self) -> None:
         if self._cleaner is not None:
@@ -138,8 +142,10 @@ class DiskService:
         logger.info("disk service ready")
 
     def stop(self) -> None:
-        self._cleaner = None
-        self._last = None
+        with self._lock:
+            self._cleaner = None
+            self._last = None
+            self._approved.clear()
 
     @property
     def last_plan(self) -> DiskPlan | None:
@@ -148,9 +154,11 @@ class DiskService:
 
     def plan(self) -> DiskPlan:
         """Scan for junk. Read-only; safe to call whenever the page asks."""
-        result = self._scan()
-        self._last = result
-        return result
+        with self._lock:
+            self._approved.clear()
+            result = self._scan()
+            self._last = result
+            return result
 
     def _scan(self) -> DiskPlan:
         cleaner = self._cleaner
@@ -165,7 +173,7 @@ class DiskService:
             {
                 "category": group.category,
                 "total_bytes": group.total_bytes,
-                "items": [_item_to_dict(item) for item in group.items],
+                "items": [self._offer(item) for item in group.items],
             }
             for group in report.groups
         )
@@ -175,6 +183,12 @@ class DiskService:
             skipped_protected=report.skipped_protected,
             truncated=report.truncated,
         )
+
+    def _offer(self, item: JunkItem) -> dict[str, object]:
+        """Issue a single-use approval for this exact, server-owned scan entry."""
+        approval_id = secrets.token_hex(16)
+        self._approved[approval_id] = item
+        return {**_item_to_dict(item), "approval_id": approval_id}
 
     def digest(self, *, limit: int = 12) -> str:
         """The last scan, written out for a model to read.
@@ -209,6 +223,11 @@ class DiskService:
         return "\n".join(lines)
 
     def clean(self, items: list[object], *, confirmed: bool) -> DiskOutcome:
+        """Serialize scans and deletes; an approval belongs to one scan only."""
+        with self._lock:
+            return self._clean(items, confirmed=confirmed)
+
+    def _clean(self, items: list[object], *, confirmed: bool) -> DiskOutcome:
         """Delete exactly what the operator ticked, if they confirmed.
 
         The page sends back the entries it was shown, as JSON objects. Anything it
@@ -219,15 +238,25 @@ class DiskService:
         cleaner = self._cleaner
         if cleaner is None:
             return DiskOutcome((), 0, (), "", "磁盘服务未启动")
+        if not confirmed:
+            return DiskOutcome((), 0, (), "", "删除需要明确确认；本次没有删除任何内容")
         approved: list[JunkItem] = []
         rejected: list[tuple[str, str]] = []
         for raw in items:
             mapping = raw if isinstance(raw, dict) else {}
             item = JunkItem.from_wire(mapping)
-            if item is None:
-                rejected.append((str(raw)[:120], "不是本次扫描列出的条目"))
+            approval_id = str(mapping.get("approval_id") or "")
+            canonical = self._approved.get(approval_id)
+            if item is None or canonical is None or item != canonical:
+                rejected.append(
+                    (
+                        str(mapping.get("path") or raw)[:120],
+                        "不是本次扫描列出的条目，或清单已失效/被修改",
+                    )
+                )
                 continue
-            approved.append(item)
+            self._approved.pop(approval_id)
+            approved.append(canonical)
         if rejected:
             logger.error("disk cleanup rejected %d malformed entry(ies)", len(rejected))
         try:

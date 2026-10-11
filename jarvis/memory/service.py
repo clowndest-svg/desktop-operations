@@ -380,6 +380,9 @@ class MemoryService:
         session_id: str,
         user_text: str,
         assistant_text: str = "",
+        *,
+        client: LlmClient | None = None,
+        extract: bool = True,
     ) -> list[MemoryRecord]:
         """Record a turn and, if enabled, mine it for durable memories.
 
@@ -392,13 +395,16 @@ class MemoryService:
             self.record_turn(session_id, Role.ASSISTANT.value, assistant_text)
 
         settings = self._settings_provider()
-        if not settings.auto_extract or self._llm_provider is None:
+        if not extract or not settings.auto_extract:
             return []
-        try:
-            client = self._llm_provider()
-        except JarvisError as exc:
-            logger.debug("memory extraction unavailable: %s", exc)
-            return []
+        if client is None:
+            if self._llm_provider is None:
+                return []
+            try:
+                client = self._llm_provider()
+            except JarvisError as exc:
+                logger.debug("memory extraction unavailable: %s", exc)
+                return []
         extractor = MemoryExtractor(client, max_items=settings.max_extract)
         proposals = extractor.extract(user_text, assistant_text)
         if not proposals:

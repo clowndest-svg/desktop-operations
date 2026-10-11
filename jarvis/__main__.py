@@ -23,11 +23,16 @@ from jarvis.app.command_access import CommandAccess
 from jarvis.app.computer_access import ComputerAccess
 from jarvis.app.demo import run_voice_demo
 from jarvis.app.disk_service import DiskService
+from jarvis.app.image_gen import ImageService
 from jarvis.app.model_probe import ModelCaps, ModelProber
+from jarvis.app.pet_library import PetLibrary
+from jarvis.app.pet_service import PetService
+from jarvis.app.phone_screen import PhoneScreenReader
 from jarvis.app.preferences import Preferences
 from jarvis.app.process_service import ProcessService
 from jarvis.app.reminder_service import ReminderService
-from jarvis.app.settings_service import THINKING_LEVELS, SettingsService
+from jarvis.app.screen_mirror import ScreenMirrorService
+from jarvis.app.settings_service import SettingsService
 from jarvis.app.system_service import SystemService
 from jarvis.app.transcript_service import TranscriptService
 from jarvis.app.turns import TurnRegistry
@@ -96,6 +101,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description="JARVIS - a voice-first, agentic Windows AI assistant.",
     )
     parser.add_argument("--version", action="version", version=f"jarvis {__version__}")
+    parser.add_argument(
+        "--self-check",
+        action="store_true",
+        help="read-only release check; no user data, models, microphone or network",
+    )
+    parser.add_argument(
+        "--self-check-json",
+        type=Path,
+        default=None,
+        help="write the read-only release check to this JSON file",
+    )
     parser.add_argument(
         "-v",
         "--verbose",
@@ -239,6 +255,9 @@ class _Capabilities:
     prompts: PromptService
     planner: PlannerService
     transcript: TranscriptService
+    phone_screen: PhoneScreenReader | None = None
+    images: ImageService | None = None
+    """生图那一层。面板、工具、设置三处共用同一个实例 —— 引擎只该有一个去向。"""
 
 
 def _logging_settings_factory(
@@ -318,10 +337,14 @@ def _tuning_reader(
 
     def read(provider: str, model: str) -> ConversationTuning | None:
         row = settings.tuning_for(provider, model)
-        budget = THINKING_LEVELS.get(str(row.get("thinking") or ""), 0)
+        # `tuning_for` 已经把"档位 → token"这一步做完了，而且精确预算优先：设置面板
+        # 填过 8000 的时候，发出去的就是 8000，不是那个档位的 16000。
         return ConversationTuning(
-            thinking=ThinkingRequest(enabled=budget > 0, budget=budget),
+            thinking=ThinkingRequest(
+                enabled=bool(row["thinking_enabled"]), budget=int(row["thinking_tokens"])
+            ),
             history_turns=_int_or_none(row.get("turns")),
+            tools=row.get("tools") if isinstance(row.get("tools"), bool) else None,
         )
 
     return read
@@ -377,6 +400,9 @@ def _register_capabilities(
     settings: SettingsService | None = None,
     voices: VoicePicker | None = None,
     alerts: AlertService | None = None,
+    mirror: ScreenMirrorService | None = None,
+    images: ImageService | None = None,
+    preferences: Preferences | None = None,
 ) -> _Capabilities:
     """Register every phase-11-to-18 service on ``app``, in dependency order.
 
@@ -424,6 +450,9 @@ def _register_capabilities(
         vector,
         lambda: config_service.config.knowledge,
         llm_provider=lambda: llm_service.client,
+        # The one directory she may write a document into. Without it ``add_knowledge``
+        # refuses rather than picking a path nobody agreed to.
+        notes_dir=paths.notes_dir,
     )
     app.register(knowledge)
     # Built here rather than in the desktop branch because the tool that lets her
@@ -448,6 +477,10 @@ def _register_capabilities(
     announcer = Announcer()
     reminders = ReminderService(lambda: scheduler)
     sampler = monitor if monitor is not None else _shared_monitor()
+    # 手机那一屏：工具、面板门和能看图的那一档共用一个 reader。``ocr`` 在这一行之后才建，
+    # 所以传的是"到时候去拿"的回调 —— 没有投屏运行时或没有偏好文件时它是 None，
+    # 那条工具就不广告：模型答应得再自然，然后每次都"我看不清"，是最糟的一种假。
+    phone_screen = _phone_reader(mirror, lambda: ocr, llm_service, preferences)
     tools = ToolService(
         lambda: config_service.config.tools,
         monitor_factory=_monitor_factory(sampler),
@@ -486,6 +519,14 @@ def _register_capabilities(
         # What the alert centre still has open, read-only through ``system_report``.
         # She can see that C: is under the line; saying 「知道了」 stays a human act.
         alerts=alerts,
+        # The same object the panel drives. Two doors, one child process: a mirror
+        # started by talking to her and one started by clicking must not become two
+        # scrcpy windows fighting over the phone.
+        mirror=mirror,
+        phone=phone_screen,
+        # 生图同一条规矩：没有引擎就没有工具。模型答应「我画好了」而盘上没文件，
+        # 是这套代码反复被要求停掉的那一种假。
+        images=images,
     )
     app.register(tools)
     app.register(computer)
@@ -559,6 +600,8 @@ def _register_capabilities(
         prompts=prompts,
         planner=planner,
         transcript=transcript,
+        phone_screen=phone_screen,
+        images=images,
     )
 
 
@@ -615,6 +658,41 @@ class _VoiceStack:
     def stop_speaking(self) -> bool:
         pipeline = self._orchestration.pipeline
         return pipeline is not None and pipeline.cancel_utterance()
+
+
+def _phone_reader(
+    mirror: ScreenMirrorService | None,
+    ocr_provider: Callable[[], OcrService | None],
+    llm_service: LlmService,
+    preferences: Preferences | None,
+) -> PhoneScreenReader | None:
+    """Wire the phone-screen reader, or return ``None`` when it cannot work.
+
+    The vision half is gated twice on purpose: the operator has to have asked for it,
+    and the model that would answer must have been measured (设置里「测一下」) to have
+    eyes. The pair used for both is the configured default rather than whatever a chat
+    tab happens to have selected, and the answer names that pair -- a reply from an
+    unnamed model is the kind of claim this project keeps being billed for.
+    """
+    if mirror is None or preferences is None:
+        return None
+    caps = ModelCaps(preferences)
+
+    def _ready() -> bool:
+        try:
+            client = llm_service.client
+        except Exception:  # 配置没起来 / 没有默认 provider：读不到就当没眼睛
+            logger.warning("读不到默认模型，看图那条不走")
+            return False
+        return bool(caps.vision(client.provider_name, client.model))
+
+    return PhoneScreenReader(
+        mirror,
+        ocr_provider=ocr_provider,
+        vision_provider=lambda: llm_service.client,
+        vision_ready=_ready,
+        prefs=preferences,
+    )
 
 
 def _voice_stack_builder(
@@ -814,6 +892,15 @@ def _run_desktop(args: argparse.Namespace) -> int:
             audit_log=config_service.paths.audit_dir / "process-kills.jsonl",
         )
     )
+    # Phone screen mirroring. A component rather than a helper inside the bridge
+    # because it owns a child process, and a window that is closed by killing the
+    # app must not leave a scrcpy window holding the phone.
+    screen_mirror = ScreenMirrorService(preferences)
+    app.register(screen_mirror)
+    # 生图：本地 ComfyUI 和云端 API 两条引擎共用这一个服务实例。她问的和面板点的是
+    # 同一个对象，而「起起来的引擎子进程」只能有一个地方持有 —— 和 scrcpy 那条窗口同一条理由。
+    image_engine = ImageService(preferences, config_service.paths)
+    app.register(image_engine)
     # Built before the capability stack because the tool that changes her voice is
     # wired in the same place every other tool is wired, and that tool needs the
     # picker's list to refuse a name that does not exist. The picker itself is not
@@ -830,6 +917,11 @@ def _run_desktop(args: argparse.Namespace) -> int:
     # cannot speak it yet".
     voice_library = VoiceLibrary(config_service.paths.voices_dir)
     app.register(voice_library)
+    # Figures the operator traces out of a photograph. Registered as one component
+    # because starting the library is part of starting the service: the directory
+    # has to exist before the picker can honestly say it is empty.
+    pets = PetService(PetLibrary(config_service.paths.pets_dir), preferences)
+    app.register(pets)
     voice_picker = VoicePicker(
         lambda: config_service.config.tts,
         preferences,
@@ -858,6 +950,9 @@ def _run_desktop(args: argparse.Namespace) -> int:
         settings,
         voice_picker,
         alerts=alerts,
+        mirror=screen_mirror,
+        images=image_engine,
+        preferences=preferences,
     )
     # What each configured model turned out to be able to do, measured rather than
     # declared: the panel writes a row here when 测一下 passes, and a picture is only
@@ -892,6 +987,10 @@ def _run_desktop(args: argparse.Namespace) -> int:
         vision_for=caps.vision,
     )
     app.register(chat)
+    # 「按我这台电脑给一套建议」问的是用户正在用的那个模型，走 chat 那条现成的路：
+    # 它会自己把自带模型拉起来、按那家的超时等回答。remembered=False 是因为这种
+    # 机器自己写的问答不该进对话历史，把后面每一句都带偏。
+    settings.set_advice_ask(lambda prompt: chat.ask(prompt, remembered=False).answer)
     # The spoken round trip a phone performs. It owns no brain and no voice: it
     # holds the *same* ChatService the input box uses, so a question asked out loud
     # on the phone and the same question typed on the desktop reach one agent with
@@ -1004,10 +1103,14 @@ def _run_desktop(args: argparse.Namespace) -> int:
             usage=capabilities.usage,
             settings=settings,
             alerts=alerts,
+            mirror=screen_mirror,
+            phone_screen=capabilities.phone_screen,
+            images=image_engine,
             audio=audio_pusher,
             tools=capabilities.tools,
             voice_picker=voice_picker,
             voice_library=voice_library,
+            pets=pets,
             voice_call=voice_call,
             voice_sample=voice_sample,
             computer_access=computer_access,
@@ -1355,6 +1458,10 @@ def _run_cli(command: Callable[[argparse.Namespace], int], args: argparse.Namesp
 def main(argv: list[str] | None = None) -> int:
     """Run the application and return a process exit code."""
     args = build_arg_parser().parse_args(argv)
+    if args.self_check or args.self_check_json is not None:
+        from jarvis.app.diagnostics import run_self_check
+
+        return run_self_check(args.self_check_json)
     _configure_bootstrap_logging(verbose=args.verbose)
 
     if args.wav is not None:

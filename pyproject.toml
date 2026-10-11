@@ -28,6 +28,11 @@ dependencies = [
     # defaults to true — so it belongs in the base install rather than an extra
     # that a default configuration would immediately miss.
     "APScheduler>=3.10,<4",
+    # The desktop pet's photo -> silhouette path. ONNX Runtime is already in every
+    # working install (the wake-word engine and RapidOCR both run on it), but both
+    # of those are *extras*, so without this line a base ``pip install .`` would
+    # carry a 生成宠物 button that fails on the first click.
+    "onnxruntime>=1.17",
 ]
 
 [project.optional-dependencies]

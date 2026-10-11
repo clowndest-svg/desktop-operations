@@ -89,13 +89,19 @@ if _source_count == 0:
 report = "\n".join(lines)
 
 print(f"[jarvis][funasr hook] {report}", flush=True)
+_read_only_check = any(
+    arg in ("--self-check", "--self-check-json", "--version", "--help", "-h")
+    or arg.startswith("--self-check-json=")
+    for arg in sys.argv[1:]
+)
 try:
-    _root = os.environ.get("JARVIS_HOME") or os.path.join(
-        os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Jarvis"
-    )
-    _logs = os.path.join(_root, "logs")
-    os.makedirs(_logs, exist_ok=True)
-    with open(os.path.join(_logs, "funasr-hook.log"), "a", encoding="utf-8") as _sink:
-        _sink.write(report + "\n")
+    if not _read_only_check:
+        _root = os.environ.get("JARVIS_HOME") or os.path.join(
+            os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Jarvis"
+        )
+        _logs = os.path.join(_root, "logs")
+        os.makedirs(_logs, exist_ok=True)
+        with open(os.path.join(_logs, "funasr-hook.log"), "a", encoding="utf-8") as _sink:
+            _sink.write(report + "\n")
 except Exception:
     pass

@@ -23,6 +23,12 @@ from pathlib import Path
 
 
 def _seed() -> None:
+    if any(
+        arg in ("--self-check", "--self-check-json", "--version", "--help", "-h")
+        or arg.startswith("--self-check-json=")
+        for arg in sys.argv[1:]
+    ):
+        return  # Read-only CLI modes must not create a data directory before main().
     from jarvis.config.paths import ENV_HOME, bundle_data_root
 
     local_app_data = os.environ.get("LOCALAPPDATA", "").strip()

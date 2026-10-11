@@ -146,6 +146,21 @@
         <span class="thinking__dot" /><span class="thinking__dot" /><span class="thinking__dot" />
         {{ link ? '电脑上的她在想' : '她在想' }}
       </p>
+
+      <!--
+        卡住要看得见。上面那三个点只在**没进流式**时出现；进了流式而一个字都还没来，
+        屏幕上就只是一个空气泡，跟"她死了"分不出来。这里按"多久没有新进展"报数：
+        每来一段字就归零，超过 STALL_SHOW_AFTER 秒才开口。只报数，**不自动取消**——
+        替用户掐掉一次问答比多等十秒贵得多。
+      -->
+      <p v-if="busy && stall >= STALL_SHOW_AFTER" class="thinking thinking--slow">
+        <template v-if="live >= 0">
+          已经 {{ stall }} 秒没有新字了。按下面的「停止」可以不等她
+        </template>
+        <template v-else>
+          电脑上那一问已经跑了 {{ stall }} 秒。话在电脑上跑，这边按不了停
+        </template>
+      </p>
     </main>
 
     <button v-if="far" class="jump" type="button" aria-label="回到底部" @click="scroll">
@@ -304,8 +319,7 @@
           <h3>用大白话让她做</h3>
           <p class="hint">
             "把手电筒打开"、"七点叫我起床"、"给 10086 发个短信问余额"、"音量调到三成"——
-            说在对话里就行，她自己去按。要出这台手机的（拨号、短信、日历、链接、闹钟）
-            会先问你一句，最后那一下永远是你按的。
+            说在对话里就行，她自己去按。要出这台手机的（拨号、短信、日历、链接、闹钟）会先问你一句，最后那一下永远是你按的。
           </p>
           <p class="hint">
             <strong>她不做的事</strong>：读你的短信、读通讯录、代你点别的 App 的界面。
@@ -335,13 +349,13 @@
         <div class="card">
           <h3>相册</h3>
           <p class="hint">
-            点开才会问你要相册权限。挑一张挂到输入框上，下一句她就真看得见那张图了——
-            图不存进历史，历史里只留一个 📷。
+            点开才会问你要相册权限。挑一张挂到输入框上，下一句她就真看得见那张图了——图不存进历史，历史里只留一个 📷。
           </p>
           <button class="ghost" type="button" :disabled="albumBusy" @click="openAlbum">
             {{ albumBusy ? '在读相册…' : album.length ? '重新读一次' : '读相册' }}
           </button>
           <p v-if="albumError" class="hint hint--bad">{{ albumError }}</p>
+          <p v-else-if="albumEmpty" class="hint">{{ albumEmpty }}</p>
           <div v-if="album.length" class="grid">
             <button
               v-for="row in album"
@@ -422,7 +436,7 @@
         </div>
 
         <div class="card">
-          <h3>模型（独立模式用你自己的 Key）</h3>
+          <h3>模型（独立模式，免 Key 端点可留空）</h3>
           <label class="field">
             <span>Base URL</span>
             <input v-model="form.baseUrl" type="text" spellcheck="false" />
@@ -451,8 +465,7 @@
             </div>
           </label>
           <p class="hint">
-            Key 只存在这台手机的 App 私有目录里，不写进任何会被分享的文件，也不发到任何第三方。
-            连上电脑时用的是电脑上配好的那个模型，这里填的暂时用不上。
+            Key 和电脑配对令牌由 Android Keystore 加密保存在本机；Key 只会发给你配置的模型端点。不要将自己的 Key、配对指纹和个人数据放入交付包。免 Key 端点可留空。网页预览只使用普通本机存储，请勿填真实密钥。连上电脑时用的是电脑上配好的那个模型，这里填的暂时用不上。
           </p>
           <label class="field">
             <span>证书指纹（自建 / 内网模型才要填）</span>
@@ -466,6 +479,14 @@
           </p>
           <p class="hint">
             「拍一张」得换成能看图的模型（qwen-vl-plus 这一类）。用纯文本模型问图，屏幕上留下的是模型回的那句错，不会假装她看见了。
+          </p>
+          <p v-for="issue in modelIssues" :key="issue.field" class="hint hint--bad">{{ issue.text }}</p>
+          <button class="wide" type="button" :disabled="probing" @click="tryModel">
+            {{ probing ? '在试…' : '试一下这个配置（会真发一次最小请求）' }}
+          </button>
+          <p class="hint">
+            探的是表单里这几栏、还没存的那份。404 是地址错了一层，401 是 Key 不对，
+            422 多半是模型名——这三种在"连不上"三个字底下长得一模一样，分不开就只能一栏一栏试。
           </p>
           <button class="wide" type="button" @click="save">保存模型设置</button>
         </div>
@@ -493,8 +514,7 @@
       </div>
       <div class="sheet__body">
         <p class="hint">
-          电脑：托盘或顶栏打开「手机接入」→ 点「出一个配对码」，屏幕上会同时给出地址、端口和证书指纹。
-          手机和电脑必须连同一个 Wi-Fi。
+          电脑：托盘或顶栏打开「手机接入」→ 点「出一个配对码」，屏幕上会同时给出地址、端口和证书指纹。手机和电脑必须连同一个 Wi-Fi。
         </p>
         <label class="field">
           <span>电脑地址</span>
@@ -572,6 +592,7 @@ import {
   pcCall,
   pcHello,
   pcPair,
+  probeModel,
   saveModel,
   savePc,
   saveVoiceFlags,
@@ -582,7 +603,9 @@ import {
   type Turn,
 } from './api'
 import { ACTIONS, execute, askMediaAccess, listAlbum, readAlbumPhoto, type AlbumPhoto, type PhoneAction } from './actions'
+import { requestHistory } from './conversation'
 import { askAgent } from './agent'
+import { checkModel, checkPort, normalizePin, type FieldIssue } from './settings'
 import { appearance, applyAppearance, setAppearance, toggleAppearance } from './appearance'
 import CallStage from './CallStage.vue'
 import { pickPhoto, takePhoto } from './photo'
@@ -661,8 +684,13 @@ function answerGate(go: boolean): void {
 
 /** 她在手机上做过的事。存在这台手机上，见 `api.ts` 的 `loadLedger`。 */
 const ledger = ref<ActionRow[]>([])
-/** 直接按的按钮：只放**不需要参数**的那几个，其余的靠说话让她做。 */
-const quick = computed(() => ACTIONS.filter((action) => action.args.length === 0))
+/**
+ * 直接按的按钮：放**没有必填参数**的那几个，其余的靠说话让她做。
+ *
+ * 判据是"有没有必填参数"而不是"有没有参数"：`get_volume` 后来多了一个可选的
+ * 声道，按老判据它会从这一排里消失——一个只加了可选项的动作不该因此少了个按钮。
+ */
+const quick = computed(() => ACTIONS.filter((action) => action.args.every((arg) => !arg.required)))
 
 async function record(row: ActionRow): Promise<void> {
   ledger.value = [row, ...ledger.value].slice(0, 40)
@@ -696,12 +724,15 @@ function clockOf(at: number): string {
 /** 相册浏览：缩略图列表。点开这一页才去要权限，不在启动时就问。 */
 const album = ref<AlbumPhoto[]>([])
 const albumError = ref('')
+/** 读到了、但是一张都没有。跟 `albumError` 分开：这不是错误，是要给出下一步的空态。 */
+const albumEmpty = ref('')
 const albumBusy = ref(false)
 
 async function openAlbum(): Promise<void> {
   if (albumBusy.value) return
   albumBusy.value = true
   albumError.value = ''
+  albumEmpty.value = ''
   try {
     if (!(await askMediaAccess())) {
       albumError.value = '没给相册权限。她看不到你的照片；想问某一张，可以先用下面的"从相册"挑给她'
@@ -711,6 +742,14 @@ async function openAlbum(): Promise<void> {
     const seen = await listAlbum(24)
     album.value = seen.photos
     albumError.value = seen.error
+    // 读到 0 张以前是**屏幕上一句话都没有**：面板空着，看着像按钮坏了。
+    // 而 0 张有两种完全不同的原因（真没照片 / Android 14 只给"选中的那几张"却一张没选），
+    // 两种都有下一步可走，所以要说出来。
+    if (!seen.error && !seen.photos.length) {
+      albumEmpty.value =
+        '一张都没读到。可能是相册真的空着，也可能是 Android 14 那档"只给选中的照片"权限而你一张都没选——' +
+        '换上面那个「从相册」按钮，让系统自己弹选择器，那条路不受这个限制'
+    }
   } finally {
     albumBusy.value = false
   }
@@ -740,6 +779,44 @@ const streaming = ref(-1)
 const live = ref(-1)
 const liveText = ref('')
 
+/** 距离上一次"有进展"过了几秒。进展 = 收到一段新字，或这一问刚开始。 */
+const stall = ref(0)
+/** 攒够这么多秒才在屏幕上开口，免得她还没想完就先闪一行字。 */
+const STALL_SHOW_AFTER = 12
+let stallTimer: ReturnType<typeof setInterval> | null = null
+
+function startStall(): void {
+  stopStall()
+  stall.value = 0
+  stallTimer = setInterval(() => {
+    stall.value += 1
+  }, 1000)
+}
+
+function stopStall(): void {
+  if (stallTimer !== null) clearInterval(stallTimer)
+  stallTimer = null
+  stall.value = 0
+}
+
+/**
+ * 断网。
+ *
+ * `navigator.onLine` 在 Android WebView 里跟的是系统那张网，**不保证真能连到模型那台机器**，
+ * 所以它只用来提前说人话、省掉一次 20 秒的干等；真正算不算连不上，还是看请求回来的错误。
+ */
+const offline = ref(typeof navigator === 'undefined' ? false : navigator.onLine === false)
+
+function onNetBack(): void {
+  offline.value = false
+  note('网通了')
+}
+
+function onNetGone(): void {
+  offline.value = true
+  note('这台手机断网了。她答不了话，输入框里的字会留着', true)
+}
+
 function beginLive(): void {
   turns.value = withTurn(turns.value, { role: 'assistant', text: '', at: Date.now() })
   live.value = turns.value.length - 1
@@ -749,6 +826,7 @@ function beginLive(): void {
 
 function onStreamDelta(delta: Delta): void {
   if (live.value < 0 || !delta.content) return
+  stall.value = 0
   liveText.value += delta.content
   const at = live.value
   turns.value = turns.value.map((row, index) => (index === at ? { ...row, text: liveText.value } : row))
@@ -772,6 +850,7 @@ async function endLive(reply: string): Promise<void> {
 
 /** 不听了。只有流式那一趟能停得动——遥控模式下话在电脑上跑，这边按了也拦不住。 */
 async function stopAnswer(): Promise<void> {
+  if (gate.value) answerGate(false)
   if (live.value < 0) return
   const cut = await cancelChat()
   note(cut ? '不再等她了，已经说出来的部分留着' : '这台设备停不下这一问')
@@ -790,9 +869,12 @@ const title = computed(() => {
   return row?.title || '小夜'
 })
 
-const subtitle = computed(() =>
-  link.value ? `遥控 · ${link.value.name}` : '独立模式 · 用自己的 Key',
-)
+const subtitle = computed(() => {
+  // 断网要一直挂在顶上，不能只弹一条几秒就消失的提示：她答不上来的时候，
+  // 人第一件要知道的事是"网没了"，不是"她坏了"。
+  if (offline.value) return '这台手机现在没网'
+  return link.value ? `遥控 · ${link.value.name}` : '独立模式 · 用自己的 Key'
+})
 
 function note(text: string, bad = false): void {
   toast.value = { text, bad }
@@ -871,7 +953,7 @@ async function answer(text: string, attachments: Attachment[]): Promise<string> 
   // 独立模式走工具环：她在这台手机上能动的那些事，只有这一条路能真正落到原生层。
   // 遥控模式**不带**工具环——电脑上的那个 agent 够不到这台手机，把工具清单发过去
   // 只会让她答应做一件做不到的事（"我帮你把手机音量调大了"然后什么都没发生）。
-  return askAgent([...turns.value, { role: 'user', text }], cfg.value, attachments, approve, {
+  return askAgent(requestHistory(turns.value, text), cfg.value, attachments, approve, {
     onAction: record,
     onNote: (message) => note(message),
     onDelta: live.value >= 0 ? onStreamDelta : undefined,
@@ -893,13 +975,22 @@ async function submit(): Promise<void> {
   const typed = draft.value.trim()
   const shot = pending.value
   if ((!typed && !shot) || busy.value) return
+  // busy 必须**同步**置位。原来那句 `await nextTick()` 夹在"检查 busy"和"置 busy"之间，
+  // 而只要让出一次执行权，快速双击（或者推荐问题＋回车）就能两次都通过检查——
+  // 两条并发的问答会往同一个气泡里写字，看起来就是"她的回答串了"。
+  busy.value = true
+  if (offline.value) {
+    // 断网就别发：发出去也是 20 秒后一句"连不上模型"。字留在输入框里，网通了再按。
+    busy.value = false
+    note('这台手机现在没网。你打的字还在输入框里，网通了再发一次', true)
+    return
+  }
   const attachments: Attachment[] = shot ? [shot] : []
   draft.value = ''
   pending.value = null
   tray.value = false
   await nextTick()
   grow()
-  busy.value = true
   // 图不进历史：一张 300 KB 的 data URL 存 60 条就是 18 MB，而手机上根本不需要重放它。
   await push('user', typed || '（看这张图）', Boolean(attachments.length))
   // 只有独立模式挂空气泡：遥控模式下答案在电脑上整段生成，这边挂个空壳
@@ -907,11 +998,13 @@ async function submit(): Promise<void> {
   if (!link.value) beginLive()
   let reply = ''
   let problem = ''
+  startStall()
   try {
     reply = await answer(typed || '这张图里是什么？说重点。', attachments)
   } catch (err) {
     problem = err instanceof Error ? err.message : String(err)
   }
+  stopStall()
   if (live.value >= 0) {
     // 出错也要收尾：半句已经上屏的话不能因为后面断了就整条消失，
     // 那比"她说到一半停住"更像坏了。
@@ -1108,15 +1201,64 @@ async function cancelTalk(): Promise<void> {
   listening.value = false
   try {
     await XySpeech.listenStop()
+    // 取消这件事**必须在屏幕上留一句话**。原来这里是静默的：手指滑出按钮，
+    // 那半句就没了，用户看到的是"她没听见我说什么"——而其实是自己取消了。
+    note('这一段没发出去（滑出按钮就是取消），要发就再按住说一次')
   } catch {
-    // 松手这件事没有别的可见后果，也不该在屏幕上留下红色错误。
+    // 停下来这一步本身失败没有别的可见后果，不该在屏幕上再叠一条红色错误。
   }
 }
 
+/** 模型那几栏挑出来的毛病。空表就是可以存。 */
+const modelIssues = ref<FieldIssue[]>([])
+const probing = ref(false)
+
 async function save(): Promise<void> {
-  cfg.value = { ...form }
-  await saveModel(cfg.value)
-  note('模型设置已保存')
+  // 校验不过就**不存**：存进去一个连不上的地址，屏幕上却写着"已保存"，
+  // 下一次问答失败时人根本想不起来是这一栏的问题。
+  modelIssues.value = checkModel(form)
+  if (modelIssues.value.length) {
+    note(`先改一下：${modelIssues.value[0].text}`, true)
+    return
+  }
+  // 指纹归一化之后写回表单：从终端里复制出来的那串常常没有 `sha256:` 前缀，
+  // 补上是这里的活，不该让用户猜格式。
+  const pin = normalizePin(form.pin) ?? ''
+  const next = { baseUrl: form.baseUrl.trim(), apiKey: form.apiKey.trim(), model: form.model.trim(), pin }
+  try {
+    await saveModel(next)
+    cfg.value = next
+    form.pin = pin
+    note('模型设置已安全保存')
+  } catch (error) {
+    note(error instanceof Error ? error.message : '安全配置保存失败，仍使用原设置', true)
+  }
+}
+
+/**
+ * 「试一下这个配置」：探的是**表单里这份还没存的**，不是已经存下的那份。
+ * 存之前先知道通不通，就不用改一栏存一次、再问一句才发现不对。
+ */
+async function tryModel(): Promise<void> {
+  modelIssues.value = checkModel(form)
+  if (modelIssues.value.length) {
+    note(`先改一下：${modelIssues.value[0].text}`, true)
+    return
+  }
+  probing.value = true
+  try {
+    const seen = await probeModel({
+      baseUrl: form.baseUrl.trim(),
+      apiKey: form.apiKey.trim(),
+      model: form.model.trim(),
+      pin: normalizePin(form.pin) ?? '',
+    })
+    note(seen.text, !seen.ok)
+  } catch (err) {
+    note(err instanceof Error ? err.message : String(err), true)
+  } finally {
+    probing.value = false
+  }
 }
 
 async function clearHistory(): Promise<void> {
@@ -1128,6 +1270,11 @@ async function clearHistory(): Promise<void> {
 }
 
 async function test(): Promise<void> {
+  const bad = checkPort(pcForm.port, 8737)
+  if (bad) {
+    note(bad.text, true)
+    return
+  }
   busy.value = true
   try {
     const hello = await pcHello(pcForm.host, Number(pcForm.port), pcForm.pin)
@@ -1144,6 +1291,11 @@ async function test(): Promise<void> {
 }
 
 async function pair(): Promise<void> {
+  const bad = checkPort(pcForm.port, 8737)
+  if (bad) {
+    note(bad.text, true)
+    return
+  }
   busy.value = true
   try {
     const bound = await pcPair({
@@ -1226,10 +1378,15 @@ function onVoiceChanged(): void {
 
 onMounted(async () => {
   teardown = installViewport()
+  window.addEventListener('online', onNetBack)
+  window.addEventListener('offline', onNetGone)
   applyAppearance()
-  cfg.value = await loadModel()
+  const startupWarnings: string[] = []
+  try { cfg.value = await loadModel() }
+  catch (error) { startupWarnings.push(error instanceof Error ? error.message : '模型安全配置读取失败') }
   Object.assign(form, cfg.value)
-  link.value = await loadPc()
+  try { link.value = await loadPc() }
+  catch (error) { startupWarnings.push(error instanceof Error ? error.message : '电脑配对配置读取失败') }
   if (link.value) {
     Object.assign(pcForm, {
       host: link.value.host,
@@ -1239,6 +1396,7 @@ onMounted(async () => {
     void loadSessions()
   }
   turns.value = await loadHistory()
+  for (const warning of startupWarnings) note(warning, true)
   ledger.value = await loadLedger()
   const wanted = await loadVoiceFlags()
   handsFree.value = wanted.handsFree
@@ -1249,8 +1407,13 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  if (gate.value) answerGate(false)
+  void cancelChat()
   teardown?.()
   reveal.cancel()
+  stopStall()
+  window.removeEventListener('online', onNetBack)
+  window.removeEventListener('offline', onNetGone)
 })
 </script>
 
@@ -1480,6 +1643,13 @@ onBeforeUnmount(() => {
   padding-left: 36px;
   font-size: 12px;
   color: var(--xy-text-3);
+}
+
+/* 卡住那一行：同一档字号，只换个颜色——要看得见，但不能比"她在想"更抢眼。 */
+.thinking--slow {
+  display: block;
+  line-height: 1.5;
+  color: var(--xy-warn);
 }
 
 .thinking__dot {

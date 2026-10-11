@@ -38,7 +38,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, Final
 
 from jarvis.app.preferences import (
     ALERTS_COOLDOWN_MINUTES,
@@ -164,6 +164,15 @@ class Alert:
     acknowledged: bool = False
 
     def to_dict(self) -> dict[str, Any]:
+        """The shape the page reads. ``since``/``last_seen`` leave as **epoch** seconds.
+
+        引擎内部走 ``time.monotonic()``，它跟墙钟无关；界面拿它和 ``Date.now()`` 相减
+        算「已持续」，就得到 1970 年以来的秒数 —— r100 打包版实测屏上写的是
+        「已持续 497622 小时」。换 epoch 这件事放在出口这一层，消费者就不用知道
+        引擎用的是哪把钟。
+        """
+        mono = time.monotonic()
+        epoch = time.time()
         return {
             "code": self.code,
             "rule": self.rule,
@@ -173,8 +182,8 @@ class Alert:
             "value": self.value,
             "threshold": self.threshold,
             "unit": self.unit,
-            "since": self.since,
-            "last_seen": self.last_seen,
+            "since": epoch - (mono - self.since),
+            "last_seen": epoch - (mono - self.last_seen),
             "count": self.count,
             "acknowledged": self.acknowledged,
         }
@@ -187,6 +196,37 @@ class _Reading:
     rule: AlertRule
     subject: str
     value: float
+
+
+_OPTICAL_FILESYSTEMS: Final[frozenset[str]] = frozenset({"cdfs", "udf", "iso9660", "udf7x"})
+"""光盘/挂载镜像的文件系统：它们**永远**显示 100% 已用。"""
+
+_MIN_ALERTABLE_TOTAL: Final = 1024**3
+"""小于 1 GiB 的卷不盯。"""
+
+
+def _watchable_disk(disk: Any) -> bool:
+    """这一台的剩余空间，删东西改变得了吗？改不来的别报。
+
+    实测撞到的：一张挂载的虚拟光盘 ``F:\\``，CDFS、总共 2.5 MB、已用 100% ——
+    按默认告警线（剩 20 GB）它**永远**是一条 critical，屏幕上常驻一颗红点。
+    人学会跳过常驻的那条之后，真那条也没人看了，所以这不是"少一条噪音"，
+    是保住告警这件事本身的可信度。两条判据都是格式事实，不是猜的：
+    光盘文件系统（CDFS/UDF/ISO9660）根本不可写；总容量比 1 GiB 还小的卷不是任何人的数据盘。
+    """
+    fstype = str(getattr(disk, "fstype", "") or "").strip().lower()
+    if fstype in _OPTICAL_FILESYSTEMS:
+        logger.debug("磁盘告警跳过 %s：光盘文件系统 %s", getattr(disk, "mount", "?"), fstype)
+        return False
+    total = getattr(disk, "total_bytes", None)
+    if isinstance(total, (int, float)) and total < _MIN_ALERTABLE_TOTAL:
+        logger.debug(
+            "磁盘告警跳过 %s：整卷只有 %.1f MB，报「剩多少」没有意义",
+            getattr(disk, "mount", "?"),
+            float(total) / 1024**2,
+        )
+        return False
+    return True
 
 
 def readings_of(snapshot: Any) -> list[_Reading]:
@@ -215,7 +255,7 @@ def readings_of(snapshot: Any) -> list[_Reading]:
             found.append(_Reading(RULE_BY_CODE["cpu"], "", float(percent)))
     for disk in getattr(snapshot, "disks", ()) or ():
         free = getattr(disk, "free_bytes", None)
-        if isinstance(free, (int, float)):
+        if isinstance(free, (int, float)) and _watchable_disk(disk):
             gigabytes = float(free) / 1024**3
             mount = str(getattr(disk, "mount", "?"))
             found.append(_Reading(RULE_BY_CODE["disk"], mount, gigabytes))

@@ -47,6 +47,14 @@ import javax.net.ssl.X509TrustManager;
 public class XyNetPlugin extends Plugin {
 
     private static final int DEFAULT_TIMEOUT_MS = 20_000;
+    private final java.util.Set<HttpURLConnection> requests = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private final java.util.concurrent.ThreadPoolExecutor requestPool = new java.util.concurrent.ThreadPoolExecutor(
+            2, 2, 0L, java.util.concurrent.TimeUnit.MILLISECONDS,
+            new java.util.concurrent.ArrayBlockingQueue<Runnable>(16), work -> {
+                Thread thread = new Thread(work, "xy-net-request");
+                thread.setDaemon(true);
+                return thread;
+            });
 
     @PluginMethod
     public void request(PluginCall call) {
@@ -74,17 +82,20 @@ public class XyNetPlugin extends Plugin {
             return;
         }
         try {
-            send(call, url, method, body, pin, timeout, headers);
-        } catch (Exception exc) {
-            reply.put("status", 0);
-            reply.put("body", "");
-            reply.put("error", explain(exc));
-            call.resolve(reply);
+            requestPool.execute(() -> {
+                try {
+                    send(call, url, method, body, pin, timeout, headers);
+                } catch (Exception exc) {
+                    call.resolve(wire(0, "", explain(exc)));
+                }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException exc) {
+            call.resolve(wire(0, "", "请求太多，请稍后再试"));
         }
     }
 
     private static int value(Integer supplied) {
-        return supplied == null || supplied <= 0 ? DEFAULT_TIMEOUT_MS : supplied;
+        return supplied == null || supplied <= 0 ? DEFAULT_TIMEOUT_MS : Math.min(supplied, 300_000);
     }
 
     // -- 流式：一段一段把正文吐给网页 --------------------------------------
@@ -104,6 +115,9 @@ public class XyNetPlugin extends Plugin {
     private volatile HttpURLConnection live;
 
     private volatile boolean cancelled;
+    private final Object streamLock = new Object();
+    private boolean streaming;
+
 
     @PluginMethod
     public void stream(final PluginCall call) {
@@ -118,7 +132,14 @@ public class XyNetPlugin extends Plugin {
             call.resolve(wire(0, "", url.isEmpty() ? "没有地址" : "只允许 https 地址"));
             return;
         }
-        cancelled = false;
+        synchronized (streamLock) {
+            if (streaming) {
+                call.resolve(wire(409, "", "上一轮请求还没结束，请稍候"));
+                return;
+            }
+            streaming = true;
+            cancelled = false;
+        }
         Thread worker = new Thread(new Runnable() {
             @Override
             public void run() {
@@ -211,7 +232,9 @@ public class XyNetPlugin extends Plugin {
             notifyListeners(STREAM_EVENT, done);
             call.resolve(wire(0, "", reason));
         } finally {
+            HttpURLConnection pending = live;
             live = null;
+            if (connection == null) connection = pending;
             if (connection != null) {
                 try {
                     connection.disconnect();
@@ -219,6 +242,7 @@ public class XyNetPlugin extends Plugin {
                     // 收尾用的，失败没有可报的。
                 }
             }
+            synchronized (streamLock) { streaming = false; }
         }
     }
 
@@ -258,17 +282,17 @@ public class XyNetPlugin extends Plugin {
 
         /** 数出末尾**不是**半个字符的最长前缀。一个 UTF-8 序列最多四个字节，所以只看尾巴四个。 */
         private static int completeLength(byte[] bytes) {
-            for (int back = 1; back <= Math.min(4, bytes.length); back++) {
-                int probe = bytes.length - back;
-                byte value = bytes[probe];
-                boolean startsSequence = back == 1 || (bytes[probe + 1] & 0xC0) != 0x80;
-                if (!startsSequence) {
-                    continue;
-                }
-                int need = (value & 0x80) == 0 ? 1 : (value & 0xE0) == 0xC0 ? 2 : (value & 0xF0) == 0xE0 ? 3 : 4;
-                return bytes.length - probe >= need ? bytes.length : probe;
-            }
-            return bytes.length;
+            if (bytes.length == 0) return 0;
+            int start = bytes.length - 1;
+            // Find the leading byte, not the last continuation byte. The previous
+            // implementation treated a trailing 10xxxxxx byte as a four-byte lead.
+            while (start >= 0 && (bytes[start] & 0xC0) == 0x80) start--;
+            if (start < 0) return bytes.length; // malformed input: decode visibly
+            int lead = bytes[start] & 0xFF;
+            int need = lead >= 0xC2 && lead <= 0xDF ? 2
+                    : lead >= 0xE0 && lead <= 0xEF ? 3
+                    : lead >= 0xF0 && lead <= 0xF4 ? 4 : 1;
+            return bytes.length - start >= need ? bytes.length : start;
         }
     }
 
@@ -289,6 +313,9 @@ public class XyNetPlugin extends Plugin {
             JSObject headers
     ) throws Exception {
         HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
+        live = connection;
+        if (cancelled) throw new java.io.IOException("已取消");
+        connection.setInstanceFollowRedirects(false);
         if (connection instanceof HttpsURLConnection) {
             HttpsURLConnection secure = (HttpsURLConnection) connection;
             if (!pin.isEmpty()) {
@@ -317,6 +344,7 @@ public class XyNetPlugin extends Plugin {
                 out.write(body.getBytes("UTF-8"));
             }
         }
+        if (cancelled) throw new java.io.IOException("已取消");
         return connection;
     }
 
@@ -330,6 +358,9 @@ public class XyNetPlugin extends Plugin {
             JSObject headers
     ) throws Exception {
         HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
+        requests.add(connection);
+        try {
+        connection.setInstanceFollowRedirects(false);
         if (connection instanceof HttpsURLConnection) {
             HttpsURLConnection secure = (HttpsURLConnection) connection;
             if (!pin.isEmpty()) {
@@ -362,13 +393,16 @@ public class XyNetPlugin extends Plugin {
         int status = connection.getResponseCode();
         InputStream stream = status >= 400 ? connection.getErrorStream() : connection.getInputStream();
         String text = stream == null ? "" : read(stream);
-        connection.disconnect();
 
         JSObject reply = new JSObject();
         reply.put("status", status);
         reply.put("body", text);
         reply.put("error", "");
         call.resolve(reply);
+        } finally {
+            requests.remove(connection);
+            connection.disconnect();
+        }
     }
 
     private static String read(InputStream stream) throws java.io.IOException {
@@ -459,4 +493,15 @@ public class XyNetPlugin extends Plugin {
             return builder.toString();
         }
     }
+    @Override
+    protected void handleOnDestroy() {
+        cancelled = true;
+        HttpURLConnection connection = live;
+        if (connection != null) connection.disconnect();
+        for (HttpURLConnection request : requests) request.disconnect();
+        requests.clear();
+        requestPool.shutdownNow();
+        super.handleOnDestroy();
+    }
+
 }

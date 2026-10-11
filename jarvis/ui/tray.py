@@ -74,12 +74,26 @@ _INK: dict[str, tuple[tuple[int, int, int, int], tuple[int, int, int, int], bool
     STATUS_WORKING: (AMBER, (255, 226, 168, 255), True),
 }
 
-TITLES: dict[str, str] = {
-    STATUS_OFF: "小夜 · 麦克风未开启（后台待命）",
-    STATUS_WAITING: "小夜 · 正在听，等唤醒词「你好小夜」",
-    STATUS_HEARING: "小夜 · 正在收你这句话",
-    STATUS_WORKING: "小夜 · 正在识别并思考",
-}
+DEFAULT_NAME = "小夜"
+"""The name shipped in the build, used whenever the operator has not chosen one."""
+
+
+def tray_titles(name: str) -> dict[str, str]:
+    """The hover text for each status, wearing the name the operator chose.
+
+    The wake phrase in the 正在听 line is deliberately *not* renamed with it: that is
+    an acoustic the recogniser was tuned on (and its own setting), not a label this
+    file owns.
+    """
+    return {
+        STATUS_OFF: f"{name} · 麦克风未开启（后台待命）",
+        STATUS_WAITING: f"{name} · 正在听，等唤醒词「你好小夜」",
+        STATUS_HEARING: f"{name} · 正在收你这句话",
+        STATUS_WORKING: f"{name} · 正在识别并思考",
+    }
+
+
+TITLES: dict[str, str] = tray_titles(DEFAULT_NAME)
 
 
 def draw_icon(status: str, *, pixels: int = ICON_PIXELS) -> Any:
@@ -129,6 +143,7 @@ def _menu_items(
     autostart_on: Callable[[], bool] = lambda: False,
     on_toggle_mobile: Callable[[], object] | None = None,
     mobile_on: Callable[[], bool] = lambda: False,
+    name: str = DEFAULT_NAME,
 ) -> tuple[Any, ...]:
     """The right-click menu, as a tuple a test can read without pystray installed.
 
@@ -155,7 +170,7 @@ def _menu_items(
             builder.MenuItem("手机接入", on_toggle_mobile, checked=lambda _item: mobile_on())
         )
     items.append(builder.Menu.SEPARATOR)
-    items.append(builder.MenuItem("退出小夜", on_quit))
+    items.append(builder.MenuItem(f"退出{name}", on_quit))
     return tuple(items)
 
 
@@ -189,6 +204,7 @@ class TrayIcon:
         mobile_on: Callable[[], bool] = lambda: False,
     ) -> None:
         self._name = name
+        self._titles = tray_titles(name)
         self._on_activate = on_activate
         self._on_quit = on_quit
         self._on_toggle_pet = on_toggle_pet
@@ -241,12 +257,13 @@ class TrayIcon:
                     autostart_on=self._autostart_on,
                     on_toggle_mobile=self._call_toggle_mobile,
                     mobile_on=self._mobile_on,
+                    name=self._name,
                 )
             )
             icon = pystray.Icon(
                 self._name,
                 icon=draw_icon(self._status),
-                title=TITLES[self._status],
+                title=self._titles[self._status],
                 menu=menu,
             )
             icon.run_detached()
@@ -255,7 +272,7 @@ class TrayIcon:
             logger.exception("could not start the system tray icon")
             return False
         self._icon = icon
-        logger.info("tray icon up: %s", TITLES[self._status])
+        logger.info("tray icon up: %s", self._titles[self._status])
         return True
 
     def set_status(self, status: str) -> None:
@@ -264,7 +281,7 @@ class TrayIcon:
         Cheap enough to call on every pipeline event: two attribute assignments, and
         pystray repaints on its own thread.
         """
-        if status not in TITLES:
+        if status not in self._titles:
             status = STATUS_WAITING
         if status == self._status and self._icon is not None:
             return
@@ -275,12 +292,12 @@ class TrayIcon:
         try:
             # Title first: the hover text is the precise claim, and a bitmap that
             # failed to render must not leave the icon still saying 「未开启」.
-            icon.title = TITLES[status]
+            icon.title = self._titles[status]
             icon.icon = draw_icon(status)
         except Exception:  # pragma: no cover - the icon vanished mid-update
             logger.debug("tray repaint skipped", exc_info=True)
 
-    def notify(self, message: str, title: str = "小夜") -> bool:
+    def notify(self, message: str, title: str = DEFAULT_NAME) -> bool:
         """A balloon in the notification area, for the moment the window disappears.
 
         Returns whether it was shown. The caller does not retry: a person who just
