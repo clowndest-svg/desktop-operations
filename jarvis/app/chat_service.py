@@ -58,6 +58,7 @@ from jarvis.app.conversation import (
     STATUS_IDLE,
     Conversation,
 )
+from jarvis.app.knowledge_growth import TurnEvidence
 from jarvis.app.preferences import DEFAULT_DISPLAY_NAME
 from jarvis.app.round_table import Seat, Speech, refuse_pictures
 from jarvis.app.tool_routing import classify_tool_intent, select_tool_names
@@ -187,6 +188,19 @@ def _is_bundled(pair: _Pair | None) -> bool:
     return pair is not None and pair.provider == local_server.LOCAL_PROVIDER
 
 
+def _spawn_once(run: Callable[[], None]) -> None:
+    """默认的执行方式：一条命名过的一次性守护线程。
+
+    命名是为了日志能看出来是它 —— 自学在后台跑，出问题时最怕"有个线程在动知识库，
+    但没人知道是谁"。
+    """
+    threading.Thread(target=run, name="jarvis-learn", daemon=True).start()
+
+
+_WEB_TOOLS = frozenset({"search_web", "fetch_url"})
+"""只有真上过网的轮次才自动学，理由写在 `jarvis/app/knowledge_growth.py` 顶部。"""
+
+
 @dataclass(frozen=True, slots=True)
 class _Turn:
     """What one model drive produced: the answer, the tools it needed, and the trace."""
@@ -195,6 +209,10 @@ class _Turn:
     tools_used: tuple[str, ...] = ()
     artifacts: tuple[str, ...] = ()
     """文件路径：这一轮真落到盘上的东西（画出来的图、生成的文档）。原样带上，页面决定怎么摆。"""
+
+    web_hits: tuple[str, ...] = ()
+    """这一轮 `search_web` / `fetch_url` 回给模型的原文。她自学时要有出处，
+    不然存进去的只是"她说过什么"，和把聊天记录整份倒进资料库没有区别。"""
 
     reasoning: str = ""
     reasoning_tokens: int | None = None
@@ -599,6 +617,8 @@ class ChatService:
         pair_provider: Callable[[], tuple[str, str]] | None = None,
         collaboration: Collaboration | None = None,
         vision_for: Callable[[str, str], bool | None] | None = None,
+        growth_provider: Callable[[], object] | None = None,
+        learn_spawn: Callable[[Callable[[], None]], None] | None = None,
     ) -> None:
         """Create the service.
 
@@ -654,6 +674,8 @@ class ChatService:
         self._tuning_for = tuning_for
         self._pair_provider = pair_provider
         self._vision_for = vision_for
+        self._growth_provider = growth_provider
+        self._learn_spawn = learn_spawn or _spawn_once
         """Whether this pair has ever been shown a picture it could describe.
 
         ``None`` from the callable means "nobody has looked", which attaches anyway: a
@@ -889,6 +911,45 @@ class ChatService:
     # Turns
     # ------------------------------------------------------------------
 
+    def _growth(self) -> object | None:
+        """现在这一份自学层，或者 ``None``。和别的 provider 一样**每次现取**：
+        装配表注册它的时候，知识库可能还没起。"""
+        if self._growth_provider is None:
+            return None
+        try:
+            return self._growth_provider()
+        except Exception:  # 取不到就是这一轮不学，不许把回答带倒
+            logger.exception("自学层没拿到，这一轮不学")
+            return None
+
+    def _learn(self, question: str, answer: str, turn: _Turn) -> None:
+        """把这一轮交给自学层。**不阻塞回答**：索引一条笔记要做切块和向量化，
+        放在 return 之前就是每问一句多等一次磁盘。
+
+        学不学、存不存、为什么没存，都由 :class:`KnowledgeGrowth` 判；这里只负责
+        "别把异常抛回对话"。没存的原因进日志 —— 屏上那一格是面板去读 ``stats()``，
+        不是每轮往界面上刷一句"我为什么没学"。
+        """
+        growth = self._growth()
+        if growth is None:
+            return
+        evidence = TurnEvidence(
+            question=question,
+            answer=answer,
+            tools=tuple(turn.tools_used),
+            web_results=tuple(turn.web_hits),
+        )
+
+        def run() -> None:
+            try:
+                outcome = growth.consider(evidence)  # type: ignore[attr-defined]
+                if not outcome.get("stored"):
+                    logger.info("这一轮没自学：%s", outcome.get("reason"))
+            except Exception:
+                logger.exception("自学这一轮没成（不影响回答）")
+
+        self._learn_spawn(run)
+
     def ask(
         self,
         text: str,
@@ -1068,6 +1129,7 @@ class ChatService:
                 client=client,
                 extract=not turn.cancelled and not (should_stop is not None and should_stop()),
             )
+            self._learn(question, answer, turn)
         chat.end_turn(
             status=STATUS_DONE if answer else STATUS_IDLE,
             error="已中断" if turn.cancelled and not answer else "",
@@ -1724,6 +1786,7 @@ class ChatService:
         """
         used: list[str] = []
         made: list[str] = []
+        web_hits: list[str] = []
         thoughts: list[str] = []
         spent: list[int | None] = []
         prompts: list[int | None] = []
@@ -1776,6 +1839,7 @@ class ChatService:
                 text=response.content,
                 tools_used=tuple(used),
                 artifacts=tuple(made),
+                web_hits=tuple(web_hits),
                 reasoning="\n\n".join(part for part in thoughts if part),
                 reasoning_tokens=_sum_or_none(spent),
                 prompt_tokens=_sum_or_none(prompts),
@@ -1822,6 +1886,8 @@ class ChatService:
                 used.append(requested.name)
                 self._phase(chat, chat.tool_phase(), on_phase)
                 result_text = self._invoke(requested.name, requested.arguments)
+                if requested.name in _WEB_TOOLS and result_text.strip():
+                    web_hits.append(f"{requested.name}：{result_text.strip()[:1200]}")
                 for produced in _artifacts_of(requested.name, result_text):
                     if produced not in made:
                         made.append(produced)

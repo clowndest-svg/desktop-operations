@@ -51,6 +51,7 @@ PACKS: Final[dict[str, tuple[str, ...]]] = {
     "mirror": ("mirror_devices", "mirror_start", "mirror_stop", "phone_screen_read"),
     "image": ("generate_image", "image_status"),
     "documents": ("write_document", "document_kinds"),
+    "release": ("check_update",),
     "process": ("list_processes", "propose_kill_process"),
     "settings": ("settings_read", "settings_apply", "voice_pick"),
     "reminders": ("add_reminder", "list_reminders", "cancel_reminder"),
@@ -144,6 +145,15 @@ _PATTERNS: Final[dict[str, re.Pattern[str]]] = {
         # 「帮我做一张壁纸」。少了这一条，generate_image 根本没进请求，她只能回
         # 「当前我无法直接生成图片」。中文没有词边界，所以按"动词 + 最多八个字 + 图画类名词"收。
         r"(生成|做|来|整|要|给我|帮我).{0,8}(图|图片|照片|壁纸|头像|插画|海报|logo)",
+        re.IGNORECASE,
+    ),
+    # 买家问"我这版旧不旧"不需要精确措辞，但一句都命中不了就等于这条能力不存在
+    # （r105 那条教训的同一个形状）。刻意不进 GENERAL：它不是"她能不能被告诉一件事"，
+    # 漏了也只是这一轮没带上，而带上一次的 token 成本要每个人每轮付。
+    "release": re.compile(
+        r"新版本|更新一下|有更新|更新了吗|检查.{0,3}更新|要不要更新|该更新了|"
+        r"最新版|最新一版|最新的吗|是不是最新|是不是旧|太旧了|旧版本|这版.{0,4}(旧|新|老)|升级|要不要重装|"
+        r"软件.{0,6}更新|更新.{0,4}软件|要更新吗|用更新吗|该升级|release ?notes|changelog",
         re.IGNORECASE,
     ),
     # r105：「帮我做一份周报」「导出成 Excel」这类话以前一条都不命中，

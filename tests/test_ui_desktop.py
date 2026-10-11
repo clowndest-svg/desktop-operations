@@ -154,6 +154,7 @@ def _bridge(
     announcer: Any = None,
     memory: Any = None,
     knowledge: Any = None,
+    growth: Any = None,
     process: Any = None,
     computer_access: Any = None,
     scheduler: Any = None,
@@ -186,6 +187,7 @@ def _bridge(
         announcer=announcer,
         memory=memory,
         knowledge=knowledge,
+        growth=growth,
         process=process,
         computer_access=computer_access,
         scheduler=scheduler,
@@ -3695,6 +3697,102 @@ class TestTheEngineReReadsThePreferencesBeforeItDecides:
         bridge.chat_send("今天星期几", [], "", "", "")
 
         assert local_server.tuning().model == wanted
+
+
+class TestTheGrowthDoors:
+    """她自学那一格的三扇门：形状齐不齐、拒绝时说不说得清、删完读没读回来。"""
+
+    def test_state_is_a_full_shape_even_with_nothing_wired(self, tmp_path: Path) -> None:
+        """没接这一层也要回**一整份**：界面把缺字段读成 0 就是撒谎。"""
+        bridge = _bridge(tmp_path)
+        state = bridge.growth_state()
+        for key in (
+            "enabled",
+            "today",
+            "limit_per_day",
+            "total_seen",
+            "folder",
+            "directory",
+            "has_knowledge",
+        ):
+            assert key in state, f"少了 {key}：那一格会画成 0 而不是「没这一层」"
+        assert state["enabled"] is False and state["error"]
+
+    def test_a_real_layer_reports_its_numbers(self, tmp_path: Path) -> None:
+        class _G:
+            def stats(self) -> dict[str, object]:
+                return {
+                    "enabled": True,
+                    "today": 3,
+                    "limit_per_day": 20,
+                    "total_seen": 17,
+                    "folder": "_自学",
+                    "directory": r"E:\数据\笔记\_自学",
+                    "has_knowledge": True,
+                }
+
+            def enabled(self) -> bool:
+                return True
+
+            def set_enabled(self, on: bool) -> bool:
+                return bool(on)
+
+            def forget_learned(self) -> int:
+                return 5
+
+        bridge = _bridge(tmp_path, growth=_G())
+        state = bridge.growth_state()
+        assert state["today"] == 3 and state["enabled"] is True
+        assert str(state["directory"]).endswith("_自学"), "路径必须由后端给，界面不拼"
+
+    def test_the_switch_answers_with_what_was_read_back(self, tmp_path: Path) -> None:
+        """回的是**读回来**的那份，不是把传进去的值原样吐回去。"""
+
+        class _Stubborn:
+            def stats(self) -> dict[str, object]:
+                return {
+                    "enabled": True,
+                    "today": 0,
+                    "limit_per_day": 20,
+                    "total_seen": 0,
+                    "folder": "_自学",
+                    "directory": "",
+                    "has_knowledge": True,
+                }
+
+            def enabled(self) -> bool:
+                return True
+
+            def set_enabled(self, on: bool) -> bool:
+                return True  # 拒绝关闭
+
+            def forget_learned(self) -> int:
+                return 0
+
+        bridge = _bridge(tmp_path, growth=_Stubborn())
+        after = bridge.growth_set(False)
+        assert after["enabled"] is True, "写不进去还报「关掉了」，就是界面上那颗假开关"
+
+    def test_forget_reports_how_many_went_away(self, tmp_path: Path) -> None:
+        class _G:
+            def stats(self) -> dict[str, object]:
+                return {}
+
+            def enabled(self) -> bool:
+                return True
+
+            def set_enabled(self, on: bool) -> bool:
+                return bool(on)
+
+            def forget_learned(self) -> int:
+                return 4
+
+        answer = _bridge(tmp_path, growth=_G()).growth_forget()
+        assert answer["ok"] is True and answer["removed"] == 4
+
+    def test_forget_without_a_layer_says_so(self, tmp_path: Path) -> None:
+        answer = _bridge(tmp_path).growth_forget()
+        assert answer["ok"] is False and answer["removed"] == 0 and answer["error"]
 
 
 class TestTheArtifactDoors:

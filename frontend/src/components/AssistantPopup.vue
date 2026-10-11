@@ -86,6 +86,71 @@
       <!-- ===================================================== 知识库 -->
       <template v-else-if="tab === 'knowledge'">
         <p v-if="notice" class="assistant__note" :class="{ 'assistant__note--bad': noticeBad }">{{ notice }}</p>
+
+        <!-- ------------------------------------------------ 她自学 -->
+        <!--
+          Drawn unconditionally, including when 知识库 is not wired up at all: the day this
+          block sits behind `v-if="growth.has_knowledge"` is the day nobody can tell
+          "she does not learn by herself" apart from "this build has no such thing", and an
+          invisible ability is a deleted one. Same reason `growth_state` always answers with
+          a whole object.
+        -->
+        <section class="assistant__growth">
+          <div class="assistant__headrow">
+            <span class="hud-label">
+              她自学：{{ growth.enabled ? '开着' : '关着' }} · 今天 {{ count(growth.today) }} 条（上限
+              {{ count(growth.limit_per_day) }}）· 一共记过 {{ count(growth.total_seen) }} 条
+            </span>
+            <button class="hud-btn" type="button" :disabled="growthBusy" @click="flipGrowth">
+              {{ growthBusy ? '写入中…' : growth.enabled ? '关掉她自学' : '开启她自学' }}
+            </button>
+            <button
+              v-if="!confirmGrowthWipe"
+              class="hud-btn"
+              type="button"
+              :disabled="growthBusy"
+              @click="confirmGrowthWipe = true"
+            >
+              只删她自学的
+            </button>
+          </div>
+
+          <!--
+            扫描 → 勾选 → 二次确认 → 执行 → 审计, which is how the disk card does it. Here the
+            scope is decided by the path rather than by a checkbox per row, so the second click
+            carries the scope in its own sentence.
+          -->
+          <div v-if="confirmGrowthWipe" class="assistant__confirm">
+            <p class="assistant__warn">
+              这会删掉 {{ growthWhere }} 里她自学记下的那些条（索引和盘上的文件一起删），你喂进去的资料一条不动。不可撤销。
+            </p>
+            <div class="assistant__confirm-actions">
+              <button class="hud-btn danger" type="button" :disabled="growthBusy" @click="forgetGrowth">
+                {{ growthBusy ? '删除中…' : '确认只删这些' }}
+              </button>
+              <button class="hud-btn" type="button" :disabled="growthBusy" @click="confirmGrowthWipe = false">
+                算了
+              </button>
+            </div>
+          </div>
+
+          <p class="assistant__hint">
+            一轮对话里她真搜过网、真打开过某个网址，那一条问答连同出处就存进 {{ growthWhere }}；每天记几条由后端说，这一屏只照着念，不自己数。
+          </p>
+
+          <p v-if="growthResult" class="assistant__note" :class="{ 'assistant__note--bad': growthResultBad }">
+            {{ growthResult }}
+          </p>
+          <p v-if="growth.error" class="assistant__note assistant__note--bad">{{ growth.error }}</p>
+          <p v-if="!growth.has_knowledge" class="assistant__warn">
+            {{
+              growthLoaded
+                ? '这台机器没接知识库，所以没有自学：她查过的东西不会记下来，这颗开关按了也不会存住。'
+                : '还没读到她自学那一格，上面那几个数字不作数。'
+            }}
+          </p>
+        </section>
+
         <div class="assistant__headrow">
           <span class="hud-label">
             文档 {{ docs.length }} · 分块 {{ String(stats.chunks ?? 0) }} · 记录 {{ String(stats.records ?? 0) }}
@@ -105,6 +170,11 @@
         <ul v-else class="assistant__list">
           <li v-for="doc in docs" :key="String(doc.doc_id)" class="assistant__row">
             <span class="assistant__text">{{ String(doc.title || doc.source || doc.doc_id) }}</span>
+            <!--
+              她学的 and 人喂的 have to be told apart on the row itself: one 忘掉 button next to
+              a filename means something different depending on who put it there.
+            -->
+            <span v-if="isLearnedDoc(doc)" class="hud-chip">自学</span>
             <span class="hud-label assistant__meta">{{ String(doc.chunks ?? '') }} 块</span>
             <button class="hud-btn" type="button" @click="forgetDoc(String(doc.doc_id))">忘掉</button>
           </li>
@@ -239,7 +309,7 @@
  * and the workflow engine have had ``stats()`` methods whose docstrings say "for the
  * HUD's automation panel" since they were written, and the panel did not exist.
  */
-import { onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import {
   addReminder,
   cancelReminder,
@@ -252,6 +322,9 @@ import {
   forgetAllMemories,
   forgetKnowledge,
   forgetMemory,
+  growthForget,
+  growthSet,
+  growthState,
   ingestKnowledge,
   planGoal,
   probeKnowledge,
@@ -262,6 +335,7 @@ import {
   toggleReminder,
   toggleScheduledJob,
   type AutomationOverview,
+  type GrowthState,
   type KnowledgeBoard,
   type MemoryRow,
   type PlanRow,
@@ -310,6 +384,40 @@ const probeQuery = ref('')
 const hits = ref<Record<string, unknown>[]>([])
 const probed = ref(false)
 
+/**
+ * 她自学那一格的初始值是"还没问过后端"，不是任何一条她学来的东西。
+ *
+ * 全 0 会被读成"她今天一条也没记"，而那其实是"这一屏还没读"—— 两者长得一样，
+ * 项目就已经付过一次账了，所以下面另记一个 growthLoaded 把它说清楚。
+ */
+const growth = ref<GrowthState>({
+  enabled: false,
+  today: 0,
+  limit_per_day: 0,
+  total_seen: 0,
+  folder: '',
+  has_knowledge: false,
+  error: '',
+})
+const growthLoaded = ref(false)
+const growthBusy = ref(false)
+const confirmGrowthWipe = ref(false)
+const growthResult = ref('')
+const growthResultBad = ref(false)
+
+/**
+ * 她自学的那些条落在哪儿。
+ *
+ * 只念后端给的那一段 ``folder``（``_自学``），**不拼自己猜的根目录** —— 这一层落在
+ * ``notes_dir`` 底下，而 notes_dir 是哪个目录是 Python 的事：页面上印一个「数据/知识库/」
+ * 之类的路径，赌对了没人注意、赌错了所有人照着它去找文件，那正是这个项目反复付账的谎。
+ */
+const growthWhere = computed(() =>
+  growth.value.folder
+    ? `知识库的「${growth.value.folder}」子目录`
+    : '她自己记笔记的那个目录（这台机器没接上自学这一层，没有这个目录）',
+)
+
 const overview = ref<AutomationOverview>({
   scheduler: {},
   workflow: {},
@@ -335,6 +443,27 @@ function num(block: Record<string, unknown>, key: string): number {
   return typeof value === 'number' ? value : 0
 }
 
+/**
+ * 她自学那一格的数字。
+ *
+ * 后端承诺永远回一整份，所以缺字段只发生在它自己读盘炸了的那一条路上（那一格下面紧跟着
+ * 就是它的 ``error`` 那句）。这种时候写「—」而不是补 0 —— "今天 0 条"和"今天没读到"是两句
+ * 不同的话，补一个 0 就是把没查到说成没发生。
+ */
+function count(value: number | undefined): string {
+  return typeof value === 'number' && Number.isFinite(value) ? String(value) : '—'
+}
+
+/**
+ * 这一条是她自己学的还是人喂的：只认出处路径里的那一段目录名。
+ *
+ * 先把反斜杠换成 `/` 再判断 —— Windows 上的 ``source`` 写的是 `...\_自学\...`，
+ * 分隔符归一了才不会哪天目录换了写法就整列静悄悄漏标。
+ */
+function isLearnedDoc(doc: Record<string, unknown>): boolean {
+  return String(doc.source ?? '').replace(/\\/g, '/').includes('_自学')
+}
+
 function say(message: string, bad = false): void {
   notice.value = message
   noticeBad.value = bad
@@ -343,6 +472,9 @@ function say(message: string, bad = false): void {
 function select(next: TabId): void {
   tab.value = next
   confirmWipe.value = false
+  // 确认条不能跨页签活着：在「知识库」里按下的那一颗「确认只删这些」，翻出去再翻回来还挂在屏上，
+  // 下一次随手一点就真删了。
+  confirmGrowthWipe.value = false
   void load(next)
 }
 
@@ -358,9 +490,17 @@ async function load(which: TabId): Promise<void> {
       memories.value = board.rows
       if (board.error) say(board.error, true)
     } else if (which === 'knowledge') {
-      const board: KnowledgeBoard = await fetchKnowledge()
+      // 两扇门一次读齐：她自学那一格和文档列表是同一件事的两半，分两次到会看见数字先变、
+      // 列表后变。谁都不轮询 —— 这一屏只在弹窗打开、或切到这一页时读一次。
+      // ``growth.error`` 不进这一行的 notice：它画在自己那一格下面，说两遍反而没人信。
+      const [board, growthBoard]: [KnowledgeBoard, GrowthState] = await Promise.all([
+        fetchKnowledge(),
+        growthState(),
+      ])
       docs.value = board.documents
       stats.value = board.stats
+      growth.value = growthBoard
+      growthLoaded.value = true
       if (board.error) say(board.error, true)
     } else {
       // Three calls in parallel: the tab draws one screen, and doing them in series
@@ -455,6 +595,62 @@ async function probe(): Promise<void> {
   const answer = await probeKnowledge(probeQuery.value)
   hits.value = answer.hits
   if (answer.error) say(answer.error, true)
+}
+
+/**
+ * 开关按下去之后，那一格照**回读**的那一份画。
+ *
+ * 「我点了关掉，所以现在该是关着」是这类界面最常撒的谎：写盘可以失败、可以被别的设置盖掉，
+ * 那几种情况下这一格必须还在说真话 —— 所以后端回的就是它读回来的值，界面只负责念。
+ */
+async function flipGrowth(): Promise<void> {
+  if (growthBusy.value) return
+  growthBusy.value = true
+  growthResult.value = ''
+  try {
+    const next = await growthSet(!growth.value.enabled)
+    growth.value = next
+    growthLoaded.value = true
+    if (next.error) {
+      growthResultBad.value = true
+      growthResult.value = '这一格没改动，原因就在下面那一句里。'
+    } else {
+      growthResultBad.value = false
+      growthResult.value = next.enabled
+        ? `她自学：开着。接下来她真查过的那几轮会连着出处一起存进 ${growthWhere.value}。`
+        : '她自学：关着。已经存下的那些条不会被这颗开关删掉 —— 要删用旁边那一颗。'
+    }
+  } catch (err) {
+    growthResultBad.value = true
+    growthResult.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    growthBusy.value = false
+  }
+}
+
+/**
+ * 「只删她自学的」：二次确认 → 执行 → 结果写在同一行，和磁盘清理那张卡一个路子。
+ *
+ * 执行完必须重新拉一次 knowledge_state。只把这一屏的数字减一减，是这一格最省事的写法，
+ * 也是这一轮之前那些"看着删掉了"的按钮的写法：下一次打开这一页，条目一条不少地回来。
+ */
+async function forgetGrowth(): Promise<void> {
+  if (growthBusy.value) return
+  growthBusy.value = true
+  confirmGrowthWipe.value = false
+  try {
+    const answer = await growthForget()
+    growthResultBad.value = !answer.ok
+    growthResult.value = answer.ok
+      ? `删掉了 ${String(answer.removed)} 条她自学的条目${answer.error ? ` · ${answer.error}` : ''}`
+      : answer.error || '一条也没删掉'
+  } catch (err) {
+    growthResultBad.value = true
+    growthResult.value = err instanceof Error ? err.message : String(err)
+  }
+  // 删成果到底怎么样由后端那一格重新说一遍，这一屏自己不减数字。
+  await load('knowledge')
+  growthBusy.value = false
 }
 
 async function flipJob(row: ScheduledJobRow): Promise<void> {
@@ -656,6 +852,47 @@ onMounted(() => {
   margin: 6px 0;
   color: var(--hud-amber, #ffb547);
   font-size: 12px;
+}
+
+/*
+ * 她自学那一格自成一块板：它管的是「这条能力开没开、学来的东西存在哪儿、怎么只删学来的」，
+ * 和下面的文档列表是同一件事的两半。混进同一列里就没人看得出「只删她自学的」按下去管的是哪几条。
+ *
+ * 边框和底色一律走 --hud-* token：这一窗口的皮肤系统只动色相那几个变量，写死一套 rgba 蓝
+ * 在琥珀皮肤上就是一块留在原地的蓝（这个窗口已经有过这种补丁）。
+ */
+.assistant__growth {
+  margin: 4px 0 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--hud-line);
+  border-radius: var(--hud-radius);
+  background: var(--hud-surface);
+}
+
+/* 二次确认那一条：句子和两颗按钮同屏，按下第二颗才会真删。 */
+.assistant__confirm {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 6px 0;
+  padding: 6px 8px;
+  border: 1px solid var(--hud-line);
+  border-radius: var(--hud-radius);
+  background: var(--hud-surface-2);
+}
+
+.assistant__confirm p {
+  margin: 0;
+  flex: 1 1 260px;
+}
+
+.assistant__confirm-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 
 .assistant__hint {

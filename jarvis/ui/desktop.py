@@ -77,6 +77,7 @@ from jarvis.ui.lifecycle import ShellLifecycle
 from jarvis.ui.mirror_bar import MirrorControlBar
 from jarvis.ui.pet import PetController
 from jarvis.ui.pump import UiEventPump
+from jarvis.ui.runtime_check import warn_missing_webview2
 from jarvis.ui.state_bridge import StateBridge, UiState, UiVoiceState
 from jarvis.ui.static_server import BundleServer
 from jarvis.ui.tray import TrayIcon
@@ -143,6 +144,22 @@ class MemorySurface(Protocol):
     def forget(self, memory_id: int) -> bool: ...
 
     def forget_scope(self, scope: Any = ...) -> int: ...
+
+
+class GrowthSurface(Protocol):
+    """她自学那一层，窄到面板真正会问的那三下。
+
+    和 `MemorySurface` / `KnowledgeSurface` 同一层的原因：``ui`` 是 L5，不许 import
+    ``app.knowledge_growth`` 的具体类型，只声明用到的方法。
+    """
+
+    def stats(self) -> dict[str, object]: ...
+
+    def enabled(self) -> bool: ...
+
+    def set_enabled(self, on: bool) -> bool: ...
+
+    def forget_learned(self) -> int: ...
 
 
 class KnowledgeSurface(Protocol):
@@ -263,6 +280,24 @@ Generous: a cold WebView2 start on a busy machine takes several seconds, and a
 false alarm on a slow boot is its own kind of noise. The point is only to turn a
 *wedged* window into a message.
 """
+
+
+def _growth_empty(reason: str) -> dict[str, object]:
+    """`growth_state` 的"什么都没有"那一版：**键必须齐全**。
+
+    界面把缺字段读成 0 就是撒谎，读成 undefined 就是整块不画 —— 两种都比"这台机器
+    没接这一层"难查。所以宁可回一份全是空值、只有一句原因的完整形状。
+    """
+    return {
+        "enabled": False,
+        "today": 0,
+        "limit_per_day": 0,
+        "total_seen": 0,
+        "folder": "",
+        "directory": "",
+        "has_knowledge": False,
+        "error": reason,
+    }
 
 
 def blank_window_hint(timeout: float) -> str:
@@ -584,6 +619,7 @@ class HudBridge:
         announcer: Announcer | None = None,
         memory: MemorySurface | None = None,
         knowledge: KnowledgeSurface | None = None,
+        growth: GrowthSurface | None = None,
         scheduler: JobSurface | None = None,
         workflow: WorkflowSurface | None = None,
         planner: PlannerSurface | None = None,
@@ -625,6 +661,7 @@ class HudBridge:
         self._announcer = announcer
         self._memory = memory
         self._knowledge = knowledge
+        self._growth = growth
         self._scheduler = scheduler
         self._workflow = workflow
         self._planner = planner
@@ -1100,6 +1137,51 @@ class HudBridge:
         if knowledge is None:
             return {"ok": False, "error": "这个进程没有接知识库"}
         return {"ok": bool(knowledge.forget(str(doc_id or ""))), "error": ""}
+
+    def growth_state(self) -> dict[str, object]:
+        """她自学这一档现在什么样：开没开、今天几条、上限几条、一共记了几条。
+
+        面板读这一格决定按钮怎么写。**没有 growth 也要回一整份**（``enabled: False``
+        + 一句原因），因为界面把 ``undefined`` 当"没这一格"就会整块不画，
+        用户于是永远看不见这条能力存在过。
+        """
+        growth = self._growth
+        if growth is None:
+            return _growth_empty("这个进程没有接自学这一层（多半是没有偏好存储）")
+        try:
+            state = dict(growth.stats())
+            state["error"] = ""
+            return state
+        except Exception as exc:  # pragma: no cover - 偏好读盘失败
+            logger.exception("reading the growth state failed")
+            return _growth_empty(f"{type(exc).__name__}: {exc}")
+
+    def growth_set(self, on: object) -> dict[str, object]:
+        """开或关她自学。回的是**读回来**的那一份，不是把传进来的值原样吐回去。"""
+        growth = self._growth
+        if growth is None:
+            return self.growth_state()
+        wanted = str(on).strip().lower() in {"1", "true", "yes", "on"}
+        try:
+            growth.set_enabled(wanted)
+        except Exception as exc:  # pragma: no cover - 偏好写盘失败
+            logger.exception("saving the growth switch failed")
+            return {"enabled": growth.enabled(), "error": f"没存下：{type(exc).__name__}: {exc}"}
+        state = self.growth_state()
+        state["error"] = str(state.get("error") or "")
+        return state
+
+    def growth_forget(self) -> dict[str, object]:
+        """删掉她自学的那些条目，人喂的资料一条都不动。删了几条要回给人看。"""
+        growth = self._growth
+        if growth is None:
+            return {"ok": False, "removed": 0, "error": "这个进程没有接自学这一层"}
+        try:
+            removed = int(growth.forget_learned())
+        except Exception as exc:  # pragma: no cover - 索引/磁盘问题
+            logger.exception("forgetting learned notes failed")
+            return {"ok": False, "removed": 0, "error": f"{type(exc).__name__}: {exc}"}
+        return {"ok": True, "removed": removed, "error": ""}
 
     def knowledge_probe(self, query: str) -> dict[str, object]:
         """What the knowledge base would answer with, for this question.
@@ -3743,6 +3825,7 @@ def run(
     images: ImageService | None = None,
     phone_screen: PhoneScreenReader | None = None,
     documents: DocumentService | None = None,
+    growth: GrowthSurface | None = None,
     network: NetworkWatch | None = None,
     paths: AppPaths | None = None,
     debug: bool = False,
@@ -3800,6 +3883,12 @@ def run(
     # Served, not opened from disk: see the module docstring. Binding can fail
     # (an exhausted port range, a locked-down machine), and that has to be a
     # readable message rather than a window with nothing in it.
+    if warn_missing_webview2():
+        # 缺 WebView2 时 pywebview 不会报错：它在 import 平台模块那一刻就退回 MSHTML
+        # （IE 内核），窗口照样开，里面一片白。打包版是 console=False 起的，那行
+        # logger.warning 买家一个字都看不见 —— 所以这里先弹窗再说，并且**不去起窗**。
+        return 3
+
     server = BundleServer(WEB_DIR)
     try:
         base_url = server.start()
@@ -3906,6 +3995,7 @@ def run(
         system,
         disk,
         documents=documents,
+        growth=growth,
         network=network,
         paths=paths,
         voice=voice,

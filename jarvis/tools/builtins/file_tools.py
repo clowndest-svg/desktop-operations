@@ -254,6 +254,17 @@ def _delete_path(policy: ToolPolicy) -> ToolHandler:
         path = policy.resolve_path(raw)
         if not path.exists():
             raise ToolExecutionError(f"路径不存在：{path}")
+        guard = _protected_user_dir(path)
+        if guard is not None:
+            # 对外文档一直写着"文档、桌面这些不会被删"，而这一句过去**只在磁盘清理那条路上成立**
+            # （`disk_cleaner.PROTECTED_USER_DIRS`）。工具这条路上只挡了"非空目录"，
+            # 于是 `~/Desktop` 空了就能被 rmdir，用户的主目录也能整个删掉。
+            # 这里挡的是**那六个目录本身和主目录**，不是它们里面的文件 ——
+            # 删掉「桌面上某个具体的.txt」仍然是用户会要求的正常操作，全挡就等于砍功能。
+            raise ToolExecutionError(
+                f"这是 Windows 给用户自己的目录，拒绝删除：{path}"
+                f"（受保护的是 {guard} 这一层本身，里面的单个文件可以照删）"
+            )
         try:
             if path.is_dir():
                 if any(path.iterdir()):
@@ -267,6 +278,47 @@ def _delete_path(policy: ToolPolicy) -> ToolHandler:
         return f"已删除 {path}"
 
     return handler
+
+
+def _user_home() -> Path:
+    """主目录。单独一个函数是为了测试能把它换掉 —— 测试不能改真用户目录。"""
+    return Path.home()
+
+
+def _protected_user_dir(path: Path) -> str | None:
+    """这个路径是不是"用户自己的那几个目录"本身（或主目录）。是就返回它的名字。
+
+    判定用**相对主目录的深度**，不是字符串相等：Windows 上 `~/Desktop` 可能被
+    重定向到 OneDrive（`~/OneDrive/桌面`），那种情况下按名字比会漏。这里只挡两条
+    最要命的：主目录本身，以及主目录**第一层**那六个已知目录名。
+    """
+    home = _user_home()
+    try:
+        relative = path.relative_to(home)
+    except ValueError:
+        return None
+    if not relative.parts:
+        return str(home)
+    if len(relative.parts) == 1 and relative.parts[0] in _PROTECTED_NAMES:
+        return relative.parts[0]
+    return None
+
+
+_PROTECTED_NAMES: tuple[str, ...] = (
+    "Documents",
+    "Desktop",
+    "Downloads",
+    "Pictures",
+    "Videos",
+    "Music",
+    "文档",
+    "下载",
+    "图片",
+    "音乐",
+    "视频",
+)
+"""英文那六个和 `disk_cleaner.PROTECTED_USER_DIRS` 同一份含义；中文那五个是
+OneDrive 中文目录/本地化用户名下真会出现的写法。"""
 
 
 def build(policy: ToolPolicy) -> list[tuple[ToolSpec, ToolHandler]]:

@@ -15,7 +15,13 @@ from types import ModuleType
 from typing import Any
 
 import pytest
-from scripts.release_manifest import scoped_path, source_fingerprint, valid_round
+from scripts.release_manifest import (
+    build_info,
+    round_from,
+    scoped_path,
+    source_fingerprint,
+    valid_round,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -272,3 +278,42 @@ def test_the_delivery_bat_copies_stay_identical() -> None:
     tracked = ROOT / "scripts/templates/一键做交付包.bat"
     seller = ROOT / "闲鱼展示内容/一键做交付包.bat"
     assert tracked.read_bytes() == seller.read_bytes(), "两份一键做交付包.bat 已经不一样了"
+
+
+def test_the_round_is_read_out_of_the_paths_the_builder_was_given() -> None:
+    """`check_update` 比的只有 rNN，而打包时唯一知道这个数的地方是 --distpath/--workpath。
+
+    这条不是装饰：spec 里那段识别搬进这个文件才测得到，而它一旦认歪，发出去的每个 exe
+    都"读不出自己是第几轮"，买家那句「我这版旧不旧」就永远没有答案。
+    """
+    assert round_from(r"E:\BianChengGongJu\JarvisBuild\r107\dist", "") == "r107"
+    assert round_from("E:/Build/r9/dist/小夜") == "r9"
+    assert round_from("", r"E:\BianChengGongJu\JarvisBuild\r107\build") == "r107"
+    # 两个都在、各自还带一段（手工跑过一次 PyInstaller 忘了改 --workpath）：以 --distpath 为准
+    assert round_from(r"E:\B\r107\build", r"E:\B\r108\dist") == "r108"
+    # 同一条路径里两段都像轮次：认**最右那一段**，因为那才是真正装产物的一层
+    assert round_from(r"E:\B\r100\副本\r107\dist") == "r107"
+
+
+def test_an_unlabelled_build_hint_is_left_blank_instead_of_guessed() -> None:
+    """认不出来就回空串。回 0 等于「任何真实轮次都比它新」= 所有人永远看到「有新版」。
+
+    顺带说清一件事：路径里任何一个 `rNNN` 那样的目录段都会被当轮次收下（包括碰巧叫
+    `r2026` 的）。没打算在这儿防它 —— 发版时 `deliver_release.ps1` 会拿打包出来的
+    自检报告比 `probe.build.round` 和 `-Round` 那一个数，认错了当场就不发货。
+    """
+    assert round_from(r"E:\BianChengGongJu\JarvisBuild\dist") == ""
+    assert round_from(None, "") == ""
+    assert round_from(r"C:\temp\release\2026\dist") == ""
+    assert round_from(r"C:\temp\r2026\dist") == "r2026"
+
+
+def test_build_info_stamps_the_round_and_refuses_a_thing_that_is_not_one(
+    tmp_path: Path,
+) -> None:
+    assert build_info(tmp_path, "r107")["round"] == "r107"
+    assert build_info(tmp_path, "r107")["schema"] == 2
+    # 没标签的构建（直接跑一次 PyInstaller）不许编一个轮次出来
+    assert build_info(tmp_path)["round"] == ""
+    with pytest.raises(ValueError):
+        build_info(tmp_path, "0.1.0")

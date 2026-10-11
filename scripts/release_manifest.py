@@ -55,7 +55,30 @@ def source_fingerprint(root: Path) -> str:
     return digest.hexdigest()
 
 
-def build_info(root: Path) -> dict[str, object]:
+def round_from(*hints: object) -> str:
+    """The ``rNN`` path segment inside the build hints PyInstaller was given.
+
+    Lives here rather than in the spec because the spec is not importable and this is
+    the one number every buyer's "is my copy old" answer is derived from. Last hint
+    wins so an explicit ``--distpath`` outruns a leftover ``--workpath``.
+    """
+    found = ""
+    for hint in hints:
+        parts = str(hint or "").replace("/", "\\").split("\\")
+        hits = [part for part in parts if re.fullmatch(r"r[0-9]+", part)]
+        if hits:
+            found = hits[-1]
+    return found
+
+
+def build_info(root: Path, round_name: str = "") -> dict[str, object]:
+    """What the bundle has to know about itself.
+
+    ``round_name`` is the artifact's identity (``r107``). It is passed in rather than
+    looked up because the only place that knows it is the PyInstaller invocation's
+    ``--distpath``. Empty means "a build nobody labelled", and ``jarvis.release_round``
+    then returns "" so ``check_update`` refuses to compare instead of inventing 0.
+    """
     try:
         head = subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True, check=True
@@ -67,7 +90,8 @@ def build_info(root: Path) -> dict[str, object]:
         "built_at": now.isoformat(timespec="seconds"),
         "git_head": head,
         "source_sha256": source_fingerprint(root),
-        "schema": 1,
+        "round": valid_round(round_name) if round_name else "",
+        "schema": 2,
     }
 
 

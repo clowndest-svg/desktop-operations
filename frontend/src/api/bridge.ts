@@ -185,6 +185,43 @@ export interface KnowledgeBoard {
   error: string
 }
 
+/**
+ * 她自学这一层现在什么样 —— 「她」那一格的读数，不是页面的记忆。
+ *
+ * Python 那一侧**永远回一整份**：没有接这一层时回 ``enabled: false`` + 一句原因，而不是
+ * ``undefined``。这不是客气 —— 界面一旦把缺字段读成"没有这一格"，这条能力就再也看不见
+ * 第二次，和"注册了一条永远失败的路"是同一笔账。
+ *
+ * 开关那扇门回的是**读回来**的那一份（``growth_set`` 之后再去盘上取一次），所以按钮不许
+ * 拿"我刚才点了什么"去猜状态。
+ */
+export interface GrowthState {
+  enabled: boolean
+  /** 今天已经存了几条。 */
+  today: number
+  /** 每天的上限，后端说了算。 */
+  limit_per_day: number
+  /** 去重清单里一共记过几条。 */
+  total_seen: number
+  /** 自学条目落在知识库的哪一个子目录（``_自学``）。没接这一层时为空。 */
+  folder: string
+  /** 这台机器有没有接知识库 —— 没有的话她自学无处可记。 */
+  has_knowledge: boolean
+  error: string
+}
+
+/**
+ * ``growth_forget``：只删她自学记下的那些条（索引和盘上的文件一起删）。
+ *
+ * 没有套 ``ActionResult`` 是因为这里多一个"删了几条"，而那个数字必须能念给人听 ——
+ * 一颗说"清掉了"却没说清掉多少的按钮，和没说一样。
+ */
+export interface GrowthForget {
+  ok: boolean
+  removed: number
+  error: string
+}
+
 /** One execution record, as both the scheduler and the workflow engine render it. */
 export interface RunRow {
   ok: boolean
@@ -1699,6 +1736,10 @@ interface PywebviewApi {
   knowledge_ingest(path: string): Promise<{ ok: boolean; error: string; document?: Record<string, unknown> }>
   knowledge_forget(docId: string): Promise<{ ok: boolean; error: string }>
   knowledge_probe(query: string): Promise<{ hits: Record<string, unknown>[]; error: string }>
+  // 她自学那一层。形参名照投屏那条禁令避开 window/promise/arguments，`on` 与 Python 一致。
+  growth_state(): Promise<GrowthState>
+  growth_set(on: boolean): Promise<GrowthState>
+  growth_forget(): Promise<GrowthForget>
   automation_overview(): Promise<AutomationOverview>
   scheduled_jobs(): Promise<ScheduledJobsBoard>
   job_toggle(jobId: string, enabled: boolean): Promise<{ ok: boolean; error: string }>
@@ -2277,6 +2318,23 @@ const mockArtifacts = (text: string): string[] => {
   if (/画|图/.test(text)) return [MOCK_ARTIFACT_PIC]
   if (/表|文档|导出/.test(text)) return [MOCK_ARTIFACT_DOC]
   return []
+}
+
+/**
+ * 她自学在预览里的那一格。
+ *
+ * 和 ``mockNetwork`` / 上面那三个 artifact 常量一样，**必须声明在 ``mock`` 那个对象字面量
+ * 外面**：写进字面量里的话 ``growth_set`` 改的是一份，``growth_state`` 读回来的是另一份，
+ * 预览里那颗开关就成了"按了没反应" —— 这个坑 r105 已经踩过一次了。
+ */
+const mockGrowth: GrowthState = {
+  enabled: true,
+  today: 0,
+  limit_per_day: 20,
+  total_seen: 0,
+  folder: '_自学',
+  has_knowledge: true,
+  error: '',
 }
 
 const mock: PywebviewApi = {
@@ -3077,6 +3135,23 @@ const mock: PywebviewApi = {
   },
   async knowledge_probe() {
     return { hits: [], error: '' }
+  },
+  async growth_state() {
+    return { ...mockGrowth }
+  },
+  async growth_set(on) {
+    // 改的是字面量外面那一份，所以下一次 growth_state 读得到 —— 回读，不原样吐回参数。
+    mockGrowth.enabled = Boolean(on)
+    mockGrowth.error = ''
+    return { ...mockGrowth }
+  },
+  async growth_forget() {
+    // 预览里没有盘：数字归零是真的，"删掉了文件"这一句不能编，所以老实写进 error 里，
+    // 让界面把它画出来而不是咽进 console。
+    const removed = mockGrowth.total_seen
+    mockGrowth.today = 0
+    mockGrowth.total_seen = 0
+    return { ok: true, removed, error: '预览只是把数字归零，没有真的文件可删' }
   },
   async pet_state() {
     return { shown: petShownMock }
@@ -4640,6 +4715,26 @@ export function forgetKnowledge(docId: string): Promise<{ ok: boolean; error: st
 
 export function probeKnowledge(query: string): Promise<{ hits: Record<string, unknown>[]; error: string }> {
   return bridge().then((target) => target.knowledge_probe(query))
+}
+
+/**
+ * 她自学那一格。永远是一整份，所以调用方不需要"这一格存在吗"这一问 —— 存在，
+ * 只不过可能写着"这个进程没有接自学这一层"。
+ *
+ * 面板只在打开时读它一次：这一层没有轮询，轮询会把"你刚按下去的那一下"擦掉。
+ */
+export function growthState(): Promise<GrowthState> {
+  return bridge().then((target) => target.growth_state())
+}
+
+/** 开或关她自学。回的是后端**读回来**的那一份，界面照着它画，不猜。 */
+export function growthSet(on: boolean): Promise<GrowthState> {
+  return bridge().then((target) => target.growth_set(on))
+}
+
+/** 只删她自学记下的那些条，人喂的资料一条不动。删了几条要回给人看。 */
+export function growthForget(): Promise<GrowthForget> {
+  return bridge().then((target) => target.growth_forget())
 }
 
 export function fetchPetState(): Promise<PetState> {

@@ -27,7 +27,7 @@ from jarvis.tools import (
     string_property,
     validate_arguments,
 )
-from jarvis.tools.builtins import build_builtin_tools
+from jarvis.tools.builtins import build_builtin_tools, file_tools
 from jarvis.tools.builtins.web_tools import validate_url
 from jarvis.tools.disk_cleaner import DiskCleaner
 from jarvis.tools.monitor import SystemMonitor
@@ -592,6 +592,37 @@ class TestBuiltinTools:
         result = service.invoke("delete_path", {"path": str(target)}, confirmed=True)
         assert result.ok is False
         assert "不是空的" in result.error
+
+    def test_delete_refuses_the_users_own_folder_itself(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """对外文档一直写着"文档、桌面不会被删"，这一句过去**只在磁盘清理那条路上成立**。
+
+        挡的是那六个目录**本身**和主目录 —— 里面的单个文件照旧可删，那才是用户会
+        真要求的操作；全挡等于砍功能，所以判据也要分成两条写。
+        """
+        home = tmp_path / "home"
+        desk = home / "Desktop"
+        desk.mkdir(parents=True)
+        (desk / "便签.txt").write_text("x", encoding="utf-8")
+        monkeypatch.setattr(file_tools, "_user_home", lambda: home)
+        service = _service(tmp_path, allow_write=True, file_roots=[str(home)])
+        service.start()
+        blocked = service.invoke("delete_path", {"path": str(desk)}, confirmed=True)
+        assert blocked.ok is False and "拒绝删除" in blocked.error
+        kept = service.invoke("delete_path", {"path": str(desk / "便签.txt")}, confirmed=True)
+        assert kept.ok is True, "挡目录本身不该挡到里面的单个文件"
+
+    def test_delete_refuses_the_home_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(file_tools, "_user_home", lambda: home)
+        service = _service(tmp_path, allow_write=True, file_roots=[str(home)])
+        service.start()
+        result = service.invoke("delete_path", {"path": str(home)}, confirmed=True)
+        assert result.ok is False and "拒绝删除" in result.error
 
     def test_run_shell_is_not_advertised_by_default(self, tmp_path: Path) -> None:
         """Not "registered and refused" -- absent.

@@ -237,7 +237,9 @@ class KnowledgeService:
             replaced=replaced,
         )
 
-    def ingest_text(self, title: str, text: str, *, source: str = "") -> IngestResult:
+    def ingest_text(
+        self, title: str, text: str, *, source: str = "", folder: str = ""
+    ) -> IngestResult:
         """Save one note she wrote herself and index it, so the corpus can grow by talking.
 
         Why this exists: ``knowledge_search`` was the only knowledge tool and it is
@@ -250,6 +252,11 @@ class KnowledgeService:
         The file lands in ``notes_dir`` and nowhere else. Not under ``file_roots``:
         a corpus she can rewrite by saving twice over is a corpus nobody can trust,
         and 「记一下」 must not become a way to overwrite an imported manual.
+
+        ``folder`` carves out a subdirectory of ``notes_dir`` (used by 自学的条目). It is
+        sanitised rather than trusted — a caller must not be able to walk out of the
+        notes directory with ``..``, which is the same reason the rest of this method
+        refuses ``file_roots``.
         """
         if not self._started:
             return self._failed("<笔记>", "知识库未启动")
@@ -261,7 +268,11 @@ class KnowledgeService:
         body = text.strip()
         if not body:
             return self._failed(clean_title, "没有要存进知识库的内容")
-        path = self._notes_dir / f"{_note_stem(clean_title)}.md"
+        where = self._notes_dir
+        if folder.strip():
+            safe = "".join(ch for ch in folder.strip() if ch not in '\\/:*?"<>|').strip(". ")
+            where = where / (safe or "未命名目录")
+        path = where / f"{_note_stem(clean_title)}.md"
         origin = source.strip()[:300] or "小夜自己记的"
         page = "\n".join(
             [

@@ -68,6 +68,9 @@ def _registered() -> set[str]:
         mirror=stub,
         images=stub,
         documents=stub,
+        # 检查更新这条只在装配层真注入了取数函数时才注册 —— 不传就是没有，
+        # 而"包里挂了一条产不出来的工具"正是本文件那条守卫要抓的。
+        release_fetch=lambda: {"ok": True, "newer": False, "current": "0", "latest": "0"},
         # The read-the-phone-screen tool hangs off the same pack, and it is only built
         # when there is a reader behind it. Leaving it out here made this guard report a
         # live route as a stale name; the point of the guard is the *other* direction.

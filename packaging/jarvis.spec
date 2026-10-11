@@ -136,13 +136,24 @@ hiddenimports = [
 # new one: five `小夜.exe` on one disk, pixel-identical chrome, and the only thing
 # missing from the old one is the feature being asked about. So each build writes
 # its own timestamp into the bundle and the HUD shows it.
+#
+# The round goes in next to it, and for a harder reason than an unreadable title:
+# ``check_update`` has to answer a buyer "is my copy old", and the only per-artifact
+# identity that exists is the ``rNN`` directory this build was asked to write into.
+# Read from ``--distpath``/``--workpath`` rather than a constant, because a constant
+# is something that gets forgotten -- ``__version__`` has been 0.1.0 for every round
+# since the first one.
 _buildinfo_dir = os.path.join(ROOT, "build")
 os.makedirs(_buildinfo_dir, exist_ok=True)
 _buildinfo_file = os.path.join(_buildinfo_dir, "buildinfo.json")
+
 with open(_buildinfo_file, "w", encoding="utf-8") as _handle:
     _manifest = runpy.run_path(os.path.join(ROOT, "scripts", "release_manifest.py"))
     from pathlib import Path
-    json.dump(_manifest["build_info"](Path(ROOT)), _handle, ensure_ascii=False)
+    # 认 rNN 这件事放在 release_manifest.round_from 里，不放这儿：spec 没法 import，
+    # 而这个数是每个买家那句"你这版旧不旧"的唯一依据 —— 它得有一条跑得起来的测试。
+    _round = _manifest["round_from"](globals().get("WORKPATH", ""), globals().get("DISTPATH", ""))
+    json.dump(_manifest["build_info"](Path(ROOT), _round), _handle, ensure_ascii=False)
 
 datas = [
     (os.path.join(ROOT, "jarvis", "config", "defaults.yaml"), "jarvis/config"),

@@ -24,6 +24,7 @@ from jarvis.tools.builtins import (
     selfconfig_tools,
     shell_tools,
     system_tools,
+    update_tools,
 )
 from jarvis.tools.registry import ToolRegistry
 from jarvis.tools.types import ToolCall, ToolResult, ToolSpec
@@ -78,6 +79,7 @@ class ToolService:
         phone: mirror_tools.PhoneScreenSurface | None = None,
         images: image_tools.ImageEngineSurface | None = None,
         documents: document_tools.DocumentSurface | None = None,
+        release_fetch: update_tools.Fetcher | None = None,
         registry: ToolRegistry | None = None,
     ) -> None:
         """Create the service.
@@ -131,6 +133,7 @@ class ToolService:
         self._phone = phone
         self._images = images
         self._documents = documents
+        self._release_fetch = release_fetch
         self._registry = registry or ToolRegistry(settings_provider)
         self._started = False
 
@@ -175,6 +178,7 @@ class ToolService:
             phone=self._phone,
             images=self._images,
             documents=self._documents,
+            release_fetch=self._release_fetch,
             web_opener=self._web_opener,
         ):
             self._registry.register(spec, handler)

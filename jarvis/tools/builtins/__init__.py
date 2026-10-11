@@ -25,6 +25,7 @@ from jarvis.tools.builtins import (
     system_tools,
     text_tools,
     time_tools,
+    update_tools,
     web_tools,
 )
 from jarvis.tools.disk_cleaner import DiskCleaner
@@ -57,6 +58,7 @@ def build_builtin_tools(
     phone: mirror_tools.PhoneScreenSurface | None = None,
     images: image_tools.ImageEngineSurface | None = None,
     documents: document_tools.DocumentSurface | None = None,
+    release_fetch: update_tools.Fetcher | None = None,
 ) -> list[tuple[ToolSpec, ToolHandler]]:
     """Assemble every built-in tool.
 
@@ -135,6 +137,7 @@ def build_builtin_tools(
         *(mirror_tools.build(mirror, phone) if mirror is not None else []),
         *image_tools.build(images),
         *document_tools.build(documents),
+        *update_tools.build(release_fetch),
     ]
 
 

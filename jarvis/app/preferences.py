@@ -319,6 +319,20 @@ IMAGE_STEPS = "image.steps"
 card roughly triples that at 40 -- this is the difference between 「等一会儿」 and 「算了」."""
 
 IMAGE_KEEP_OUTPUT = "image.keep"
+
+KNOWLEDGE_AUTO_LEARN = "knowledge.auto_learn"
+"""她自己把"这轮真从网上查过的东西"存进知识库，这一档开不开。
+
+默认 **开**：关掉这条能力就看不见，和"注册一条永远失败的路"是同一类问题。但开关必须在
+设置里看得见，而且屏上要写着默认值 —— 自动往资料库里写东西这件事，人不知道就等于没同意。
+"""
+
+KNOWLEDGE_AUTO_SEEN = "knowledge.auto_seen"
+"""已经自学过的问题指纹。是 ``list``：清单存原生 list，别自己 dumps 成字符串再存。"""
+
+KNOWLEDGE_AUTO_COUNT = "knowledge.auto_count"
+"""今天自学了几条（``{"day": ..., "count": ...}``）。带日期是因为上限按"每天"算。"""
+
 """Whether generated pictures stay in the ``生图`` folder. On by default: a generated
 file the operator cannot go and look at is a capability with a hole in it."""
 
@@ -412,6 +426,9 @@ PREFERENCE_TYPES: dict[str, type] = {
     IMAGE_SIZE: str,
     IMAGE_STEPS: int,
     IMAGE_KEEP_OUTPUT: bool,
+    KNOWLEDGE_AUTO_LEARN: bool,
+    KNOWLEDGE_AUTO_SEEN: list,
+    KNOWLEDGE_AUTO_COUNT: dict,
 }
 """The only keys that round-trip, with the type each must have.
 

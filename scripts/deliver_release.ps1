@@ -86,6 +86,18 @@ if (-not (Test-Path -LiteralPath $probePath)) { throw '新 exe 未生成自检�
 $probe = Get-Content -LiteralPath $probePath -Raw -Encoding UTF8 | ConvertFrom-Json
 if ($probe.ok -ne $true -or $probe.frozen -ne $true) { throw '新 exe 自检未通过' }
 Copy-Item -LiteralPath $probePath -Destination (Join-Path $qa 'self-check.json') -Force
+# 这一版 exe 还得**知道自己是不是这一轮**。`check_update` 拿这一个数回答买家「我这版旧不旧」，
+# 而它是打包时从 --distpath 里认出来的：spec 少写一行、或者 --distpath 和 -Round 指到两处，
+# 发出去的就是一条永远答「读不出轮次」的路 —— 这条门在这里停，比在买家机器上发现便宜。
+$stamped = $probe.build.round
+if (-not $stamped) {
+    throw ('新 exe 不知道自己是谁（buildinfo 里 round 是空）：' +
+           '检查更新会对每个买家说「读不出轮次」。查 packaging/jarvis.spec 的 round_from')
+}
+if ($stamped -ne $Round) {
+    throw ("新 exe 自报 $stamped，而这一轮要的是 $Round —— --distpath 和 -Round 不是同一个目录")
+}
+Write-Output "自检轮次核对：exe 自报 $stamped = 本轮 $Round"
 & $python (Join-Path $PSScriptRoot 'verify_android_release.py') --apk $apk --report (Join-Path $mobileDir.FullName 'release.json')
 if ($LASTEXITCODE -ne 0) { throw 'APK 校验失败' }
 & $python $maker --round $Round --build-root $Root --out $Out --with-mobile --with-docs --apk $apk --dry-run

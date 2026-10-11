@@ -25,6 +25,7 @@ from jarvis.app.demo import run_voice_demo
 from jarvis.app.disk_service import DiskService
 from jarvis.app.documents import DocumentService
 from jarvis.app.image_gen import ImageService
+from jarvis.app.knowledge_growth import KnowledgeGrowth
 from jarvis.app.model_probe import ModelCaps, ModelProber
 from jarvis.app.net_state import NetworkWatch
 from jarvis.app.pet_library import PetLibrary
@@ -38,6 +39,7 @@ from jarvis.app.settings_service import SettingsService
 from jarvis.app.system_service import SystemService
 from jarvis.app.transcript_service import TranscriptService
 from jarvis.app.turns import TurnRegistry
+from jarvis.app.update_check import fetch_release
 from jarvis.app.usage_service import UsageService
 from jarvis.app.voice_call import VoiceCall
 from jarvis.app.voice_graph import ChatGraph
@@ -250,6 +252,9 @@ class _Capabilities:
     vector: VectorService
     memory: MemoryService
     knowledge: KnowledgeService
+    growth: KnowledgeGrowth | None
+    """她自学那一层。没有偏好存储时是 None —— 那时整轮不学，日志说得清。"""
+
     tools: ToolService
     scheduler: SchedulerService
     workflow: WorkflowService
@@ -466,6 +471,12 @@ def _register_capabilities(
         notes_dir=paths.notes_dir,
     )
     app.register(knowledge)
+    # 她自学那一层：把"这轮真从网上查过的东西"存进知识库。建在这里而不是桌面分支里，
+    # 和 transcript 同一个理由 —— 命令行那一侧问的问题同样值得留下来，而且装配表只有一处
+    # 传得进 ChatService，漏一处就是"桌面会学、命令行不会"这种没人会解释得清的差异。
+    growth = KnowledgeGrowth(knowledge, preferences) if preferences is not None else None
+    # 没有偏好存储就没有"她今天学了几条、哪些问题存过"可记 —— 这时候不建这一层，
+    # 而不是建一个每次读写都失败的：ChatService 拿到 None 就整轮不学，日志里说得清。
     # Built here rather than in the desktop branch because the tool that lets her
     # search what she said last needs it, and a tool must be wired where every other
     # tool is wired. Conversations outlive the window either way: same SQLite file the
@@ -533,6 +544,7 @@ def _register_capabilities(
         conversations=transcript,
         # 文档生成不需要窗口，命令行那一侧也该有：它只是往盘上写一份文件。
         documents=documents,
+        release_fetch=fetch_release,
         # What the alert centre still has open, read-only through ``system_report``.
         # She can see that C: is under the line; saying 「知道了」 stays a human act.
         alerts=alerts,
@@ -610,6 +622,7 @@ def _register_capabilities(
         vector=vector,
         memory=memory,
         knowledge=knowledge,
+        growth=growth,
         tools=tools,
         scheduler=scheduler,
         workflow=workflow,
@@ -989,6 +1002,7 @@ def _run_desktop(args: argparse.Namespace) -> int:
         memory_provider=lambda: capabilities.memory,
         knowledge_provider=lambda: capabilities.knowledge,
         tool_provider=lambda: capabilities.tools,
+        growth_provider=lambda: capabilities.growth,
         transcript=capabilities.transcript,
         # Both read per turn rather than being passed as values, because the settings
         # panel can move them while the window is open and 「保存后立即生效」 is the
@@ -1127,6 +1141,7 @@ def _run_desktop(args: argparse.Namespace) -> int:
             phone_screen=capabilities.phone_screen,
             images=image_engine,
             documents=capabilities.documents,
+            growth=capabilities.growth,
             network=capabilities.network,
             paths=capabilities.paths,
             audio=audio_pusher,
@@ -1299,6 +1314,7 @@ def _run_ask(args: argparse.Namespace) -> int:
             memory_provider=lambda: context.capabilities.memory,
             knowledge_provider=lambda: context.capabilities.knowledge,
             tool_provider=lambda: context.capabilities.tools,
+            growth_provider=lambda: context.capabilities.growth,
             session_id="cli",
             thinking_provider=thinking,
         )
