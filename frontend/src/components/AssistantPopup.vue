@@ -198,20 +198,18 @@
         <p v-if="notice" class="assistant__note" :class="{ 'assistant__note--bad': noticeBad }">{{ notice }}</p>
 
         <div class="assistant__headrow">
-          <span class="hud-label">
-            定时任务 {{ num(overview.scheduler, 'jobs') }}（启用 {{ num(overview.scheduler, 'enabled_jobs') }}）
-            · 工作流 {{ num(overview.workflow, 'definitions') }}
-            · 执行 {{ num(overview.scheduler, 'runs') }} 次 · 失败 {{ num(overview.scheduler, 'failures') }}
-          </span>
-          <button class="hud-btn" type="button" @click="load('automation')">刷新</button>
+          <span class="assistant__hint">这一屏管她自己按点要做的事；你说一句「十分钟后提醒我」在「提醒」那一页。</span>
+          <button class="hud-btn" type="button" @click="reloadWf">重新读取</button>
         </div>
 
         <!-- ------------------------------------------------ 定时任务 -->
-        <h3 class="hud-label assistant__section">定时任务</h3>
-        <p class="assistant__hint">
-          提醒归「提醒」页签管，这里只管其余的定时任务（带 <code>trigger: cron</code> 的工作流会出现在这里）。
+        <h3 class="hud-label assistant__section">
+          定时任务 · {{ jobs.length }}（启用 {{ num(overview.scheduler, 'enabled_jobs') }}）
+        </h3>
+        <p v-if="!jobs.length" class="assistant__empty">
+          还没有到点自己跑的任务。要定时就到「提醒」那一页说一句，或者在工作流文件里写
+          <code>trigger: cron</code> —— 那种会出现在这里。
         </p>
-        <p v-if="!jobs.length" class="assistant__empty">还没有别的定时任务。</p>
         <ul v-else class="assistant__list">
           <li
             v-for="row in jobs"
@@ -243,13 +241,15 @@
           </li>
         </ul>
 
-        <!-- -------------------------------------------------- 工作流 -->
-        <h3 class="hud-label assistant__section">工作流</h3>
-        <div class="assistant__headrow">
-          <span class="assistant__hint">定义放在数据目录的 workflows 文件夹里。</span>
-          <button class="hud-btn" type="button" @click="reloadWf">重新读取</button>
-        </div>
-        <p v-if="!workflows.length" class="assistant__empty">还没有工作流定义。</p>
+        <h3 class="hud-label assistant__section">
+          工作流 · {{ workflows.length }}
+          <span class="hud-chip">
+            执行 {{ num(overview.scheduler, 'runs') }} 次 · 失败 {{ num(overview.scheduler, 'failures') }}
+          </span>
+        </h3>
+        <p v-if="!workflows.length" class="assistant__empty">
+          还没有工作流。定义放在数据目录的 <code>workflows</code> 文件夹里，放好按上面那颗「重新读取」。
+        </p>
         <ul v-else class="assistant__list">
           <li v-for="row in workflows" :key="row.name" class="assistant__row">
             <span class="hud-chip">{{ row.trigger }}</span>
@@ -258,22 +258,21 @@
             <button class="hud-btn" type="button" @click="tryWorkflow(row.name)">跑一次</button>
           </li>
         </ul>
-        <p class="assistant__hint">
-          手动跑<b>不会绕过安全开关</b>：里面的每一步照旧吃各自的档位 —— 命令行停在「关闭」时，
-          需要跑命令的那一步一样会被拒。
+        <p v-if="workflows.length" class="assistant__hint">
+          「跑一次」<b>不绕过安全开关</b>：每一步照旧吃各自的档位。
         </p>
 
         <!-- ---------------------------------------------------- 计划 -->
         <h3 class="hud-label assistant__section">计划</h3>
         <form class="assistant__form" @submit.prevent="makePlan">
-          <input v-model="goal" class="hud-field" placeholder="要达成什么，例如「把 C 盘清出 10G」" />
+          <input v-model="goal" class="hud-field" placeholder="要达成什么" />
           <button class="hud-btn hud-btn--primary" type="submit" :disabled="planning">
             {{ planning ? '拆解中…' : '拆成步骤' }}
           </button>
         </form>
         <p class="assistant__hint">
-          这里<b>只出计划、不执行</b>：没有哪一步会被真的跑起来。要花一次模型调用。
-          <span v-if="!overview.planner_enabled">当前配置里 planner 是关闭的。</span>
+          这里<b>只出计划、不执行</b>，要花一次模型调用。
+          <span v-if="!overview.planner_enabled">当前配置里 planner 是关着的。</span>
         </p>
         <div v-if="plan" class="assistant__plan">
           <p class="assistant__plan-goal">{{ plan.goal }}</p>
@@ -475,6 +474,10 @@ function select(next: TabId): void {
   // 确认条不能跨页签活着：在「知识库」里按下的那一颗「确认只删这些」，翻出去再翻回来还挂在屏上，
   // 下一次随手一点就真删了。
   confirmGrowthWipe.value = false
+  // notice 同理，但危害是另一种：上一颗按钮留下的那句「重新读取：0 个工作流」会顶在这一屏最上面，
+  // 看着就像这一页的标题 —— 用户读到的是一个已经过期的动作结果，不是现在的状态。
+  notice.value = ''
+  noticeBad.value = false
   void load(next)
 }
 

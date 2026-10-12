@@ -186,6 +186,20 @@ class AppPaths:
         """
         return self.data_dir / "文档"
 
+    @property
+    def extensions_dir(self) -> Path:
+        """Installed skills and the MCP servers the marketplace wrote.
+
+        One directory tree per kind: ``skills/<slug>/SKILL.md`` and ``servers.json``. The
+        marketplace must never touch ``config.yaml`` -- a hand-edited config with comments
+        is the operator's, and dumping it back out destroys them. ``servers.json`` is ours
+        to write and to delete, and it is merged into ``mcp.servers`` at assembly time.
+
+        Listed in :meth:`ensure` because this is a directory the operator is expected to
+        open and look inside, not one an installer creates on first write only.
+        """
+        return self.data_dir / "扩展"
+
     def ensure(self) -> None:
         """Create every directory of the layout (idempotent)."""
         for directory in (
@@ -199,6 +213,7 @@ class AppPaths:
             self.pets_dir,
             self.images_dir,
             self.exports_dir,
+            self.extensions_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
 

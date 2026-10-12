@@ -213,7 +213,20 @@ def classify_tool_intent(text: str) -> tuple[str, ...]:
     return tuple(name for name in PACKS if name != GENERAL and _PATTERNS[name].search(text))
 
 
-def select_tool_names(intents: str | Iterable[str], available: Sequence[str]) -> tuple[str, ...]:
+EXTENSION_PREFIXES: Final[tuple[str, ...]] = ("mcp:", "skill:", "plugin:", "extension:")
+"""`ToolSpec.source` 里代表"这不是内置的，是装进来的"的那几个前缀。
+
+随包模型那一条路要靠它把扩展工具带进表里（`select_tool_names(extra=…)`）—— 内置工具的
+名字能列成包，**扩展工具的名字在写这张表的时候还不存在**，所以只能按来源认。
+"""
+
+
+def select_tool_names(
+    intents: str | Iterable[str],
+    available: Sequence[str],
+    *,
+    extra: Sequence[str] = (),
+) -> tuple[str, ...]:
     """The registered tools this intent set can use, in stable pack order.
 
     ``available`` is what the registry actually holds right now, so a pack naming
@@ -224,17 +237,25 @@ def select_tool_names(intents: str | Iterable[str], available: Sequence[str]) ->
     the matched ones. Padding every request with the retrieval tools would put back
     the ~470 tokens this function exists to save, and on a 4K local model those are
     the difference between carrying a tool table and carrying none.
+
+    ``extra`` is the escape hatch for **tools nobody can name in advance**: MCP servers
+    and installed skills get their names from a machine the pack list never saw. Without
+    this, a user installs an extension, the page says it is ready, and the local model is
+    handed a table that does not contain it -- no error, no trace, just 「这个我做不了」.
+    That is the same class of silent loss as ``generate_image`` missing the general pack
+    (r105), so these names are appended after the pack order and filtered against
+    ``available`` exactly the same way.
     """
     wanted = (intents,) if isinstance(intents, str) else tuple(intents)
     names = wanted or (GENERAL,)
     known = set(available)
     chosen: list[str] = []
     seen: set[str] = set()
-    for tool in (*CORE, *(t for name in names for t in PACKS.get(name, ()))):
+    for tool in (*CORE, *(t for name in names for t in PACKS.get(name, ())), *extra):
         if tool in known and tool not in seen:
             seen.add(tool)
             chosen.append(tool)
     return tuple(chosen)
 
 
-__all__ = ["CORE", "PACKS", "classify_tool_intent", "select_tool_names"]
+__all__ = ["CORE", "EXTENSION_PREFIXES", "PACKS", "classify_tool_intent", "select_tool_names"]

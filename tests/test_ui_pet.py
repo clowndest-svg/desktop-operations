@@ -17,13 +17,17 @@ from typing import Any, cast
 
 import pytest
 
-from jarvis.ui.compositor import BUBBLE_ADD, BUBBLE_STOP, bubble_palette
+from jarvis.ui import pet as pet_module
+from jarvis.ui.compositor import BODY_TARGET, BUBBLE_ADD, BUBBLE_STOP, bubble_palette
 from jarvis.ui.pet import (
+    GESTURE_RANGE,
     GRIP_FALLBACK,
     PARK_FLAGS,
     PET_HEIGHT,
+    PET_SCALE_STEPS,
     PET_TITLE,
     PET_WIDTH,
+    POKE_LINES,
     SWP_NOACTIVATE,
     SWP_SHOWWINDOW,
     PetController,
@@ -65,6 +69,12 @@ class FakePetWindow:
 
     def destroy(self) -> None:
         self.calls.append("destroy")
+
+    def resize(self, width: int, height: int) -> None:
+        self.calls.append(f"resize:{width}x{height}")
+
+    def move(self, x: int, y: int) -> None:
+        self.calls.append(f"move:{x},{y}")
 
     def evaluate_js(self, script: str) -> None:
         self.scripts.append(script)
@@ -1187,3 +1197,192 @@ class TestSheThinksStandingWithHerHeadDown:
         assert pose["lids"] <= 0.2, f"眼睛闭太多了：{pose['lids']}"
         assert pose["gaze"] < 0, "往下看才算在想"
         assert abs(pose["roll"]) <= 0.08, f"头歪过头就读成困了：{pose['roll']}"
+
+
+class TestHowBigSheIs:
+    """设置里那四颗按钮：数字只该有一份，而且改完她不该"滑走"。"""
+
+    def test_a_step_multiplies_the_box(self) -> None:
+        for name, factor in PET_SCALE_STEPS.items():
+            assert controller(scale_provider=lambda value=name: value).size() == (
+                round(PET_WIDTH * factor),
+                round(PET_HEIGHT * factor),
+            )
+
+    def test_an_unknown_step_is_normal_rather_than_a_guess(self) -> None:
+        """偏好里漂进一个没听过的名字（手改过文件、旧版本写的）：按中档，不猜。"""
+        assert controller(scale_provider=lambda: "gigantic").size() == (PET_WIDTH, PET_HEIGHT)
+
+    def test_a_provider_that_raises_does_not_take_the_window_down(self) -> None:
+        def boom() -> str:
+            raise RuntimeError("偏好读不到")
+
+        assert controller(scale_provider=boom).size() == (PET_WIDTH, PET_HEIGHT)
+
+    def test_no_provider_means_the_box_we_have_always_shipped(self) -> None:
+        assert controller().size() == (PET_WIDTH, PET_HEIGHT)
+
+    def test_changing_a_step_before_she_exists_refuses_instead_of_silently_storing(self) -> None:
+        answer = controller().set_scale("large")
+        assert answer["ok"] is False and "让她出来" in str(answer["error"])
+
+    def test_an_unknown_step_is_named_back_with_the_four_that_are_real(self) -> None:
+        pet = controller(scale_provider=lambda: "normal")
+        pet._window = FakePetWindow()
+        answer = pet.set_scale("huge")
+        assert answer["ok"] is False
+        assert "small" in str(answer["error"]) and "giant" in str(answer["error"])
+
+    def test_a_step_change_resizes_the_window_to_the_new_box(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        window = FakePetWindow()
+        pet = controller(scale_provider=lambda: "normal")
+        pet._window = window
+        monkeypatch.setattr(pet_module, "_window_rect", lambda _hwnd: None)
+        answer = pet.set_scale("large")
+        assert answer["ok"] is True, answer
+        assert f"resize:{round(PET_WIDTH * 1.35)}x{round(PET_HEIGHT * 1.35)}" in window.calls
+
+    def test_a_remembered_spot_is_used_and_clamped_back_onto_the_screen(self) -> None:
+        pet = controller(scale_provider=lambda: "normal", origin_provider=lambda: [1700, 300])
+        x, y = pet._place(1920, 1080)
+        assert (x, y) == (1920 - PET_WIDTH, 300), "挪过的点要用，但右边那截要夹回屏里"
+
+    def test_a_half_a_position_is_not_a_position(self) -> None:
+        """只有一格、是字符串、或者根本没有：当没记过，回到居中 —— 别拿半个数去放窗口。"""
+        for junk in ([], ["x", "y"], [5], None, "420,300"):
+            pet = controller(origin_provider=lambda value=junk: value)
+            assert pet._place(1920, 1080) == (
+                (1920 - PET_WIDTH) // 2,
+                (1080 - PET_HEIGHT) // 2,
+            ), f"{junk!r} 不该被当成一个位置"
+
+
+class TestBeingPoked:
+    """点她一下要有反应，而且"点"和"拖"不能互相冒充。"""
+
+    def _ready(self, **kwargs: Any) -> tuple[PetController, FakePetWindow]:
+        window = FakePetWindow()
+        pet = controller(**kwargs)
+        pet._window = window
+        pet._shown = True
+        return pet, window
+
+    def _captions(self, pet: PetController) -> list[str]:
+        said: list[str] = []
+        pet.set_caption = lambda text: said.append(text)  # type: ignore[method-assign]
+        return said
+
+    def test_a_tap_on_her_body_asks_the_page_for_the_reaction(self) -> None:
+        pet, window = self._ready()
+        pet.on_figure_tap(BODY_TARGET)
+        assert any("__jarvisPet('react')" in script for script in window.scripts)
+
+    def test_a_tap_on_the_handle_still_hides_her_and_says_nothing(self) -> None:
+        pet, window = self._ready()
+        said = self._captions(pet)
+        pet.on_figure_tap("grab")
+        assert window.calls == ["hide"], "把手那一下还是收起，不是「跟她说话」"
+        assert said == []
+
+    def test_the_answer_is_a_local_line_not_a_model_call(self) -> None:
+        """一次点击换一次计费调用、慢两三秒 —— "被戳"要的是立刻。这条设计由这个测试站着。"""
+        pet, _window = self._ready()
+        said = self._captions(pet)
+        pet.on_figure_tap(BODY_TARGET)
+        assert said and said[0] in POKE_LINES
+
+    def test_rapid_poking_moves_her_but_does_not_flicker_the_bubble(self) -> None:
+        pet, window = self._ready()
+        said = self._captions(pet)
+        for _ in range(4):
+            pet.on_figure_tap(BODY_TARGET)
+        assert len(said) == 1, "连点四下：动四下、说一句 —— 气泡不能被自己刷成闪烁"
+        assert sum(1 for script in window.scripts if "__jarvisPet('react')" in script) == 4
+
+
+class TestMovingOnHerOwn:
+    """每隔一阵自己动一下：时刻表在壳这边，"哪一段算动作"在页面那边。"""
+
+    def _ready(
+        self, *, on: bool = True, dragging: bool = False
+    ) -> tuple[PetController, FakePetWindow]:
+        window = FakePetWindow()
+        pet = controller(idle_motion_provider=lambda: on)
+        pet._window = window
+        pet._shown = True
+        pet._dragging = dragging
+        return pet, window
+
+    def _gestures(self, window: FakePetWindow) -> int:
+        return sum(1 for script in window.scripts if "__jarvisPet('gesture')" in script)
+
+    def test_the_gap_is_a_real_window_of_time(self) -> None:
+        low, high = GESTURE_RANGE
+        assert 15.0 <= low < high <= 120.0, f"{low}~{high}s：更短像抽搐，更长跟没有一样"
+
+    def test_one_gesture_then_a_gap_then_another(self) -> None:
+        pet, window = self._ready()
+        pet._maybe_gesture()
+        assert self._gestures(window) == 1, "第一次到点就该动"
+        pet._maybe_gesture()
+        assert self._gestures(window) == 1, "刚动过就再动一次，不是「每隔一阵」"
+        pet._next_gesture = 0.0
+        pet._maybe_gesture()
+        assert self._gestures(window) == 2, "隔够了就该再动一次 —— 时刻表不能只响一回"
+
+    def test_a_switched_off_pet_never_moves_by_herself(self) -> None:
+        pet, window = self._ready(on=False)
+        pet._next_gesture = 0.0
+        pet._maybe_gesture()
+        assert self._gestures(window) == 0
+
+    def test_she_does_not_gesture_while_being_dragged(self) -> None:
+        pet, window = self._ready(dragging=True)
+        pet._next_gesture = 0.0
+        pet._maybe_gesture()
+        assert self._gestures(window) == 0
+
+    def test_she_does_not_dance_while_answering_or_while_hidden(self) -> None:
+        pet, window = self._ready()
+        pet._next_gesture = 0.0
+        pet._thinking = True
+        pet._maybe_gesture()
+        assert self._gestures(window) == 0
+
+        pet, window = self._ready()
+        pet._next_gesture = 0.0
+        pet._shown = False
+        pet._maybe_gesture()
+        assert self._gestures(window) == 0
+
+
+class TestRememberingWhereSheStands:
+    def test_letting_go_remembers_the_spot(self) -> None:
+        seen: list[tuple[int, int]] = []
+
+        class FakeLayer:
+            @property
+            def screen_rect(self) -> tuple[int, int, int, int]:
+                return (321, 120, 741, 760)
+
+        pet = controller(on_origin=lambda x, y: seen.append((x, y)))
+        pet._compositor = FakeLayer()  # type: ignore[assignment]
+        pet.set_dragging(True)
+        assert seen == [], "拖着的过程里不必一路写偏好"
+        pet.set_dragging(False)
+        assert seen == [(321, 120)]
+
+    def test_a_layer_that_cannot_say_where_it_is_writes_nothing(self) -> None:
+        seen: list[tuple[int, int]] = []
+
+        class Broken:
+            @property
+            def screen_rect(self) -> tuple[int, int, int, int]:
+                return (0, 0, 0, 0)
+
+        pet = controller(on_origin=lambda x, y: seen.append((x, y)))
+        pet._compositor = Broken()  # type: ignore[assignment]
+        pet._remember_origin()
+        assert seen == []

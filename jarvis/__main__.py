@@ -54,9 +54,12 @@ from jarvis.audio.source import SounddeviceSource
 from jarvis.browser import BrowserService
 from jarvis.computer import ComputerService
 from jarvis.config import AppPaths, ConfigService
+from jarvis.config.schema import McpSection
 from jarvis.core.events import VoicePhase
 from jarvis.core.exceptions import JarvisError, ToolError
 from jarvis.database import SqliteStore
+from jarvis.extensions import ExtensionsService
+from jarvis.extensions.servers import path_for
 from jarvis.knowledge import KnowledgeService
 from jarvis.llm import LlmService
 from jarvis.logging import LOG_FORMAT, LoggingService, LoggingSettings
@@ -69,6 +72,7 @@ from jarvis.planner import PlannerService
 from jarvis.plugins import PluginService
 from jarvis.prompt import PromptService
 from jarvis.scheduler import SchedulerService
+from jarvis.skills import SkillService
 from jarvis.tools import ToolService
 from jarvis.tools.disk_cleaner import DiskCleaner
 from jarvis.tools.monitor import SystemMonitor
@@ -274,6 +278,15 @@ class _Capabilities:
 
     paths: AppPaths | None = None
     """软件自己产出的目录在哪 —— 那几扇门要靠它把"能读的文件"收在圈内。"""
+
+    skills: SkillService | None = None
+    """已安装的技能。提示里那一小段索引、`use_skill` 那条工具都由它给。"""
+
+    extensions: ExtensionsService | None = None
+    """扩展市场那一层：搜索、装、启停、"她装过什么"。页面直连它。"""
+
+    mcp: McpService | None = None
+    """MCP 服务本身。界面要的是连接状态（哪条连着、哪条为什么没连上），不是让它去连。"""
 
 
 def _logging_settings_factory(
@@ -588,7 +601,37 @@ def _register_capabilities(
     )
     app.register(plugins)
 
-    app.register(McpService(lambda: config_service.config.mcp, lambda: tools.registry))
+    # 技能层：盘上的 SKILL.md 是数据，启停存偏好。它注册 `use_skill` 那条工具，所以要在
+    # 工具服务之后建；它自己什么都不执行 —— 这条边界（市场里不卖会跑的代码）是这层存在的理由。
+    skills = SkillService(
+        directory_provider=lambda: paths.extensions_dir / "skills",
+        registry_provider=lambda: tools.registry,
+        preferences=preferences,
+    )
+    app.register(skills)
+
+    # `servers.json` 里那几条是"从市场装的"，`config.yaml` 里那几条是人自己写的。合并只在
+    # 装配点做（配置层不许知道扩展的存在），同名时**配置赢** —— 人手写下去的那条更有理解释
+    # 这台机器。总开关取两边的"或"：启用了一条装进来的 server，就等于打开了这一层。
+    def _mcp_settings() -> McpSection:
+        from jarvis.extensions.servers import merge as merge_servers
+
+        merged, _missing, _error = merge_servers(config_service.config.mcp, servers_file)
+        return merged
+
+    servers_file = path_for(paths.extensions_dir)
+    mcp = McpService(_mcp_settings, lambda: tools.registry)
+    app.register(mcp)
+
+    extensions = ExtensionsService(
+        skills=skills,
+        extensions_dir_provider=lambda: paths.extensions_dir,
+        registry_provider=lambda: tools.registry,
+        mcp_status_provider=lambda: mcp.stats(),
+        audit_file_provider=lambda: paths.audit_dir / "extensions.jsonl",
+        mcp_connect_provider=lambda name: mcp.ensure_connected(name),
+    )
+    app.register(extensions)
 
     # The planner reads tool names but never imports the registry: ``planner``
     # sits at L3 and the dependency table does not let it reach ``tools``.
@@ -635,6 +678,9 @@ def _register_capabilities(
         documents=documents,
         network=network,
         paths=paths,
+        skills=skills,
+        extensions=extensions,
+        mcp=mcp,
     )
 
 
@@ -857,6 +903,18 @@ def _schedule_probe_utterance(voice: VoiceService, text: str) -> None:
     threading.Thread(target=wait_and_speak, name="jarvis-speak-probe", daemon=True).start()
 
 
+def _skills_index(skills: SkillService | None) -> Callable[[], str]:
+    """提示里那一小段技能索引的读法。
+
+    没有技能层时回一个**永远回空串的函数**而不是 None：这样 ChatService 只有一条路径
+    （调它、拿字符串、非空才追加），少一个 `if provider is None` 的分支，也就少一个
+    「接了但没人给它值」的状态。
+    """
+    if skills is None:
+        return lambda: ""
+    return skills.prompt_index
+
+
 def _run_desktop(args: argparse.Namespace) -> int:
     """Start the services and hand them to the desktop HUD window."""
     app = Application()
@@ -1003,6 +1061,7 @@ def _run_desktop(args: argparse.Namespace) -> int:
         knowledge_provider=lambda: capabilities.knowledge,
         tool_provider=lambda: capabilities.tools,
         growth_provider=lambda: capabilities.growth,
+        skills_index_provider=_skills_index(capabilities.skills),
         transcript=capabilities.transcript,
         # Both read per turn rather than being passed as values, because the settings
         # panel can move them while the window is open and 「保存后立即生效」 is the
@@ -1142,6 +1201,9 @@ def _run_desktop(args: argparse.Namespace) -> int:
             images=image_engine,
             documents=capabilities.documents,
             growth=capabilities.growth,
+            skills=capabilities.skills,
+            extensions=capabilities.extensions,
+            mcp=capabilities.mcp,
             network=capabilities.network,
             paths=capabilities.paths,
             audio=audio_pusher,
@@ -1315,6 +1377,7 @@ def _run_ask(args: argparse.Namespace) -> int:
             knowledge_provider=lambda: context.capabilities.knowledge,
             tool_provider=lambda: context.capabilities.tools,
             growth_provider=lambda: context.capabilities.growth,
+            skills_index_provider=_skills_index(context.capabilities.skills),
             session_id="cli",
             thinking_provider=thinking,
         )

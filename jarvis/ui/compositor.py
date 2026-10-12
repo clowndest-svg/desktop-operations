@@ -120,6 +120,8 @@ without this the tap would become a one-pixel drag and the pet would not hide.
 """
 
 GRAB_TARGET = "grab"
+BODY_TARGET = "body"
+"""点在她自己的像素上 —— 不是把手，也不是卡片上的图标。"""
 """What a tap on her handle strip is called, in the same vocabulary as the card icons."""
 
 OPAQUE_MIN_ALPHA = 24
@@ -1343,6 +1345,10 @@ class AlphaWindow:
         target = self.button_at(*pressed)
         if target is None and self._over_grab(*pressed):
             target = GRAB_TARGET
+        if target is None and self.opaque_at(*pressed):
+            # 只有落在她自己的像素上才算"戳了她"。这个框是 420x640 的矩形，把矩形里
+            # 每一格都当成可点，等于在桌面上挖一个不透气的洞 —— 那正是这扇窗一路在躲的。
+            target = BODY_TARGET
         if target is not None:
             self._on_tap(target)
 

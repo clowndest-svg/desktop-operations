@@ -11,6 +11,7 @@
         @mirror="mirrorOpen = true"
         @images="imagesOpen = true"
       @assistant="assistantOpen = true"
+      @extensions="extensionsOpen = true"
       @skin="skinOpen = true"
       />
 
@@ -144,6 +145,12 @@
     <MirrorPopup :open="mirrorOpen" @close="mirrorOpen = false" />
     <ImagePopup :open="imagesOpen" @close="imagesOpen = false" />
     <AssistantPopup :open="assistantOpen" @close="assistantOpen = false" />
+    <!--
+      扩展（插件市场）挂在助手之后、皮肤之前：它是从顶栏和设置都开得动的入口，而它自己里面
+      还要「去设置改那三档」。同 z-index 层靠文档顺序决胜这一窗已经吃过两次亏（音色、告警），
+      所以这里再钉一层保险 —— 组件里那张是 z-index: 46，稳稳压住设置面板的 40。
+    -->
+    <ExtensionsPopup :open="extensionsOpen" @close="extensionsOpen = false" />
     <SkinPopup :open="skinOpen" @close="skinOpen = false" />
 
     <UsagePopup :open="usageOpen" @close="usageOpen = false" />
@@ -188,6 +195,7 @@ import DiskPanel from '@/components/DiskPanel.vue'
 import ActivityPopup from '@/components/ActivityPopup.vue'
 import AlertsPopup from '@/components/AlertsPopup.vue'
 import AssistantPopup from '@/components/AssistantPopup.vue'
+import ExtensionsPopup from '@/components/ExtensionsPopup.vue'
 import SkinPopup from '@/components/SkinPopup.vue'
 import CleanPanel from '@/components/CleanPanel.vue'
 import ComputerAccessPopup from '@/components/ComputerAccessPopup.vue'
@@ -259,6 +267,7 @@ function closePetForge(): void {
   petClosed.value += 1
 }
 const assistantOpen = ref(false)
+const extensionsOpen = ref(false)
 const skinOpen = ref(false)
 
 onMounted(() => {

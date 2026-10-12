@@ -156,6 +156,13 @@
       <button class="hud-btn bar__entry" type="button" title="提醒 / 记忆 / 知识库" @click="emit('assistant')">
         助手
       </button>
+      <!--
+        扩展挨着助手：这两颗都是「她那边的本事」，不是这台机器的读数，所以都不带状态标签 ——
+        这一格要装几条 skill、连着几台 server 是打开才数得清的，写在按钮上就得在顶栏上轮询。
+      -->
+      <button class="hud-btn bar__entry" type="button" title="找技能与 MCP 服务、装、启停、看本机缺什么运行时" @click="emit('extensions')">
+        扩展
+      </button>
       <button
         class="hud-btn bar__entry"
         :class="{ 'hud-btn--primary': petShown }"
@@ -215,6 +222,7 @@ const emit = defineEmits<{
   (e: 'mirror'): void
   (e: 'images'): void
   (e: 'assistant'): void
+  (e: 'extensions'): void
   (e: 'skin'): void
 }>()
 const voice = useVoiceStore()

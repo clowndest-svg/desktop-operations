@@ -13,11 +13,15 @@ from __future__ import annotations
 import json
 import queue
 from collections.abc import Mapping
+from pathlib import Path
+from typing import cast
 
 import pytest
 
 from jarvis.config.schema import McpSection, McpServerSection, ToolsSection
+from jarvis.core.commands import can_launch, has_shell_metacharacters, resolve_command
 from jarvis.core.exceptions import McpError
+from jarvis.extensions.runtime import detect
 from jarvis.mcp import (
     MCP_PROTOCOL_VERSION,
     McpClient,
@@ -27,7 +31,7 @@ from jarvis.mcp import (
     qualified_tool_name,
     sanitise_tool_name,
 )
-from jarvis.mcp.transport import _decode, _encode, _LineChannel
+from jarvis.mcp.transport import _decode, _encode, _LineChannel, launch_argv
 from jarvis.tools import RiskLevel, ToolRegistry
 
 # ---------------------------------------------------------------------------
@@ -522,3 +526,147 @@ class TestMcpTypes:
             name="fs", transport="stdio", connected=False, tool_count=0, error="x"
         )
         assert status.to_dict()["error"] == "x"
+
+
+class TestTheStatsCarryPerServerRows:
+    """页面每一行要写「连着 · N 个工具」或「没连上：原因」。只回总数就写不出这一行。
+
+    后端 `servers()` 一直是逐台的（`McpServerStatus` 带 tool_count 和 error），
+    `stats()` 却只汇总成三个数 —— 于是页面上那一行只能写"这一台后端没单独回"。
+    那是后端的缺口，不该由页面替它圆场。
+    """
+
+    def test_statuses_are_listed_per_server_with_their_own_error(self) -> None:
+        registry = ToolRegistry(_tools_section)
+        service = McpService(
+            lambda: McpSection(
+                enabled=False, connect_timeout_seconds=2.0, call_timeout_seconds=2.0, servers={}
+            ),
+            lambda: registry,
+        )
+        service._status["fs"] = McpServerStatus(
+            name="fs", transport="stdio", connected=False, tool_count=0, error="找不到 npx"
+        )
+        service._status["ok"] = McpServerStatus(
+            name="ok", transport="http", connected=True, tool_count=3, error=""
+        )
+        stats = service.stats()
+        statuses = cast("list[dict[str, object]]", stats["statuses"])
+        rows = {str(row["name"]): row for row in statuses}
+        assert rows["fs"]["error"] == "找不到 npx" and rows["fs"]["connected"] is False
+        assert rows["ok"]["tool_count"] == 3 and rows["ok"]["connected"] is True
+        assert json.dumps(stats, ensure_ascii=False), "桥面要能序列化回页面"
+
+
+class TestLaunchingACommandThatIsNotAnExe:
+    """Windows 上 `npx` 是 `.cmd` 壳：`Popen` 拿裸名字起不来，而 `shutil.which` 报"有"。
+
+    本轮真装真连一条 npm 的 MCP server 才撞出来（`[WinError 2] 系统找不到指定的文件`）。
+    检测和启动必须用同一个解析器，否则市场里每条都能"装成功、连不上"。
+    """
+
+    @pytest.fixture()
+    def bindir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        monkeypatch.setenv("PATH", str(bin_dir))
+        monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+        return bin_dir
+
+    def _make(self, bin_dir: Path, name: str) -> Path:
+        file = bin_dir / name
+        file.write_text("@echo off\r\n", encoding="utf-8")
+        return file
+
+    def test_a_bare_name_resolves_through_pathext_not_by_guessing_exe(self, bindir: Path) -> None:
+        script = self._make(bindir, "npx.cmd")
+        executable, prefix = resolve_command("npx")
+        assert executable.lower().endswith("cmd.exe")
+        # Windows 的文件系统不区分大小写，而 `shutil.which` 会把 PATHEXT 里那一段原样拼回去
+        # （`.CMD`），所以这里按小写比：比的语义是"指到了那个脚本"，不是"字符串一模一样"。
+        assert [part.lower() for part in prefix] == ["/c", str(script).lower()]
+
+    def test_a_real_exe_is_used_directly_without_going_through_a_shell(self, bindir: Path) -> None:
+        real = self._make(bindir, "tool.exe")
+        executable, prefix = resolve_command(str(real))
+        assert executable == str(real) and prefix == ()
+
+    def test_an_absolute_path_that_does_not_exist_is_handed_to_popen_unchanged(
+        self, tmp_path: Path
+    ) -> None:
+        """不自己编"没装 Node"那句：可能是权限、可能是杀软，Popen 的原文比我们的猜测准。"""
+        missing = str(tmp_path / "no-such-server.exe")
+        assert resolve_command(missing) == (missing, ())
+        assert can_launch(missing) == ""
+
+    def test_launch_argv_refuses_arguments_cmd_would_reinterpret(self, bindir: Path) -> None:
+        self._make(bindir, "npx.cmd")
+        with pytest.raises(McpError, match="cmd"):
+            launch_argv("npx", ["-y", "pkg&calc"])
+
+    def test_ordinary_arguments_pass_through(self, bindir: Path) -> None:
+        self._make(bindir, "npx.cmd")
+        argv = launch_argv("npx", ["-y", "@scope/pkg", r"C:\给它的目录"])
+        assert argv[0].lower().endswith("cmd.exe") and argv[1] == "/c"
+        assert argv[-3:] == ["-y", "@scope/pkg", r"C:\给它的目录"]
+
+    @pytest.mark.parametrize("bad", ["a&b", "a|b", "a>b", "a<b", "a^b", "%VAR%"])
+    def test_the_metacharacter_list_is_the_one_cmd_actually_reinterprets(self, bad: str) -> None:
+        assert has_shell_metacharacters([bad])
+
+    @pytest.mark.parametrize("fine", ["普通中文路径", r"C:\Program Files\x", "-y", "@scope/pkg"])
+    def test_ordinary_paths_are_not_flagged(self, fine: str) -> None:
+        assert not has_shell_metacharacters([fine])
+
+    def test_the_runtime_probe_and_the_spawner_agree(self, bindir: Path) -> None:
+        """检测说"有"的，必须就是启动那一步能起的东西 —— 两处答案必须来自同一个函数。"""
+        script = self._make(bindir, "uvx.cmd")
+        state = detect()
+        assert "uvx" in state["present"], "有 .cmd 壳却报缺 = 市场里 Python 那类全灰掉，理由是假的"
+        assert state["paths"]["uvx"].lower().startswith(str(script).lower())
+        assert "经 cmd /c" in state["paths"]["uvx"]
+        assert "uvx" not in state["missing"]
+
+
+class TestConnectingTheOneServerJustInstalled:
+    """装完就地连一条：不重启小夜，也不把整层重连（那会打断正在用的别的服务）。"""
+
+    def test_one_already_connected_needs_no_second_handshake(self) -> None:
+        registry = _registry()
+        transport = FakeTransport({"tools/list": _TOOL_LIST_RESPONSE})
+        service = _service(registry, _settings({"fs": _server()}), {"fs": transport})
+        service.start()
+        asked_before = len(transport.requests)
+        assert service.ensure_connected("fs") == ""
+        assert (
+            len(transport.requests) == asked_before
+        ), "已经连着的那条又握一次手 = 多起一个同名 client"
+        assert registry.names() == ["mcp__fs__fs_stat", "mcp__fs__read_file"]
+
+    def test_a_layer_that_is_shut_off_says_so_instead_of_connecting_anyway(self) -> None:
+        """「关了那一层就一条都不连」是页面上那颗开关的含义，装完这一路不许绕过它。"""
+        registry = _registry()
+        settings = _settings({"fs": _server()}, enabled=False)
+        service = _service(registry, settings, {"fs": FakeTransport({})})
+        assert "关着" in service.ensure_connected("fs")
+        assert registry.names() == []
+        assert service.stats()["connected"] == 0
+
+    def test_a_row_the_merge_never_adopted_is_named_instead_of_ignored(self) -> None:
+        registry = _registry()
+        service = _service(registry, _settings({"fs": _server()}), {"fs": FakeTransport({})})
+        assert "查不到" in service.ensure_connected("别的")
+
+    def test_a_server_that_switched_itself_off_is_not_woken_up(self) -> None:
+        registry = _registry()
+        service = _service(
+            registry, _settings({"fs": _server(enabled=False)}), {"fs": FakeTransport({})}
+        )
+        assert "被关着的" in service.ensure_connected("fs")
+
+    def test_the_failure_reason_comes_back_verbatim(self) -> None:
+        registry = _registry()
+        transport = FakeTransport({}, fail_on="initialize")
+        service = _service(registry, _settings({"fs": _server()}), {"fs": transport})
+        said = service.ensure_connected("fs")
+        assert "initialize" in said and service.stats()["connected"] == 0

@@ -94,6 +94,15 @@ export interface Character {
    */
   framing: Framing
   setPose(pose: Pose): void
+  /**
+   * 播一段"被碰到"（react）或"自己动一下"（gesture）的动作。
+   *
+   * 可选：只有内置那 11 份 .glb 带着动画文件，照片剪影和 VRM 那两条路没有"段"这个概念。
+   * 播不了就回 false，由页面降级成一次晃动 —— 三种形象都得对得起"点她有反应"这句话。
+   */
+  play?(kind: 'react' | 'gesture'): boolean
+  /** 现在在播哪一段（没有段可播就回空串）。打包版要靠它证明"点一下之后真的换了段"。 */
+  clipName?(): string
   advance(elapsed: number, delta: number, calm?: boolean): void
   /**
    * Re-measure the framing for a figure shown down to ``fraction`` of its height

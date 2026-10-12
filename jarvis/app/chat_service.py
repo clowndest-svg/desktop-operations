@@ -61,7 +61,11 @@ from jarvis.app.conversation import (
 from jarvis.app.knowledge_growth import TurnEvidence
 from jarvis.app.preferences import DEFAULT_DISPLAY_NAME
 from jarvis.app.round_table import Seat, Speech, refuse_pictures
-from jarvis.app.tool_routing import classify_tool_intent, select_tool_names
+from jarvis.app.tool_routing import (
+    EXTENSION_PREFIXES,
+    classify_tool_intent,
+    select_tool_names,
+)
 from jarvis.core.exceptions import JarvisError
 from jarvis.llm import local_server
 from jarvis.llm.client import StreamingClient
@@ -607,6 +611,7 @@ class ChatService:
         memory_provider: Callable[[], MemoryService] | None = None,
         knowledge_provider: Callable[[], KnowledgeService] | None = None,
         tool_provider: Callable[[], ToolService] | None = None,
+        skills_index_provider: Callable[[], str] | None = None,
         transcript: TranscriptService | None = None,
         session_id: str = "hud",
         max_tool_rounds: int = MAX_TOOL_ROUNDS_DEFAULT,
@@ -666,6 +671,10 @@ class ChatService:
         self._memory_provider = memory_provider
         self._knowledge_provider = knowledge_provider
         self._tool_provider = tool_provider
+        # 已启用技能的那一小段索引（名字 + 什么时候用它）。这里要的是**字符串提供者**而不是
+        # SkillService 对象：提示这一层只需要那段文字，把 L2 的具体类拖进来只是多一条依赖边。
+        # 没接时回空串 = 提示里一行都不加。
+        self._skills_index_provider = skills_index_provider
         self._transcript = transcript
         self._max_tool_rounds = max(0, max_tool_rounds)
         self._thinking_provider = thinking_provider
@@ -1567,13 +1576,29 @@ class ChatService:
             base = base.replace(DEFAULT_DISPLAY_NAME, self._persona_name)
         memory = self._memory_provider() if self._memory_provider else None
         if memory is None:
-            return base
+            return self._with_skills(base)
         try:
             block = memory.profile_block()
         except JarvisError as exc:
             logger.warning("memory profile unavailable: %s", exc)
-            return base
-        return f"{base}\n\n{block}" if block else base
+            return self._with_skills(base)
+        return self._with_skills(f"{base}\n\n{block}" if block else base)
+
+    def _with_skills(self, prompt: str) -> str:
+        """叠上「已启用的技能」那一小段索引。
+
+        放在最后而不是最前：persona 是定调的东西，不能被清单盖住 —— 和 memory 块同一条理由。
+        说明书正文**不进提示**：模型要用哪一份就调 `use_skill` 把那一本取回来。这是渐进披露，
+        十九份一起塞进去，随包那个 4K 窗口就什么都装不下了（工具表一个人 4.7k token）。
+        """
+        if self._skills_index_provider is None:
+            return prompt
+        try:
+            index = self._skills_index_provider()
+        except Exception as exc:
+            logger.warning("技能索引读不了：%s", exc)
+            return prompt
+        return f"{prompt}\n\n{index}" if index.strip() else prompt
 
     def _build_user_message(
         self,
@@ -1697,12 +1722,38 @@ class ChatService:
         full = tools.to_openai_tools()
         if pair is None or not _is_bundled(pair):
             return full, ""
-        names = select_tool_names(intents, [_tool_name(spec) for spec in full])
+        names = select_tool_names(
+            intents,
+            [_tool_name(spec) for spec in full],
+            extra=self._extension_tool_names(tools, full),
+        )
         if not names:
             return [], "general"
         allowed = set(names)
         return [spec for spec in full if _tool_name(spec) in allowed], "+".join(
             intents or ("general",)
+        )
+
+    @staticmethod
+    def _extension_tool_names(
+        tools: object, full: Sequence[Mapping[str, object]]
+    ) -> tuple[str, ...]:
+        """这一轮带出来的工具里，哪些是**装进来的**（MCP / 技能 / 插件）而不是内置的。
+
+        关键词路由认不了它们：`PACKS` 是写死的表，而 `mcp__github__create_issue` 这种名字
+        在写那张表的时候还不存在。不带 = 用户装完、页面说就绪、随包模型那一侧的表里根本没有它，
+        表现是「这个我做不了」而且没有任何报错 —— 和 r105 那次「生成一个绿色的哥布林」没带
+        生图工具是同一类静默消失。
+
+        只认**已经在这份 full 里**的名字：`to_openai_tools()` 刚按策略筛过，绕过它去读
+        `specs()` 会把被策略挡掉的东西重新请回表里。
+        """
+        specs = tools.specs() if hasattr(tools, "specs") else ()
+        present = {_tool_name(spec) for spec in full}
+        return tuple(
+            spec.name
+            for spec in specs
+            if spec.source.startswith(EXTENSION_PREFIXES) and spec.name in present
         )
 
     def _carries_tools(self, pair: _Pair) -> bool:

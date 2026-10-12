@@ -60,12 +60,14 @@ from __future__ import annotations
 import ctypes
 import json
 import logging
+import random
 import threading
 import time
 from collections.abc import Callable, Sequence
 from typing import Any
 
 from jarvis.ui.compositor import (
+    BODY_TARGET,
     DEFAULT_BUBBLE,
     GRAB_TARGET,
     THINKING_FPS,
@@ -82,6 +84,39 @@ PET_WIDTH = 420
 PET_HEIGHT = 640
 """Logical size of the pet window: a standing figure needs a tall box, and a wide
 one would cover more desktop than the figure itself."""
+
+PET_SCALE_STEPS: dict[str, float] = {
+    "small": 0.75,
+    "normal": 1.0,
+    "large": 1.35,
+    "giant": 1.7,
+}
+"""四档倍率。名字进偏好，数字只在这里有一份。"""
+
+PET_SCALE_LABELS: tuple[tuple[str, str], ...] = (
+    ("small", "小"),
+    ("normal", "中"),
+    ("large", "大"),
+    ("giant", "特大"),
+)
+"""页面上那四颗按钮：顺序、叫法、id 都在这一处，界面和偏好不各数一遍。"""
+
+GESTURE_RANGE: tuple[float, float] = (25.0, 70.0)
+"""每隔多久自己动一下（秒）。更短像抽搐，更长跟没有一样。〔我定的〕"""
+
+POKE_LINES: tuple[str, ...] = (
+    "哎呀。",
+    "干嘛戳我。",
+    "在的在的。",
+    "我头发要乱了。",
+    "嗯？想让我做什么，你说。",
+    "别掐，我在站着。",
+)
+"""戳一下回的那句：本地随机，不走模型。一次点击换一次计费调用、慢两三秒，而"被戳"
+   要的是立刻 —— 模型那条路留给用户真的在跟她说话。〔我定的〕"""
+
+POKE_SAME_LINE_SECONDS = 1.2
+"""这一秒内连点只动口不动：不然气泡会被自己刷成闪烁。"""
 
 PET_TITLE = "小夜 · 桌面宠物"
 
@@ -288,6 +323,10 @@ class PetController:
         on_action: Callable[[str], object] | None = None,
         width: int = PET_WIDTH,
         height: int = PET_HEIGHT,
+        scale_provider: Callable[[], str] | None = None,
+        idle_motion_provider: Callable[[], bool] | None = None,
+        origin_provider: Callable[[], object] | None = None,
+        on_origin: Callable[[int, int], None] | None = None,
         title: str = PET_TITLE,
     ) -> None:
         self._title = title
@@ -298,6 +337,13 @@ class PetController:
         self._on_action = on_action
         self._width = width
         self._height = height
+        self._scale_provider = scale_provider
+        self._idle_motion_provider = idle_motion_provider
+        self._origin_provider = origin_provider
+        self._on_origin = on_origin
+        self._poke_index = -1
+        self._last_poke = 0.0
+        self._next_gesture = 0.0
         self._window: Any | None = None
         self._shown = False
         self._grip = GRIP_FALLBACK
@@ -504,7 +550,8 @@ class PetController:
         import webview
 
         screen = _primary_screen()
-        x, y = pet_origin(screen[0], screen[1], self._width, self._height)
+        self._width, self._height = self.size()
+        x, y = self._place(screen[0], screen[1])
         try:
             window: Any = webview.create_window(
                 title=self._title,
@@ -562,6 +609,148 @@ class PetController:
         figure stops following the mouse half way across the screen.
         """
         self._dragging = bool(dragging)
+        if not self._dragging:
+            # 松手的那一刻才是她新的落脚点。
+            self._remember_origin()
+
+    # ------------------------------------------------------------------
+    # 多大、站哪儿、会不会自己动
+    # ------------------------------------------------------------------
+
+    def step(self) -> float:
+        """当前那一档的倍率。偏好里写了个不认识的东西就按"中"，不猜。"""
+        provider = self._scale_provider
+        if provider is None:
+            return 1.0
+        try:
+            name = str(provider() or "").strip().lower()
+        except Exception:  # pragma: no cover - 偏好读不到不是她的错
+            logger.debug("读宠物大小没读到，按中档", exc_info=True)
+            return 1.0
+        return PET_SCALE_STEPS.get(name, 1.0)
+
+    def size(self) -> tuple[int, int]:
+        """她现在应该有多大。窗口、分层窗、页面画布都从这里问，不留第二份真相。"""
+        step = self.step()
+        return round(PET_WIDTH * step), round(PET_HEIGHT * step)
+
+    def _place(self, screen_width: int, screen_height: int) -> tuple[int, int]:
+        """放哪儿：挪过就用那个点，没挪过就居中；两种都夹回屏幕里。"""
+        width, height = self.size()
+        stored: object = self._origin_provider() if self._origin_provider is not None else []
+        if isinstance(stored, (list, tuple)) and len(stored) == 2:
+            try:
+                x, y = int(str(stored[0])), int(str(stored[1]))
+            except (TypeError, ValueError):
+                x = y = -1
+            if x >= 0 and y >= 0 and x < screen_width and y < screen_height:
+                return min(x, max(0, screen_width - width)), min(y, max(0, screen_height - height))
+        return pet_origin(screen_width, screen_height, width, height)
+
+    def set_scale(self, step: object) -> dict[str, object]:
+        """换一档：改窗口尺寸，再把分层窗按新尺寸重建一次。
+
+        底边中心不动。左上角不动的话，"变大"在她身上表现成"往右下方滑走"，
+        而人会以为自己把宠物碰掉了。
+        """
+        name = str(step or "").strip().lower()
+        if name not in PET_SCALE_STEPS:
+            allowed = " / ".join(one[0] for one in PET_SCALE_LABELS)
+            return {"ok": False, "error": f"没有这一档：{step!r}（只认 {allowed}）"}
+        window = self._window
+        if window is None:
+            return {"ok": False, "error": "她还没被叫出来：先按「让她出来」再改大小"}
+        old_width, old_height = self._width, self._height
+        self._width, self._height = round(PET_WIDTH * PET_SCALE_STEPS[name]), round(
+            PET_HEIGHT * PET_SCALE_STEPS[name]
+        )
+        try:
+            # 只让页面视口变大：帧的像素数跟着变，分层窗在下一拍自己跟上
+            # （`_paint_pending` 里"窗口跟着像素走"那条早就有了）。
+            window.resize(self._width, self._height)
+        except Exception as exc:  # pragma: no cover - 窗口不肯改是环境问题
+            logger.warning("改大小没做成：%s", exc)
+            self._width, self._height = old_width, old_height
+            return {"ok": False, "error": f"窗口没答应改大小：{exc}"}
+        self._anchor_layer(old_width, old_height)
+        self._remember_origin()
+        logger.info("宠物大小改成 %s（%sx%s）", name, self._width, self._height)
+        return {
+            "ok": True,
+            "scale": name,
+            "width": self._width,
+            "height": self._height,
+            "error": "",
+        }
+
+    def _anchor_layer(self, old_width: int, old_height: int) -> None:
+        """把她挪回"底边中心"那个点：变大是站在原地变大，不是往右下方滑走。
+
+        这里只调 `move_to`（拖动那条路每帧都在用它），**不关也不重开那一层** ——
+        第一版是关掉再重建，真机上几秒后进程以 0xc000041d 崩在窗口过程里：
+        泵线程退了、窗口还在，WNDPROC 那个 ctypes 回调跟着对象被回收，系统再投一条
+        消息进来就是这一下。窗口跟着像素走那条路本来就有，不必碰生命周期。
+        """
+        layer = self._compositor
+        if layer is None:
+            return
+        try:
+            rect = layer.screen_rect
+            left, top = int(rect[0]), int(rect[1])
+        except Exception:  # pragma: no cover - 那一层刚没了
+            return
+        keep_x = left - (self._width - old_width) // 2
+        keep_y = top + (old_height - self._height)
+        try:
+            layer.move_to(max(0, keep_x), max(0, keep_y))
+        except Exception:  # pragma: no cover - 挪不动只是位置旧，不是她没了
+            logger.debug("换档后挪她没挪动", exc_info=True)
+
+    def _remember_origin(self) -> None:
+        """把她现在的左上角交回给壳去记。读不到就不记，不写半个进偏好。"""
+        sink = self._on_origin
+        window = self._compositor
+        if sink is None or window is None:
+            return
+        try:
+            rect = window.screen_rect
+        except Exception:  # pragma: no cover
+            return
+        if not rect or rect[2] <= 0 or rect[3] <= 0:
+            return
+        try:
+            sink(int(rect[0]), int(rect[1]))
+        except Exception:  # pragma: no cover - 偏好写不进去不该让拖动失败
+            logger.debug("她站哪儿没记住", exc_info=True)
+
+    def _react(self) -> None:
+        """戳她一下：播一段"被碰到"的动作，并在气泡里回一句本地话。"""
+        self._command("window.__jarvisPet && window.__jarvisPet('react');")
+        now = time.monotonic()
+        if now - self._last_poke < POKE_SAME_LINE_SECONDS:
+            return
+        self._last_poke = now
+        choices = len(POKE_LINES)
+        self._poke_index = (self._poke_index + 1 + random.randrange(max(1, choices - 1))) % choices
+        self.set_caption(POKE_LINES[self._poke_index])
+
+    def _maybe_gesture(self) -> None:
+        """每隔一阵让她自己动一下。说话、被拖、不在屏幕上、开关关了 —— 都不动。
+
+        时刻表在壳这边算，"哪一段算动作"在页面那边挑：前者只有壳知道（它知道她在不在
+        说话、有没有被拖着），后者只有 .glb 知道。两边各留自己那一半，不互相抄。
+        """
+        gate = self._idle_motion_provider
+        if gate is not None and not gate():
+            return
+        if self._dragging or not self._shown or self._thinking:
+            return
+        now = time.monotonic()
+        if now < self._next_gesture:
+            return
+        low, high = GESTURE_RANGE
+        self._next_gesture = now + random.uniform(low, high)
+        self._command("window.__jarvisPet && window.__jarvisPet('gesture');")
 
     def _apply_click_through(self, on: bool) -> None:
         hwnd = self._hwnd
@@ -742,13 +931,16 @@ class PetController:
             logger.warning("气泡上的「%s」没有人接", target, exc_info=True)
 
     def on_figure_tap(self, target: str) -> None:
-        """A tap on her own pixels. Only the handle strip answers, and it answers with 收.
+        """点在她身上的一下：把手收起她，身体回一句"干嘛"。
 
-        Her body deliberately does nothing: making the whole figure clickable meant
-        every attempt to see whether she had become draggable hid her instead.
+        以前点身体是**故意**什么都不做的：那会儿她刚能被拖动，任何一次"试试她动不动"
+        都会把她藏起来。现在拖动稳了，用户也明确要"点了能互动"，所以身体这一支给的是
+        反应，不是收起 —— 这两件事不能更像，也不能更混。
         """
         if target == GRAB_TARGET:
             self.hide()
+        elif target == BODY_TARGET:
+            self._react()
 
     def _sync_card_clicks(self, window: AlphaWindow) -> None:
         """Let a card take a click only where its icons are.
@@ -1041,6 +1233,10 @@ class PetController:
             self._sync_thinking()
         except Exception:  # pragma: no cover - an indicator must not stop the pointer
             logger.warning("思考气泡同步出错；这一轮先不管", exc_info=True)
+        try:
+            self._maybe_gesture()
+        except Exception:  # pragma: no cover - 自己动一下是锦上添花，不该停下指针判定
+            logger.debug("这一阵她没动成", exc_info=True)
         try:
             self._sync_to_cursor()
         except Exception as exc:  # pragma: no cover - needs a compositor that misbehaves

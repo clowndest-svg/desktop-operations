@@ -34,6 +34,8 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from jarvis.skills.types import ENABLED_KEY as SKILLS_ENABLED
+
 logger = logging.getLogger("jarvis.app.preferences")
 
 VOICE_AUTO_ARM = "voice.auto_arm"
@@ -358,6 +360,20 @@ figure that reappears after every reboot -- or vanishes after it -- is both anno
 and, since it is the thing that listens for the wake word, confusing about where to
 speak."""
 
+PET_SCALE = "pet.scale"
+"""她有多大：small / normal / large / giant 四档之一。
+
+四档而不是一个自由数字：设置里那一下要点得中，而且每一档能各带一句实测的代价。底宽
+420x640 是**画出来的框**，不是她身体本身 —— 所以变大时多出来那圈仍是透明的。"""
+
+PET_IDLE_MOTION = "pet.idle_motion"
+"""要不要每隔一阵自己动一下。关掉之后她只站着，戳她照样有反应。"""
+
+PET_ORIGIN = "pet.origin"
+"""她站在屏幕上的左上角 [x, y]（物理像素）。空列表 = 没挪过，按居中放。
+
+只记一个点：拖动是她唯一的摆位方式，而"重启就回中间"是最让人骂的一种失忆。"""
+
 PET_FIGURE = "pet.figure"
 """Which generated pet stands on the desktop. ``""`` means the built-in figure.
 
@@ -399,6 +415,9 @@ PREFERENCE_TYPES: dict[str, type] = {
     COMPUTER_ALLOW_TYPING: bool,
     SHELL_TIER: int,
     PET_ENABLED: bool,
+    PET_SCALE: str,
+    PET_IDLE_MOTION: bool,
+    PET_ORIGIN: list,
     PET_FIGURE: str,
     THINKING_LOADER: str,
     ALERTS_RULES: dict,
@@ -429,6 +448,9 @@ PREFERENCE_TYPES: dict[str, type] = {
     KNOWLEDGE_AUTO_LEARN: bool,
     KNOWLEDGE_AUTO_SEEN: list,
     KNOWLEDGE_AUTO_COUNT: dict,
+    # 键名从 jarvis.skills.types 引，不在这里再打一遍字符串：两处各写一遍迟早漂，
+    # 而漂了的失败是 set() 静默拒绝 —— 装好的技能一刷新全灭，界面上看不出原因。
+    SKILLS_ENABLED: list,
 }
 """The only keys that round-trip, with the type each must have.
 

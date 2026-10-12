@@ -162,6 +162,9 @@ class McpService:
             "servers": len(self._status),
             "connected": connected,
             "tools": sum(len(tools) for tools in self._tools.values()),
+            # 每一台自己的那一份：连着没、几个工具、错误原文。页面按行显示时要的是这个，
+            # 光有总数就只能在页面上写一句"这一台后端没单独回" —— 后端明明知道。
+            "statuses": [status.to_dict() for status in self.servers()],
             "errors": {
                 name: status.error for name, status in sorted(self._status.items()) if status.error
             },
@@ -183,6 +186,31 @@ class McpService:
                 details={"server": server, "available": sorted(self._clients)},
             )
         return client.call_tool(tool, arguments)
+
+    def ensure_connected(self, server: str) -> str:
+        """让刚登记的那一条**现在**就连一次。连上回空串，连不上回能上屏的原文。
+
+        页面装完一条 MCP server 不必重启小夜，也不必把整层重连一遍（那会打断别人正在用的
+        那几条）。这里只碰用户刚点下的这一条。
+
+        不回滚登记：第一次 `npx` 拉包可能要几分钟，那笔下载没理由让用户丢掉刚装的东西；
+        失败原文一直在页面上，重连那颗按钮也一直在。
+        """
+        if server in self._clients:
+            return ""
+        settings = self._settings_provider()
+        if not settings.enabled:
+            return "这一层现在是关着的，所以一条都不连"
+        row = settings.servers.get(server)
+        if row is None:
+            return f"配置里查不到这条 server：{server}（文件写好了，合并没采纳它）"
+        if not row.enabled:
+            return f"这条自己是被关着的：{server}"
+        self._connect(row, settings)
+        status = self._status.get(server)
+        if status is None:
+            return "连完读不到状态"
+        return "" if status.connected else (status.error or "没连上，也没留下原因")
 
     # -- internals ---------------------------------------------------------
 

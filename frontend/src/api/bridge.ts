@@ -222,6 +222,158 @@ export interface GrowthForget {
   error: string
 }
 
+/* ------------------------------------------------------------------ 扩展市场（插件页）
+ * 这三格的类型全部照抄 Python 那一侧：`ExtensionsService.state()`、`jarvis/extensions/types.py`
+ * 和 `jarvis/skills/types.py`。字段名不是页面自己发明的 —— 一发明就分成「界面说的」和
+ * 「后端做的」两套，而这类漂移是本仓库反复付过账的那笔。
+ */
+
+/** 搜索结果里的一行：一条能装的东西。 */
+export interface ExtensionCatalog {
+  kind: string
+  /** 装它时报给后端的凭据。后端只认「刚才搜出来的那批 id」，所以没搜过就装不了。 */
+  id: string
+  name: string
+  summary: string
+  /** 哪一路给的：``curated`` / ``npm`` / ``github``。分组和失败都按它说。 */
+  source: string
+  /**
+   * 装这一条要落什么东西。形状由 ``kind`` 决定（技能是 repo/ref/path，MCP 是
+   * transport/command/args），Python 那边故意不铺平 —— 铺平了就会有人忘了查 kind 就走错
+   * 另一半。页面只挑要给人看的那几样：装之前那条命令行必须摊开写在屏上。
+   */
+  install: Record<string, unknown>
+  homepage: string
+  stars: number
+  downloads: number
+  /** 这一条要跑起来本机得有什么命令（``npx`` / ``uvx`` / ``python``）。缺了就不许装。 */
+  needs: string[]
+  /** 技能：来源的 ref。钉了 commit 的那几条不会跟着上游改版漂走。 */
+  pinned: string
+}
+
+/** 一路搜索的交代：命中几条、花了多少毫秒、失败的话原文是什么。 */
+export interface ExtensionSource {
+  source: string
+  label: string
+  hits: number
+  error: string
+  milliseconds: number
+}
+
+export interface ExtensionSearch {
+  query: string
+  items: ExtensionCatalog[]
+  sources: ExtensionSource[]
+  /** 「这一路没通」的那几句（``标签：原文``）。它和「市场里没有」是两句不同的话。 */
+  failures: string[]
+  error: string
+}
+
+/** 已装的一份技能。``error`` 非空 = 盘上有这个目录但读不过来，那一行仍然要有删除钮。 */
+export interface ExtensionSkill {
+  slug: string
+  name: string
+  description: string
+  path: string
+  body_chars: number
+  version: string
+  license: string
+  homepage: string
+  error: string
+  enabled: boolean
+}
+
+/** ``servers.json`` 里的一条 MCP server。 */
+export interface ExtensionServer {
+  name: string
+  transport: string
+  command: string
+  args: string[]
+  url: string
+  enabled: boolean
+  source: string
+  homepage: string
+  needs: string[]
+  /** 这一条要哪些环境变量。密钥本身永远不上屏（只写名字），同 ``api_key`` 那条规矩。 */
+  env_from: string[]
+  note: string
+}
+
+/**
+ * MCP 那一层现在连着什么样。
+ *
+ * ``servers`` 是**条数**（一个数字），每一台自己的情况在 ``statuses`` 里 —— 后端
+ * ``McpService.stats()`` 两个都给。以前它只给总数，页面于是只能在每一行里写「这一台的
+ * 工具数后端没单独回」；后端明明知道（``servers()`` 早就是逐台的），那是后端的缺口，
+ * 不是页面的设计。读总数请走 ``mcpCount`` 那种类容错写法：它对老形状也不会崩。
+ */
+export interface ExtensionMcpStatus {
+  name: string
+  transport: string
+  connected: boolean
+  tool_count: number
+  error: string
+}
+
+export interface ExtensionMcpState {
+  enabled: boolean
+  running: boolean
+  servers: number
+  connected: number
+  tools: number
+  statuses: ExtensionMcpStatus[]
+  errors: Record<string, string>
+  error: string
+}
+
+/** 本机运行时：装 npm/uvx 那类条目前先确认那条命令真在。 */
+export interface ExtensionRuntime {
+  present: string[]
+  paths: Record<string, string>
+  labels: Record<string, string>
+  missing: string[]
+  error: string
+}
+
+/** 扩展审计的一行。``at`` 是 epoch 秒，屏上必须写成时间（``stamp()``），不许贴裸数字。 */
+export interface ExtensionLogRow {
+  at: number
+  event: string
+}
+
+export interface ExtensionState {
+  directory: string
+  servers_file: string
+  /** 那一大颗「允许她运行外部扩展程序」，这一层的总开关。 */
+  layer_enabled: boolean
+  servers: ExtensionServer[]
+  skills: ExtensionSkill[]
+  mcp: ExtensionMcpState
+  runtime: ExtensionRuntime
+  /** 后端记着的那一次搜索。页面刷新也看得见，所以它是状态不是本地变量。 */
+  search: {
+    query: string
+    items: ExtensionCatalog[]
+    sources: ExtensionSource[]
+    failures: string[]
+  }
+  /** 读 ``servers.json`` 本身失败的那一句 —— 和「一条 server 都连不上」不是一件事。 */
+  store_error: string
+  log: ExtensionLogRow[]
+  error: string
+  /** 只有刚装过那一下才带。``reason`` 是能直接上屏的一句人话。 */
+  install?: {
+    ok: boolean
+    kind: string
+    name: string
+    path: string
+    reason: string
+    detail: string
+    connect: string
+  }
+}
+
 /** One execution record, as both the scheduler and the workflow engine render it. */
 export interface RunRow {
   ok: boolean
@@ -410,6 +562,14 @@ export interface SilhouetteModel {
 
 export interface PetState {
   shown: boolean
+  /** 她现在多大一档：small / normal / large / giant。 */
+  scale?: string
+  scales?: { id: string; label: string; multiplier: number }[]
+  width?: number
+  height?: number
+  /** 「她会自己动一动」那颗开关。关掉只是不再自己动，戳她照样理人。 */
+  idle_motion?: boolean
+  ok?: boolean
   error?: string
 }
 
@@ -1751,6 +1911,8 @@ interface PywebviewApi {
   plan_goal(goal: string): Promise<PlanAnswer>
   pet_state(): Promise<PetState>
   pet_toggle(): Promise<PetState>
+  pet_set_scale(scale: string): Promise<PetState>
+  pet_set_idle(on: boolean): Promise<PetState>
   pet_grip(rect: GripRect): Promise<{ ok: boolean }>
   pet_drag(dragging: boolean): Promise<{ ok: boolean }>
   pet_frame(png: string): Promise<{ ok: boolean }>
@@ -1870,6 +2032,22 @@ interface PywebviewApi {
   copy_image(path: string): Promise<ActionResult>
   open_artifact(path: string, how: string): Promise<ActionResult>
   network_state(): Promise<NetworkState>
+  // ------------------------------------------------------------------ 扩展市场（插件页）
+  // 门名一律写成 Python 方法名（下划线）。pywebview 的 ``js/api.js`` 是拿 ``element.func``
+  // **原样**建函数的，不做下划线→驼峰转换；这里写 `extensions_addHttp` 的话，打包版
+  // ``window.pywebview.api.extensions_addHttp`` 就是 undefined —— 又是一扇「注册了但永远
+  // 调不动」的门（r95 那次的同一个形状）。驼峰只留给下面导出的包装函数名。
+  // 形参名照投屏那条禁令避开 window/promise/arguments 这些 stub 内部标识符。
+  extensions_state(): Promise<ExtensionState>
+  extensions_search(query: string, kinds: string[]): Promise<ExtensionSearch>
+  extensions_install(item_id: string): Promise<ExtensionState>
+  extensions_add_http(name: string, url: string): Promise<ExtensionState>
+  extensions_layer_set(on: boolean): Promise<ExtensionState>
+  extensions_server_set(name: string, on: boolean): Promise<ExtensionState>
+  extensions_server_remove(name: string, confirmed: boolean): Promise<ExtensionState>
+  extensions_reconnect(): Promise<ExtensionState>
+  skill_set(slug: string, on: boolean): Promise<ExtensionState>
+  skill_remove(slug: string, confirmed: boolean): Promise<ExtensionState>
 }
 
 declare global {
@@ -2335,6 +2513,327 @@ const mockGrowth: GrowthState = {
   folder: '_自学',
   has_knowledge: true,
   error: '',
+}
+
+/**
+ * 扩展市场在浏览器预览里的这一层。
+ *
+ * 和 ``mockGrowth`` 一样，**必须声明在 ``mock`` 那个对象字面量外面**：写进字面量里，
+ * 「按下去改的那一份」和「读回来的那一份」就不是同一个对象，开关看着没反应（这坑踩过）。
+ *
+ * 预览还得多担一条后端才有的规矩：``extensions_install`` 只认**刚才搜出来的 id**。
+ * 所以这里也得有 ``mockExtById`` 那张表 —— 不记这一笔，开发模式下装那一下永远被拒，
+ * 人就验不到真流程；记了，「不在搜索结果里」那一句在预览里也照样说得出口（故意拿一个
+ * 没搜过的 id 去装，看到的应该就是生产那句拒绝）。
+ */
+const MOCK_EXT_SOURCE_LABELS: Record<string, string> = {
+  curated: '精选（作者逐条验过）',
+  npm: 'npm · MCP server',
+  github: 'GitHub · 技能仓库',
+}
+
+const mockExtCatalog: ExtensionCatalog[] = [
+  {
+    kind: 'mcp',
+    id: 'curated:server-filesystem',
+    name: 'filesystem',
+    summary: '把指定文件夹读给她看的 MCP server。装之前那条命令行摊开在这张卡上。',
+    source: 'curated',
+    install: { transport: 'stdio', command: 'npx', args: ['-y', '@modelcontextprotocol/server-filesystem'] },
+    homepage: 'https://github.com/modelcontextprotocol/servers',
+    stars: 0,
+    downloads: 0,
+    needs: ['npx'],
+    pinned: '2026-09-30',
+  },
+  {
+    kind: 'skill',
+    id: 'curated:pdf-forms',
+    name: 'pdf-forms',
+    summary: '怎么把一份填好的表单读回来并写回同一路径的说明书。',
+    source: 'curated',
+    install: { repo: 'example/author-skills', ref: 'a1b2c3d', path: 'skills/pdf-forms' },
+    homepage: 'https://github.com/example/author-skills',
+    stars: 0,
+    downloads: 0,
+    needs: [],
+    pinned: 'a1b2c3d',
+  },
+  {
+    kind: 'mcp',
+    id: 'npm:@modelcontextprotocol/server-filesystem',
+    name: '@modelcontextprotocol/server-filesystem',
+    summary: 'npm 那一路的同一条：限白名单目录，读写走独立进程。',
+    source: 'npm',
+    install: { transport: 'stdio', command: 'npx', args: ['-y', '@modelcontextprotocol/server-filesystem'] },
+    homepage: 'https://www.npmjs.com/package/@modelcontextprotocol/server-filesystem',
+    stars: 0,
+    downloads: 41_208,
+    needs: ['npx'],
+    pinned: '',
+  },
+  {
+    kind: 'mcp',
+    id: 'npm:mcp-server-postgres',
+    name: 'mcp-server-postgres',
+    summary: '连一个本地数据库。要环境变量，密钥不落进扩展文件。',
+    source: 'npm',
+    install: { transport: 'stdio', command: 'npx', args: ['-y', 'mcp-server-postgres'] },
+    homepage: 'https://www.npmjs.com/package/mcp-server-postgres',
+    stars: 0,
+    downloads: 3_140,
+    needs: ['npx'],
+    pinned: '',
+  },
+  {
+    kind: 'skill',
+    id: 'github:anthropics/skills:document-skills',
+    name: 'anthropics/skills · document-skills',
+    summary: '一个仓库里翻出来的技能目录。正文只在被用到时才取进上下文。',
+    source: 'github',
+    install: { repo: 'anthropics/skills', ref: 'main', path: 'skills/document-skills' },
+    homepage: 'https://github.com/anthropics/skills',
+    stars: 44_000,
+    downloads: 0,
+    needs: [],
+    pinned: 'main',
+  },
+  {
+    kind: 'mcp',
+    id: 'github:py-mcp-weather',
+    name: 'py-mcp-weather',
+    summary: 'Python 写的那类 stdio 服务，用 uvx 免安装跑 —— 本机没有 uvx 就装不了。',
+    source: 'github',
+    install: { transport: 'stdio', command: 'uvx', args: ['mcp-server-fetch'] },
+    homepage: 'https://github.com/example/py-mcp-weather',
+    stars: 210,
+    downloads: 0,
+    needs: ['uvx'],
+    pinned: 'main',
+  },
+]
+
+/** 后端那张「只认搜出来的 id」的缓存表，预览照抄一份（空表＝什么都没搜过）。 */
+const mockExtById = new Map<string, ExtensionCatalog>()
+
+/** 预览里也先留一行审计，好让第三格知道自己在说什么（``at`` 是 epoch 秒）。 */
+const mockExtSeedLog: ExtensionLogRow[] = [
+  { at: Date.now() / 1000 - 4_200, event: '扩展运行已禁止（这一层总开关）' },
+]
+
+const mockExtensions: ExtensionState = {
+  directory: 'E:\\小夜数据\\扩展',
+  servers_file: 'E:\\小夜数据\\扩展\\servers.json',
+  layer_enabled: false,
+  servers: [
+    {
+      name: 'filesystem',
+      transport: 'stdio',
+      command: 'npx',
+      args: ['-y', '@modelcontextprotocol/server-filesystem', 'E:\\文档'],
+      url: '',
+      enabled: true,
+      source: 'curated',
+      homepage: 'https://github.com/modelcontextprotocol/servers',
+      needs: ['npx'],
+      env_from: [],
+      note: '预览里预先摆好的一条，好让这一格不是空壳',
+    },
+  ],
+  skills: [
+    {
+      slug: 'pdf-forms',
+      name: 'PDF 表单',
+      description: '怎么把一份填好的表单读回来并写回同一路径。',
+      path: 'E:\\小夜数据\\扩展\\skills\\pdf-forms',
+      body_chars: 4_812,
+      version: '1.0.0',
+      license: 'MIT',
+      homepage: '',
+      error: '',
+      enabled: true,
+    },
+    {
+      slug: 'broken-one',
+      name: '读不了的那一份',
+      description: '',
+      path: 'E:\\小夜数据\\扩展\\skills\\broken-one',
+      body_chars: 0,
+      version: '',
+      license: '',
+      homepage: '',
+      error: "SKILL.md 的前言不是一个映射，所以这一份读不过来",
+      enabled: false,
+    },
+  ],
+  mcp: {
+    // 合同里 ``servers`` 是**条数**（后端 ``McpService.stats()`` 就是数字），逐台的在
+    // ``statuses`` 里。预览按真实形状写，不写成一个更好看的数组。
+    enabled: false,
+    running: false,
+    servers: 1,
+    connected: 0,
+    tools: 0,
+    statuses: [{ name: 'filesystem', transport: 'stdio', connected: false, tool_count: 0, error: 'FileNotFoundError: 这台机器上找不到 npx' }],
+    errors: { filesystem: 'FileNotFoundError: 这台机器上找不到 npx' },
+    error: '',
+  },
+  // 预览里没有本机：给一个「有 node/npx/python、缺 uvx/deno」的读数，
+  // 这样「缺运行时所以那条装不了、并写明为什么」这条真实路径在开发模式也看得见。
+  runtime: {
+    present: ['node', 'npx', 'python', 'this-runtime'],
+    paths: {
+      node: 'C:\\Program Files\\nodejs\\node.exe（模拟）',
+      npx: 'C:\\Program Files\\nodejs\\npx.cmd（模拟）',
+      python: '（模拟）随包解释器',
+      'this-runtime': '（模拟）小夜自己这个 exe',
+    },
+    labels: {
+      node: 'Node.js（npm 那类 MCP server 要用）',
+      npx: 'npx（随 Node 一起来）',
+      python: 'Python（自研的 stdio 服务用当前解释器）',
+      uvx: 'uvx（Python 那类 MCP server 的免安装跑法）',
+      deno: 'Deno（少数 server 用 deno run）',
+    },
+    missing: ['uvx', 'deno'],
+    error: '',
+  },
+  search: { query: '', items: [], sources: [], failures: [] },
+  store_error: '',
+  log: mockExtSeedLog,
+  error: '',
+}
+
+function mockExtSnapshot(): ExtensionState {
+  return {
+    ...mockExtensions,
+    servers: mockExtensions.servers.map((row) => ({ ...row, args: [...row.args], needs: [...row.needs], env_from: [...row.env_from] })),
+    skills: mockExtensions.skills.map((row) => ({ ...row })),
+    log: mockExtensions.log.map((row) => ({ ...row })),
+    mcp: { ...mockExtensions.mcp, errors: { ...mockExtensions.mcp.errors } },
+    runtime: {
+      ...mockExtensions.runtime,
+      present: [...mockExtensions.runtime.present],
+      missing: [...mockExtensions.runtime.missing],
+      paths: { ...mockExtensions.runtime.paths },
+      labels: { ...mockExtensions.runtime.labels },
+    },
+    search: {
+      ...mockExtensions.search,
+      items: mockExtensions.search.items.map((row) => ({ ...row, needs: [...row.needs], install: { ...row.install } })),
+      sources: mockExtensions.search.sources.map((row) => ({ ...row })),
+      failures: [...mockExtensions.search.failures],
+    },
+  }
+}
+
+/** 两行制审计在预览里的下半：结果也要记一行，装挂掉那一次才留得下来。 */
+function mockExtNote(text: string): void {
+  mockExtensions.log = [{ at: Date.now() / 1000, event: text }, ...mockExtensions.log].slice(0, 12)
+}
+
+function mockExtensionsSearch(query: string, kinds: string[]): ExtensionSearch {
+  const clean = String(query || '').trim()
+  const wanted = kinds.length ? kinds : ['skill', 'mcp']
+  const rows = mockExtCatalog.filter((row) => wanted.includes(row.kind))
+  // 三路各自交代（同 ``sources.search_all``）：没给关键词时 npm/github 是「这一路没通」，
+  // 不是「市场里没有」—— 这两句在屏上必须长得不一样，否则用户去改的那根线是错的。
+  const sources: ExtensionSource[] = ['curated', 'npm', 'github'].map((name) => {
+    const hits = rows.filter((row) => row.source === name)
+    const stalled = name !== 'curated' && !clean
+    return {
+      source: name,
+      label: MOCK_EXT_SOURCE_LABELS[name] ?? name,
+      hits: stalled ? 0 : hits.length,
+      error: stalled ? 'ValueError: 这一路要给关键词才有结果' : '',
+      milliseconds: stalled ? 1 : 140 + name.length * 53,
+    }
+  })
+  const alive = new Set(sources.filter((row) => !row.error).map((row) => row.source))
+  const items = rows.filter((row) => alive.has(row.source))
+  for (const row of items) mockExtById.set(row.id, row)
+  const failures = sources.filter((row) => row.error).map((row) => `${row.label}：${row.error}`)
+  mockExtensions.search = { query: clean, items, sources, failures }
+  return { query: clean, items, sources, failures, error: '' }
+}
+
+function mockExtensionsInstall(itemId: string): ExtensionState {
+  const wanted = String(itemId || '').trim()
+  const item = mockExtById.get(wanted)
+  if (!item) {
+    const snapshot = mockExtSnapshot()
+    snapshot.error =
+      `这条不在刚才的搜索结果里（id=${wanted || '空'}）。请先搜一次再装 —— 安装不接受页面传来的命令行，否则这一页就等于一个命令输入框。`
+    return snapshot
+  }
+  const gaps = item.needs.filter((need) => !mockExtensions.runtime.present.includes(need))
+  if (gaps.length) {
+    const snapshot = mockExtSnapshot()
+    snapshot.error = `这台机器上缺 ${gaps.join('、')}，装上了也起不来（${item.needs.join('、')} 是这一条要的东西）`
+    return snapshot
+  }
+  let result: ExtensionState['install']
+  if (item.kind === 'mcp') {
+    const name = String(item.install['name'] || item.name).trim() || item.name
+    const row: ExtensionServer = {
+      name,
+      transport: String(item.install['transport'] || 'stdio'),
+      command: String(item.install['command'] || ''),
+      args: Array.isArray(item.install['args']) ? item.install['args'].map(String) : [],
+      url: String(item.install['url'] || ''),
+      enabled: true,
+      source: item.source,
+      homepage: item.homepage,
+      needs: [...item.needs],
+      env_from: Array.isArray(item.install['env_from']) ? item.install['env_from'].map(String) : [],
+      note: item.summary.slice(0, 200),
+    }
+    mockExtensions.servers = [...mockExtensions.servers.filter((one) => one.name !== name), row]
+    mockExtNote(`MCP server 已登记 ${name}（${row.command || row.url}）← ${item.source}`)
+    result = {
+      ok: true,
+      kind: 'mcp',
+      name,
+      path: mockExtensions.servers_file,
+      reason: '',
+      detail: '已登记；连接状态在下面那格，要生效点「重连」',
+      connect: '预览里不真连：能不能连上要看装完那一次',
+    }
+  } else {
+    const raw = String(item.install['path'] || item.name)
+    const slug = raw.replace(/\\/g, '/').split('/').filter(Boolean).pop() || 'skill'
+    const place = `${mockExtensions.directory}/skills/${slug}`
+    mockExtensions.skills = [
+      ...mockExtensions.skills.filter((one) => one.slug !== slug),
+      {
+        slug,
+        name: item.name,
+        description: item.summary.slice(0, 200),
+        path: place,
+        body_chars: 3_040,
+        version: '',
+        license: '',
+        homepage: item.homepage,
+        error: '',
+        enabled: true,
+      },
+    ]
+    mockExtNote(`技能已装 ${slug} ← ${item.source}:${item.homepage || item.name}（预览只是记账，盘上没写文件）`)
+    result = {
+      ok: true,
+      kind: 'skill',
+      name: item.name,
+      path: place,
+      reason: '',
+      detail: '预览不写盘，真版本会把 SKILL.md 落到上面那个目录',
+      connect: '',
+    }
+  }
+  // 改完之后才取快照：先取再改的话，预览里那一次「装上了」会在下一次读状态时被擦回去。
+  const snapshot = mockExtSnapshot()
+  snapshot.install = result
+  snapshot.error = ''
+  return snapshot
 }
 
 const mock: PywebviewApi = {
@@ -3153,12 +3652,127 @@ const mock: PywebviewApi = {
     mockGrowth.total_seen = 0
     return { ok: true, removed, error: '预览只是把数字归零，没有真的文件可删' }
   },
+  // ---------------------------------------------------------------- 扩展市场（插件页）
+  async extensions_state() {
+    return mockExtSnapshot()
+  },
+  async extensions_search(query, kinds) {
+    return mockExtensionsSearch(query, kinds)
+  },
+  async extensions_install(item_id) {
+    return mockExtensionsInstall(item_id)
+  },
+  async extensions_add_http(name, url) {
+    const clean = String(name || '').trim()
+    const link = String(url || '').trim()
+    const snapshot = mockExtSnapshot()
+    if (!clean || !/^https?:\/\//i.test(link)) {
+      snapshot.error = '名字要给一个，地址必须是 http 或 https 开头的完整一条。'
+      return snapshot
+    }
+    // 预览不校验内网/回环（那是 Python 里 ``validate_url`` 那道闸在做），但同名覆盖这条是真的。
+    mockExtensions.servers = [
+      ...mockExtensions.servers.filter((one) => one.name !== clean),
+      {
+        name: clean,
+        transport: 'http',
+        command: '',
+        args: [],
+        url: link,
+        enabled: true,
+        source: 'manual',
+        homepage: '',
+        needs: [],
+        env_from: [],
+        note: '页面上手工登记的一条 http 服务',
+      },
+    ]
+    mockExtNote(`手工登记 http MCP：${clean} → ${link}`)
+    return mockExtSnapshot()
+  },
+  async extensions_layer_set(on) {
+    mockExtensions.layer_enabled = Boolean(on)
+    mockExtNote(`扩展运行${on ? '已允许' : '已禁止'}（这一层总开关）`)
+    return mockExtSnapshot()
+  },
+  async extensions_server_set(name, on) {
+    const wanted = String(name || '').trim()
+    if (!mockExtensions.servers.some((one) => one.name === wanted)) {
+      const snapshot = mockExtSnapshot()
+      snapshot.error = `没有这条 MCP server：${wanted}`
+      return snapshot
+    }
+    mockExtensions.servers = mockExtensions.servers.map((one) =>
+      one.name === wanted ? { ...one, enabled: Boolean(on) } : one,
+    )
+    mockExtNote(`${on ? '启用' : '停用'} MCP server ${wanted}`)
+    return mockExtSnapshot()
+  },
+  async extensions_server_remove(name, confirmed) {
+    if (confirmed !== true) {
+      const snapshot = mockExtSnapshot()
+      snapshot.error = '删除 MCP server 需要明确的确认（confirmed）'
+      return snapshot
+    }
+    const wanted = String(name || '').trim()
+    if (!mockExtensions.servers.some((one) => one.name === wanted)) {
+      const snapshot = mockExtSnapshot()
+      snapshot.error = `没有这条 MCP server：${wanted}`
+      return snapshot
+    }
+    mockExtensions.servers = mockExtensions.servers.filter((one) => one.name !== wanted)
+    mockExtNote(`删掉 MCP server 登记 ${wanted}（配置记录，不动盘上任何别的东西）`)
+    return mockExtSnapshot()
+  },
+  async extensions_reconnect() {
+    // 预览里没有一个真进程可连：所以「重连完了」这句不能编，只把 errors 原样留着让人看见。
+    const snapshot = mockExtSnapshot()
+    snapshot.error = '预览里没有真 MCP 进程，重连这一下什么都没连'
+    return snapshot
+  },
+  async skill_set(slug, on) {
+    const wanted = String(slug || '').trim()
+    if (!mockExtensions.skills.some((one) => one.slug === wanted)) {
+      const snapshot = mockExtSnapshot()
+      snapshot.error = `没有这份技能：${wanted}`
+      return snapshot
+    }
+    mockExtensions.skills = mockExtensions.skills.map((one) =>
+      one.slug === wanted ? { ...one, enabled: Boolean(on) } : one,
+    )
+    mockExtNote(`${on ? '启用' : '停用'}技能 ${wanted}`)
+    return mockExtSnapshot()
+  },
+  async skill_remove(slug, confirmed) {
+    if (confirmed !== true) {
+      const snapshot = mockExtSnapshot()
+      snapshot.error = '删除技能需要明确的确认（confirmed）'
+      return snapshot
+    }
+    const wanted = String(slug || '').trim()
+    const row = mockExtensions.skills.find((one) => one.slug === wanted)
+    if (!row) {
+      const snapshot = mockExtSnapshot()
+      snapshot.error = `没有这份技能：${wanted}`
+      return snapshot
+    }
+    mockExtensions.skills = mockExtensions.skills.filter((one) => one.slug !== wanted)
+    // 真后端删的是盘上那个目录；预览没有盘，这一句就必须留在纸上而不是咽下去。
+    mockExtNote(`技能已删 ${wanted}（预览只从清单里去掉，${row.path} 没动）`)
+    return mockExtSnapshot()
+  },
   async pet_state() {
     return { shown: petShownMock }
   },
   async pet_toggle() {
     petShownMock = !petShownMock
     return { shown: petShownMock }
+  },
+  async pet_set_scale(scale: string) {
+    return { shown: petShownMock, scale, error: '' }
+  },
+  async pet_set_idle(on: boolean) {
+    return { shown: petShownMock, idle_motion: on, error: '' }
   },
   async pet_grip() {
     return { ok: false }
@@ -4737,11 +5351,86 @@ export function growthForget(): Promise<GrowthForget> {
   return bridge().then((target) => target.growth_forget())
 }
 
+/* --------------------------------------------------------------------------- 扩展市场
+ * 这十扇门的返回值**全是同一份 ``ExtensionState``**（搜索那一扇除外）：后端每改一次就回读
+ * 一次整份状态，界面照着它画，不拿"我刚才点了什么"去猜。这一层没有轮询 —— 只在弹窗打开、
+ * 或者切到那一格时读一次，轮询会把"你刚按下去的那一下"擦掉。
+ *
+ * 函数名是驼峰（页面的写法），桥面门名是 Python 的下划线原名（见 ``interface PywebviewApi``
+ * 那一段的说明）：pywebview 不做名字转换，写错一个字母那扇门在打包版里就是 undefined。
+ */
+
+/** 这一层现在什么样。永远是一整份，所以不需要问「这一格存在吗」。 */
+export function extensionsState(): Promise<ExtensionState> {
+  return bridge().then((target) => target.extensions_state())
+}
+
+/**
+ * 三路并发搜。每一路的成败单独带回来：``failures`` 非空时屏上写的不是「没有结果」，
+ * 而是「这一路没通，原文是这句」。
+ */
+export function extensionsSearch(query: string, kinds: string[]): Promise<ExtensionSearch> {
+  return bridge().then((target) => target.extensions_search(query, kinds))
+}
+
+/**
+ * 按 id 装。**后端只认刚才搜出来的 id**，页面传不进命令行 —— 这不是洁癖：接受那个形状
+ * 就等于这一页变成一个命令输入框。所以「没搜过」时这颗按钮必须是灰的并写明为什么灰。
+ */
+export function extensionsInstall(itemId: string): Promise<ExtensionState> {
+  return bridge().then((target) => target.extensions_install(itemId))
+}
+
+/** 手工加一条 **http** 的 MCP server（不起本机进程）。stdio 只能从搜索结果装。 */
+export function extensionsAddHttp(name: string, url: string): Promise<ExtensionState> {
+  return bridge().then((target) => target.extensions_add_http(name, url))
+}
+
+/** 那一大颗「允许她运行外部扩展程序」。关 = 一条 server 都不连。 */
+export function extensionsLayerSet(on: boolean): Promise<ExtensionState> {
+  return bridge().then((target) => target.extensions_layer_set(on))
+}
+
+/** 单独启停一条登记的 server。回的是读回来的整份，不是把 ``on`` 原样吐回去。 */
+export function extensionsServerSet(name: string, on: boolean): Promise<ExtensionState> {
+  return bridge().then((target) => target.extensions_server_set(name, on))
+}
+
+/** 删一条登记。``confirmed`` 必须是真 —— 删配置也是删除动作，不是「关一下」。 */
+export function extensionsServerRemove(name: string, confirmed: boolean): Promise<ExtensionState> {
+  return bridge().then((target) => target.extensions_server_remove(name, confirmed))
+}
+
+/** 重连一遍 MCP：装完不必重启小夜，要重启用户会以为没装上。 */
+export function extensionsReconnect(): Promise<ExtensionState> {
+  return bridge().then((target) => target.extensions_reconnect())
+}
+
+/** 启停一份技能（只是说明书，不执行）。 */
+export function skillSet(slug: string, on: boolean): Promise<ExtensionState> {
+  return bridge().then((target) => target.skill_set(slug, on))
+}
+
+/** 删一份技能：只删 ``扩展/skills/<slug>`` 那一个目录，不动别的东西。 */
+export function skillRemove(slug: string, confirmed: boolean): Promise<ExtensionState> {
+  return bridge().then((target) => target.skill_remove(slug, confirmed))
+}
+
 export function fetchPetState(): Promise<PetState> {
   return bridge().then((target) => target.pet_state())
 }
 
 /** Show or hide the desktop pet. Python remembers the choice across launches. */
+/** 换一档大小：小 / 中 / 大 / 特大。改的是她那个窗口，不是把她画在更大的框里。 */
+export function setPetScale(scale: string): Promise<PetState> {
+  return bridge().then((target) => target.pet_set_scale(scale))
+}
+
+/** 「她会自己动一动」。 */
+export function setPetIdle(on: boolean): Promise<PetState> {
+  return bridge().then((target) => target.pet_set_idle(on))
+}
+
 export function togglePet(): Promise<PetState> {
   return bridge().then((target) => target.pet_toggle())
 }

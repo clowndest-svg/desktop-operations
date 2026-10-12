@@ -45,7 +45,15 @@ from jarvis.app.image_gen import (
 from jarvis.app.mobile_pairing import PairingVault
 from jarvis.app.model_probe import ModelProber
 from jarvis.app.phone_screen import PhoneScreenReader
-from jarvis.app.preferences import DISPLAY_NAME, PET_ENABLED, WINDOW_RECT, display_name
+from jarvis.app.preferences import (
+    DISPLAY_NAME,
+    PET_ENABLED,
+    PET_IDLE_MOTION,
+    PET_ORIGIN,
+    PET_SCALE,
+    WINDOW_RECT,
+    display_name,
+)
 from jarvis.app.screen_mirror import (
     MirrorDeviceList,
     MirrorStatus,
@@ -75,7 +83,7 @@ from jarvis.ui.hotkeys import Hotkeys, default_bindings
 from jarvis.ui.instance import InstanceGate
 from jarvis.ui.lifecycle import ShellLifecycle
 from jarvis.ui.mirror_bar import MirrorControlBar
-from jarvis.ui.pet import PetController
+from jarvis.ui.pet import PET_HEIGHT, PET_SCALE_LABELS, PET_SCALE_STEPS, PET_WIDTH, PetController
 from jarvis.ui.pump import UiEventPump
 from jarvis.ui.runtime_check import warn_missing_webview2
 from jarvis.ui.state_bridge import StateBridge, UiState, UiVoiceState
@@ -144,6 +152,50 @@ class MemorySurface(Protocol):
     def forget(self, memory_id: int) -> bool: ...
 
     def forget_scope(self, scope: Any = ...) -> int: ...
+
+
+class SkillsSurface(Protocol):
+    """已安装的技能，窄到页面真会问的那几下。
+
+    和 `GrowthSurface` 同一个理由：L5 不许 import `jarvis.skills`。页面要的只是
+    "读状态 / 启停 / 删除"，所以这三个签名就是这一层的接口边界。
+    """
+
+    def stats(self) -> dict[str, object]: ...
+
+    def set_enabled(self, slug: str, on: object) -> dict[str, object]: ...
+
+    def remove(self, slug: str, *, confirmed: object) -> dict[str, object]: ...
+
+    def reload(self) -> None: ...
+
+
+class ExtensionsSurface(Protocol):
+    """扩展市场那一层。页面直连它，所以它的返回形状就是页面的合同。"""
+
+    def state(self) -> dict[str, object]: ...
+
+    def search(self, query: str, kinds: tuple[str, ...] = ...) -> dict[str, object]: ...
+
+    def install(self, item_id: str) -> dict[str, object]: ...
+
+    def add_http_server(self, name: str, url: str) -> dict[str, object]: ...
+
+    def set_server_enabled(self, name: str, on: object) -> dict[str, object]: ...
+
+    def set_layer_enabled(self, on: object) -> dict[str, object]: ...
+
+    def remove_server(self, name: str, *, confirmed: object) -> dict[str, object]: ...
+
+
+class McpSurface(Protocol):
+    """连接状态 + 一次重连。装完一条 server 要能看到它到底连上不连上。"""
+
+    def stats(self) -> dict[str, object]: ...
+
+    def start(self) -> None: ...
+
+    def stop(self) -> None: ...
 
 
 class GrowthSurface(Protocol):
@@ -280,6 +332,42 @@ Generous: a cold WebView2 start on a busy machine takes several seconds, and a
 false alarm on a slow boot is its own kind of noise. The point is only to turn a
 *wedged* window into a message.
 """
+
+
+def _extensions_empty(reason: str) -> dict[str, object]:
+    """没有扩展这一层（或它读失败了）时的那一份空状态。
+
+    键必须和 `ExtensionsService.state()` 完全一致：页面按同一个合同渲染，少一个键就是
+    "这一格不画"，而用户看到的是"这软件没有插件功能"。
+    """
+    return {
+        "directory": "",
+        "servers_file": "",
+        "layer_enabled": False,
+        "servers": [],
+        "skills": [],
+        "mcp": {
+            "enabled": False,
+            "running": False,
+            "servers": 0,
+            "connected": 0,
+            "tools": 0,
+            "statuses": [],
+            "errors": {},
+            "error": "",
+        },
+        "runtime": {
+            "present": [],
+            "paths": {},
+            "labels": {},
+            "missing": ["node", "npx", "python", "uvx"],
+            "error": "",
+        },
+        "search": {"query": "", "items": [], "sources": [], "failures": []},
+        "store_error": "",
+        "log": [],
+        "error": reason,
+    }
 
 
 def _growth_empty(reason: str) -> dict[str, object]:
@@ -620,6 +708,9 @@ class HudBridge:
         memory: MemorySurface | None = None,
         knowledge: KnowledgeSurface | None = None,
         growth: GrowthSurface | None = None,
+        skills: SkillsSurface | None = None,
+        extensions: ExtensionsSurface | None = None,
+        mcp: McpSurface | None = None,
         scheduler: JobSurface | None = None,
         workflow: WorkflowSurface | None = None,
         planner: PlannerSurface | None = None,
@@ -662,6 +753,9 @@ class HudBridge:
         self._memory = memory
         self._knowledge = knowledge
         self._growth = growth
+        self._skills = skills
+        self._extensions = extensions
+        self._mcp = mcp
         self._scheduler = scheduler
         self._workflow = workflow
         self._planner = planner
@@ -674,6 +768,9 @@ class HudBridge:
         self._phone = phone_screen
         self._pet: PetController | None = None
         self._remember_pet: Callable[[bool], None] | None = None
+        self._remember_pet_scale: Callable[[str], None] | None = None
+        self._remember_pet_idle: Callable[[bool], None] | None = None
+        self._pet_size_state: Callable[[], dict[str, object]] | None = None
         self._bubble_palette: BubblePalette = DEFAULT_BUBBLE
         self._greeter: Any = None
         self._turns: Any = None
@@ -708,15 +805,27 @@ class HudBridge:
         self._lifecycle = lifecycle
 
     def attach_pet(
-        self, pet: PetController | None, remember: Callable[[bool], None] | None = None
+        self,
+        pet: PetController | None,
+        remember: Callable[[bool], None] | None = None,
+        remember_scale: Callable[[str], None] | None = None,
+        remember_idle: Callable[[bool], None] | None = None,
+        size_state: Callable[[], dict[str, object]] | None = None,
     ) -> None:
-        """The pet window, and where to store the operator's choice about it.
+        """The pet window, and where to store the operator's choices about it.
 
         Attached rather than constructed with the bridge: the pet needs the bridge as
         its JS surface, so neither can be an argument to the other's constructor.
+
+        ``size_state`` is the bridge's only read path to "which step is she on, and does
+        she move by herself": the preference object lives out in the assembly, and a
+        second copy of it here would be a second truth that can disagree with the first.
         """
         self._pet = pet
         self._remember_pet = remember
+        self._remember_pet_scale = remember_scale
+        self._remember_pet_idle = remember_idle
+        self._pet_size_state = size_state
         if pet is not None:
             # The skin may have been changed while she was hidden -- the page only
             # reports the inks, it does not know whether a figure was listening.
@@ -805,9 +914,53 @@ class HudBridge:
         return {"maximized": want_max, "error": ""}
 
     def pet_state(self) -> dict[str, object]:
-        """Whether the figure is on the desktop, for the button that says so."""
+        """她在不在桌面上，以及她多大、会不会自己动 —— 那一格要一次读全。
+
+        形状一次给全（哪怕没有宠物窗口）：界面读到 undefined 就整块不画，用户于是永远
+        看不见"原来这里能改大小"。
+        """
         pet = self._pet
-        return {"shown": bool(pet is not None and pet.shown), "error": ""}
+        size = pet.size() if pet is not None else (PET_WIDTH, PET_HEIGHT)
+        state = self._pet_size_state() if self._pet_size_state is not None else {}
+        return {
+            "shown": bool(pet is not None and pet.shown),
+            "scale": str(state.get("scale") or "normal"),
+            "idle_motion": bool(state.get("idle_motion", True)),
+            "scales": [
+                {"id": one[0], "label": one[1], "multiplier": PET_SCALE_STEPS[one[0]]}
+                for one in PET_SCALE_LABELS
+            ],
+            "width": int(size[0]),
+            "height": int(size[1]),
+            "error": "",
+        }
+
+    def pet_set_scale(self, scale: object) -> dict[str, object]:
+        """换一档大小：改窗口，再把这一档记进偏好。设置里那四颗按钮走这里。"""
+        pet = self._pet
+        if pet is None:
+            return self.pet_state() | {
+                "ok": False,
+                "error": "这一台没有宠物窗口：先按「让她出来」再改大小",
+            }
+        answer = pet.set_scale(scale)
+        name = str(answer.get("scale") or "")
+        if answer.get("ok") and self._remember_pet_scale is not None and name:
+            try:
+                self._remember_pet_scale(name)
+            except Exception:  # pragma: no cover - 记不住不影响她现在已经变了
+                logger.warning("could not remember the pet size", exc_info=True)
+        return self.pet_state() | answer
+
+    def pet_set_idle(self, on: object) -> dict[str, object]:
+        """「她会自己动一动」那颗开关。关掉只是不再自己动，戳她照样理你。"""
+        value = bool(on)
+        if self._remember_pet_idle is not None:
+            try:
+                self._remember_pet_idle(value)
+            except Exception:  # pragma: no cover
+                logger.warning("could not remember the idle-motion switch", exc_info=True)
+        return self.pet_state() | {"ok": True, "idle_motion": value, "error": ""}
 
     # 皮肤 id 是 theme.ts 里那六个之一. 这里只做形状校验(小写字母数字加连字符),
     # 具体是否认识由页面自己对着 SKINS 判 -- 桥面不该抄一份会过期的名单.
@@ -1170,6 +1323,146 @@ class HudBridge:
         state = self.growth_state()
         state["error"] = str(state.get("error") or "")
         return state
+
+    # -- 扩展市场：搜索 / 装 / 启停 / 连接状态 ---------------------------------
+
+    def extensions_state(self) -> dict[str, object]:
+        """这一层现在什么样：装了哪些技能与 server、连着没、本机缺什么运行时。
+
+        没有扩展层也要回**一整份**（空列表 + 一句原因）：页面读到 undefined 就整块不画，
+        用户于是永远看不见这条能力存在过。
+        """
+        bridge = self._extensions
+        if bridge is None:
+            return _extensions_empty("这个进程没有接扩展这一层")
+        try:
+            return bridge.state()
+        except Exception as exc:
+            logger.exception("reading the extension state failed")
+            return _extensions_empty(f"{type(exc).__name__}: {exc}")
+
+    def extensions_search(self, query: str, kinds: list[str] | None = None) -> dict[str, object]:
+        """三路并发搜。每路的成败单独带回来 —— 空结果和"这路没通"是两句不同的话。"""
+        bridge = self._extensions
+        if bridge is None:
+            return {
+                "query": str(query or ""),
+                "items": [],
+                "sources": [],
+                "failures": ["这个进程没有接扩展这一层"],
+                "error": "没接扩展层",
+            }
+        wanted = tuple(str(kind) for kind in (kinds or ())) or ("skill", "mcp")
+        try:
+            return bridge.search(str(query or ""), kinds=wanted)
+        except Exception as exc:
+            logger.exception("extension search failed")
+            return {
+                "query": str(query or ""),
+                "items": [],
+                "sources": [],
+                "failures": [],
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+
+    def extensions_install(self, item_id: str) -> dict[str, object]:
+        """按 id 装。**只认刚才搜出来的 id**：桥面不接受页面传来的命令行。
+
+        这条不是形式上的洁癖 —— 接受形状就意味着任何能调桥面的人都能指定一条本机命令，
+        那一页就变成了一个命令输入框，而不是插件市场。
+        """
+        bridge = self._extensions
+        if bridge is None:
+            return _extensions_empty("这个进程没有接扩展这一层")
+        try:
+            return bridge.install(str(item_id or ""))
+        except Exception as exc:
+            logger.exception("extension install failed")
+            snapshot = _extensions_empty("装这一下失败了")
+            snapshot["error"] = f"{type(exc).__name__}: {exc}"
+            return snapshot
+
+    def extensions_add_http(self, name: str, url: str) -> dict[str, object]:
+        """手工加一条 **http** 的 MCP server（不起本机进程）。stdio 只能从搜索结果装。"""
+        bridge = self._extensions
+        if bridge is None:
+            return _extensions_empty("这个进程没有接扩展这一层")
+        try:
+            return bridge.add_http_server(str(name or ""), str(url or ""))
+        except Exception as exc:
+            logger.exception("adding an http MCP server failed")
+            return _extensions_empty(f"{type(exc).__name__}: {exc}")
+
+    def extensions_layer_set(self, on: object) -> dict[str, object]:
+        """那一大颗「允许她运行外部扩展程序」。关 = 一条 server 都不连。"""
+        bridge = self._extensions
+        if bridge is None:
+            return _extensions_empty("这个进程没有接扩展这一层")
+        try:
+            return bridge.set_layer_enabled(bool(on))
+        except Exception as exc:
+            logger.exception("switching the extension layer failed")
+            return _extensions_empty(f"{type(exc).__name__}: {exc}")
+
+    def extensions_server_set(self, name: str, on: object) -> dict[str, object]:
+        bridge = self._extensions
+        if bridge is None:
+            return _extensions_empty("这个进程没有接扩展这一层")
+        try:
+            return bridge.set_server_enabled(str(name or ""), bool(on))
+        except Exception as exc:
+            logger.exception("switching an MCP server failed")
+            return _extensions_empty(f"{type(exc).__name__}: {exc}")
+
+    def extensions_server_remove(self, name: str, confirmed: object) -> dict[str, object]:
+        """删一条登记。**confirmed 必须是布尔 True** —— 删配置也是删除动作，不是"关一下"。"""
+        bridge = self._extensions
+        if bridge is None:
+            return _extensions_empty("这个进程没有接扩展这一层")
+        try:
+            return bridge.remove_server(str(name or ""), confirmed=confirmed is True)
+        except Exception as exc:
+            logger.exception("removing an MCP server failed")
+            return _extensions_empty(f"{type(exc).__name__}: {exc}")
+
+    def extensions_reconnect(self) -> dict[str, object]:
+        """重连一遍 MCP。装完不必重启小夜 —— 要重启的话用户会以为没装上。"""
+        mcp = self._mcp
+        if mcp is None:
+            return self.extensions_state()
+        try:
+            mcp.stop()
+            mcp.start()
+        except Exception:
+            logger.exception("reconnecting MCP servers failed")
+        return self.extensions_state()
+
+    def skill_set(self, slug: str, on: object) -> dict[str, object]:
+        """启停一份技能。回的是**读回来的**整份状态，不是把 on 原样吐回去。"""
+        skills = self._skills
+        if skills is None:
+            return _extensions_empty("这个进程没有接技能这一层")
+        try:
+            skills.set_enabled(str(slug or ""), bool(on))
+        except Exception as exc:
+            logger.exception("switching a skill failed")
+            return _extensions_empty(f"{type(exc).__name__}: {exc}")
+        return self.extensions_state()
+
+    def skill_remove(self, slug: str, confirmed: object) -> dict[str, object]:
+        skills = self._skills
+        if skills is None:
+            return _extensions_empty("这个进程没有接技能这一层")
+        try:
+            outcome = skills.remove(str(slug or ""), confirmed=confirmed is True)
+        except Exception as exc:
+            logger.exception("removing a skill failed")
+            return _extensions_empty(f"{type(exc).__name__}: {exc}")
+        if outcome.get("error"):
+            snapshot = self.extensions_state()
+            snapshot["error"] = str(outcome["error"])
+            return snapshot
+        return self.extensions_state()
 
     def growth_forget(self) -> dict[str, object]:
         """删掉她自学的那些条目，人喂的资料一条都不动。删了几条要回给人看。"""
@@ -3826,6 +4119,9 @@ def run(
     phone_screen: PhoneScreenReader | None = None,
     documents: DocumentService | None = None,
     growth: GrowthSurface | None = None,
+    skills: SkillsSurface | None = None,
+    extensions: ExtensionsSurface | None = None,
+    mcp: McpSurface | None = None,
     network: NetworkWatch | None = None,
     paths: AppPaths | None = None,
     debug: bool = False,
@@ -3996,6 +4292,9 @@ def run(
         disk,
         documents=documents,
         growth=growth,
+        skills=skills,
+        extensions=extensions,
+        mcp=mcp,
         network=network,
         paths=paths,
         voice=voice,
@@ -4082,9 +4381,47 @@ def run(
         # through a page. Same handlers the panel's own buttons call.
         on_action=bridge.pet_action,
         title=f"{shown_as} · 桌面宠物",
+        scale_provider=lambda: str(
+            preferences.get(PET_SCALE, "normal") if preferences is not None else "normal"
+        ),
+        idle_motion_provider=lambda: bool(
+            preferences.get(PET_IDLE_MOTION, True) if preferences is not None else True
+        ),
+        origin_provider=lambda: (
+            list(preferences.get(PET_ORIGIN, []) or []) if preferences is not None else []
+        ),
+        on_origin=lambda x, y: _store_pet_origin(preferences, x, y),
     )
     lifecycle.attach_pet(pet)
-    bridge.attach_pet(pet, remember=_remember_pet_choice(preferences))
+
+    def _pet_size_state() -> dict[str, object]:
+        """把"她多大一档、会不会自己动"从偏好读回来给界面 —— 只有装配这边拿着偏好。"""
+        if preferences is None:
+            return {"scale": "normal", "idle_motion": True}
+        try:
+            return {
+                "scale": str(preferences.get(PET_SCALE, "normal") or "normal"),
+                "idle_motion": bool(preferences.get(PET_IDLE_MOTION, True)),
+            }
+        except Exception:  # pragma: no cover - 读不到就按默认那一档画
+            logger.warning("could not read the pet size preferences", exc_info=True)
+            return {"scale": "normal", "idle_motion": True}
+
+    def _remember_scale(value: str) -> None:
+        if preferences is not None:
+            preferences.set(PET_SCALE, value)
+
+    def _remember_idle(value: bool) -> None:
+        if preferences is not None:
+            preferences.set(PET_IDLE_MOTION, bool(value))
+
+    bridge.attach_pet(
+        pet,
+        remember=_remember_pet_choice(preferences),
+        remember_scale=_remember_scale,
+        remember_idle=_remember_idle,
+        size_state=_pet_size_state,
+    )
     bridge._sync_surface_switches()
     if greeter is not None:
         # Two roles, one object: the lifecycle arms the wait when this wake summons the
@@ -4253,6 +4590,16 @@ def _flip_mobile(box: list[Any], tray: TrayIcon) -> None:
         tray.notify(f"手机接入已打开：{state['url']}\n证书指纹 {short}…（界面里有全部）")
         return
     tray.notify(f"手机接入已关闭。{gateway.reason}".rstrip())
+
+
+def _store_pet_origin(preferences: Preferences | None, x: int, y: int) -> None:
+    """她站哪儿。偏好没接上就什么都不做 —— 下次回到中间，比写坏一份偏好轻得多。"""
+    if preferences is None:
+        return
+    try:
+        preferences.set(PET_ORIGIN, [int(x), int(y)])
+    except Exception:  # pragma: no cover - best-effort memory
+        logger.warning("could not remember where the pet stands", exc_info=True)
 
 
 def _remember_pet_choice(

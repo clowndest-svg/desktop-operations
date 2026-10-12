@@ -1188,8 +1188,49 @@ class TestGeneratedPets:
 
 
 class TestPetSurface:
-    def test_pet_state_without_a_window_says_it_is_not_there(self, tmp_path: Any) -> None:
-        assert _bridge(tmp_path).pet_state() == {"shown": False, "error": ""}
+    def test_pet_state_without_a_window_still_carries_the_whole_shape(self, tmp_path: Any) -> None:
+        """没接上宠物窗也要回**完整形状**：界面读到 undefined 就整块不画，用户于是永远
+        看不见"这里能改大小"。本轮把大小与自主动作接进来，这条判据跟着升级。
+        """
+        answer = _bridge(tmp_path).pet_state()
+        assert answer["shown"] is False and answer["error"] == ""
+        assert answer["scale"] == "normal" and answer["idle_motion"] is True
+        steps = cast("list[dict[str, object]]", answer["scales"])
+        assert [one["id"] for one in steps] == ["small", "normal", "large", "giant"]
+        assert (answer["width"], answer["height"]) == (420, 640)
+
+    def test_changing_her_size_without_a_window_says_why_instead_of_failing_quietly(
+        self, tmp_path: Any
+    ) -> None:
+        bridge = _bridge(tmp_path)
+        answer = bridge.pet_set_scale("large")
+        assert answer["ok"] is False and "让她出来" in str(answer["error"])
+        assert answer["shown"] is False, "拒绝这一句也要带着完整形状回来"
+
+    def test_the_idle_switch_is_a_preference_not_a_window_call(self, tmp_path: Any) -> None:
+        """这颗开关不该要求她正在屏幕上 —— 关掉再打开的人，可能根本没把她叫出来过。"""
+        answer = _bridge(tmp_path).pet_set_idle(False)
+        assert answer["ok"] is True and answer["idle_motion"] is False
+        # 不再拿 pet_state() 去比一个两键的旧形状：完整形状本身就是这一轮的判据。
+
+    def test_a_size_change_is_remembered_through_the_callback_the_shell_handed_in(
+        self, tmp_path: Any
+    ) -> None:
+        """改了大小要落到偏好里 —— 而桥面自己不认识偏好，只认装配递进来的那支笔。
+
+        这一条不测"值对不对"（那是 preferences 自己的测试），测的是**这支笔真的被用了**：
+        它没被用，表现是当场变了、重启回中档，而屏上那四颗按钮还亮着"大"。
+        """
+        from tests.test_ui_pet import FakePetWindow, controller
+
+        stored: list[str] = []
+        bridge = _bridge(tmp_path)
+        pet = controller()
+        bridge.attach_pet(pet, remember_scale=stored.append)
+        pet._window = FakePetWindow()
+        answer = bridge.pet_set_scale("large")
+        assert answer["ok"] is True, answer
+        assert stored == ["large"], f"她当场变大了，可没人记下：{stored}"
 
     def test_toggle_without_a_lifecycle_refuses_with_a_reason(self, tmp_path: Any) -> None:
         answer = _bridge(tmp_path).pet_toggle()

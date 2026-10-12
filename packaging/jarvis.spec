@@ -115,6 +115,20 @@ hiddenimports = [
     "jarvis.planner.decomposer",
     "jarvis.prompt.templates",
     "jarvis.plugins.loader",
+    # 扩展这一族的三件：市场（sources/installer/servers/runtime/service）、技能层、MCP 客户端。
+    # `jarvis/__main__.py` 顶部就 import 了前两个，列在这儿是因为 MCP 那一支是装配点里
+    # 函数级 import 才拉起来的 —— 冻结包里少一个模块的表现不是打包失败，是用户点「扩展」
+    # 那格时界面上冒一句 ImportError。产物核对时会在 exe 的 PYZ 里逐个查（见本轮手册）。
+    "jarvis.skills.loader",
+    "jarvis.skills.service",
+    "jarvis.extensions.sources",
+    "jarvis.extensions.servers",
+    "jarvis.extensions.installer",
+    "jarvis.extensions.runtime",
+    "jarvis.extensions.service",
+    "jarvis.mcp.client",
+    "jarvis.mcp.transport",
+    "jarvis.mcp.service",
     "jarvis.workflow.loader",
     "jarvis.workflow.conditions",
     "jarvis.ocr.engines",

@@ -185,6 +185,11 @@ function frame(): void {
     })
     figure.setPose(pose)
     figure.advance(now, delta, calm)
+    if (nudgeUntil > now) {
+      const left = (nudgeUntil - now) / NUDGE_SECONDS
+      figure.root.rotation.z += Math.sin(now * 13) * 0.07 * nudgeStrength * left
+      figure.root.rotation.x += Math.sin(now * 9) * 0.035 * nudgeStrength * left
+    }
     // 坐下换的是取景（她矮了一截，相机得跟着往下），而相机只在 ``resize`` 里被摆过。
     // 跟着缓动跑：坐下去那半秒里重排十几次，之后一分钱不花。
     if (Math.abs(pose.sit - lastSit) > 0.01) {
@@ -453,6 +458,19 @@ async function swapFigure(stage: THREE.Scene): Promise<void> {
   resize()
 }
 
+/**
+ * 晃一下：没有动画段可播时（照片剪影、VRM、以及只有 Death 和 Bite 的那两份）
+ * "点她有反应"靠这个。幅度按壳给的强度衰减，零点几秒自己回到原位。
+ */
+let nudgeUntil = 0
+let nudgeStrength = 0
+const NUDGE_SECONDS = 0.9
+
+function nudge(strength: number): void {
+  nudgeUntil = elapsed() + NUDGE_SECONDS
+  nudgeStrength = strength
+}
+
 /** The shell's cue channel: emerge, start or stop drawing, and the two live inputs. */
 function installPetCommand(): void {
   const target = window as unknown as {
@@ -480,12 +498,23 @@ function installPetCommand(): void {
       // window was closed still has to arrive on the next open.
       const stage = scene
       if (stage) void swapFigure(stage)
+    } else if (command === 'react' || command === 'gesture') {
+      // 壳说她被戳了一下 / 到点自己动一下。能播段就播段，播不了就晃一下 ——
+      // 三种形象都得对得起"点她有反应"，而不是只有那 11 份带文件的模型有。
+      if (!character?.play?.(command)) nudge(command === 'react' ? 1 : 0.45)
     } else if (command === 'alpha') {
       // The compositor is up: stop painting a panel, start shipping frames. The
       // handle is the shell's hit target now, so it has to be in the frame.
       alpha.value = true
     }
   }
+  // 只读的一格：打包版功能测试要知道"此刻在播哪一段"。没有它，"点她有反应"这句话
+  // 就只能停在源码里，谁也没在真产物上看见过。
+  ;(window as unknown as { __jarvisPetState?: () => object }).__jarvisPetState = () => ({
+    clip: character?.clipName?.() ?? '',
+    nudging: nudgeUntil > elapsed(),
+    asleep,
+  })
   target.__jarvisPetPointer = (x: number, y: number) => {
     pointer = { x, y }
   }

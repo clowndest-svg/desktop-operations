@@ -61,6 +61,42 @@ function unlit(source: THREE.Material): THREE.MeshBasicMaterial {
   return flat
 }
 
+/**
+ * Which clip answers a poke, and which one she picks when nobody touches her.
+ *
+ * The names are read out of the shipped files, not typed by hand: every one of these
+ * twelve is a Quaternius rig, and the day somebody swaps a file the family match still
+ * finds ``Idle_HitReact1`` / ``RecieveHit`` / ``HitRecieve`` without a list to update.
+ *
+ * What never plays by itself is the other half of the rule. ``Death`` on a timer is a
+ * pet that looks broken; ``Attack``/``Run``/``Gallop`` need a place to run *to*, and she
+ * is standing on a fixed spot on somebody's desktop.
+ */
+const REACT_FAMILY: readonly RegExp[] = [/hitreact/i, /recievehit/i, /receivehit/i, /^no$/i]
+const GESTURE_FAMILY: readonly RegExp[] = [
+  /^dance$/i,
+  /^yes$/i,
+  /^no$/i,
+  /^jump$/i,
+  /^eating$/i,
+  /^pickup$/i,
+  /spell/i,
+  /^bite/i,
+  /^roll$/i,
+  /headlow/i,
+  /^idle_2/i,
+]
+const NEVER_ALONE = /death|attack|gallop|^run$|kick|punch|headbutt/i
+const FADE_SECONDS = 0.25
+
+function pickFrom(names: string[], family: readonly RegExp[]): string {
+  for (const pattern of family) {
+    const hit = names.find((name) => pattern.test(name) && !NEVER_ALONE.test(name))
+    if (hit) return hit
+  }
+  return ''
+}
+
 export async function loadGalleryCharacter(entry: GalleryModel): Promise<Character | null> {
   if (!entry?.key) return null
   const url = new URL(entry.url, document.baseURI).href
@@ -98,14 +134,25 @@ export async function loadGalleryCharacter(entry: GalleryModel): Promise<Charact
   })
 
   const mixer = new THREE.AnimationMixer(model)
+  const names = (gltf.animations ?? []).map((item) => item.name)
   const wanted = pickClip(gltf.animations)
   const clip = gltf.animations.find((item) => item.name === wanted)
   let action: THREE.AnimationAction | null = null
+  let playing: THREE.AnimationAction | null = null
+  let playingName = ''
+  const idleName = clip ? String(clip.name) : ''
+  if (!clip) console.warn('[avatar] 内置模型 ' + entry.key + ' 没有可播的动画，它会站着不动')
   if (clip) {
     action = mixer.clipAction(clip)
     action.play()
-  } else {
-    console.warn('[avatar] 内置模型 ' + entry.key + ' 没有可播的动画，它会站着不动')
+    // 一段演完自己回到待机：没有这一条，"她刚才跳了一下"会变成"她从此只会跳"。
+    mixer.addEventListener('finished', (event) => {
+      const ended = event.action as THREE.AnimationAction
+      if (!action || ended === action) return
+      ended.crossFadeTo(action, FADE_SECONDS, false)
+      playingName = ''
+      playing = null
+    })
   }
 
   const body = new THREE.Group()
@@ -121,6 +168,26 @@ export async function loadGalleryCharacter(entry: GalleryModel): Promise<Charact
   return {
     root,
     framing,
+    clipName: () => playingName || idleName,
+    play(kind): boolean {
+      if (!action) return false
+      const wanted = pickFrom(names, kind === 'react' ? REACT_FAMILY : GESTURE_FAMILY)
+      if (!wanted) return false
+      const nextClip = gltf.animations.find((item) => item.name === wanted)
+      if (!nextClip) return false
+      const next = mixer.clipAction(nextClip)
+      if (playing === next) return true // 正在演这一段：别从头再来一遍，那看着像卡了
+      next.reset()
+      next.setLoop(THREE.LoopOnce, 1)
+      next.clampWhenFinished = false
+      next.enabled = true
+      next.setEffectiveWeight(1)
+      action.crossFadeTo(next, FADE_SECONDS, false)
+      next.play()
+      playing = next
+      playingName = wanted
+      return true
+    },
     setPose(next): void {
       pose = next
     },

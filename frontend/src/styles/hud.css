@@ -408,7 +408,16 @@ code {
  * Scoped to a class rather than to bare element selectors so a component can still
  * style an odd control (the file input, a checkbox) without losing to specificity.
  */
+/*
+ * 宽度：以前这一条根本没有宽度规则，于是 35 处输入框全在吃浏览器默认的 size=20
+ * （约 150px）。中文提示语排开要 200~260px，所以"文字被按钮挡住了"其实是"字自己画不完"。
+ * 现在给一个够排开中文的底宽，并允许在表单里长满剩下的一行；`min-width:0` 是让 flex
+ * 真的能把它缩下去 —— 没有这一条，长提示语会把按钮挤出可视区。
+ */
 .hud-field {
+  width: 15rem;
+  min-width: 0;
+  flex: 1 1 auto;
   height: var(--hud-control-h);
   padding: 0 10px;
   border: 1px solid var(--hud-line);

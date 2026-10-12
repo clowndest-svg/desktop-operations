@@ -29,6 +29,7 @@ import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from typing import Final, Protocol, runtime_checkable
 
+from jarvis.core.commands import has_shell_metacharacters, resolve_command
 from jarvis.core.constants import DEFAULT_ENCODING
 from jarvis.core.exceptions import McpError
 
@@ -93,6 +94,23 @@ def _unwrap(message: Mapping[str, object], method: str, request_id: int) -> Mapp
         f"MCP 请求 {method} 返回了非法结果",
         details={"method": method, "id": request_id, "result_type": type(result).__name__},
     )
+
+
+def launch_argv(command: str, args: Sequence[str]) -> list[str]:
+    """完整的 argv：必要时经 `cmd.exe /c`，并挡住会被二次解释的参数。
+
+    解析本身在 `jarvis/core/commands.py`，因为运行时检测要用**同一个**答案 —— 两处各算
+    一遍的结果就是本轮真装真连撞出来的那个：检测报「有 npx」，`Popen` 报「找不到文件」，
+    于是市场里 npm 那一整类每条都"装成功、连不上"。
+    """
+    executable, prefix = resolve_command(command)
+    argv = [executable, *prefix, *[str(one) for one in args]]
+    if prefix and has_shell_metacharacters(args):
+        raise McpError(
+            f"参数里有 cmd 会再解释一遍的字符，不能安全地经 cmd.exe 起：{command}",
+            details={"command": command, "reason": "shell metacharacters"},
+        )
+    return argv
 
 
 class _LineChannel:
@@ -242,9 +260,10 @@ class StdioTransport:
             if self._process is not None:
                 return
             environ = {**os.environ, **self._env}
+            argv = launch_argv(self._command, self._args)
             try:
                 process = subprocess.Popen(
-                    [self._command, *self._args],
+                    argv,
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,

@@ -63,6 +63,13 @@ ALLOWED: dict[str, frozenset[str]] = {
     "vendor": frozenset(),
     "mcp": frozenset({"core", "config", "tools"}),
     "plugins": frozenset({"core", "config", "tools"}),
+    # 技能是**数据**层：读一份 SKILL.md、把索引交给提示、按名字取正文。它注册工具，所以要
+    # `tools`，但它不执行任何东西 —— 这条边界（市场里不许装会跑的 Python 代码包）就是这两个
+    # 包存在的理由，写在 docs/扩展市场与技能方案.md §4.1。
+    "skills": frozenset({"core", "config", "tools"}),
+    # 市场这一层要联网搜清单、要把技能放到 skills 认的位置上，因此它指向 skills；
+    # 反向不许有依赖（skills 永远不知道自己从哪来）。
+    "extensions": frozenset({"core", "config", "tools", "skills"}),
     "agent": frozenset(
         {
             "core",
@@ -116,6 +123,8 @@ ALLOWED: dict[str, frozenset[str]] = {
             "computer",
             "mcp",
             "plugins",
+            "skills",
+            "extensions",
             "agent",
             "orchestration",
             "planner",

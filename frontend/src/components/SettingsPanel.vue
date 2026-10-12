@@ -609,7 +609,32 @@
             </div>
           </div>
           <p class="settings__why">
-            给一张照片，本机描出轮廓做成有厚度的剪影，四个候选挑一个换上她。照片不保存、不联网；它没有骨骼，所以不会坐下或点头。
+          给一张照片，本机描出轮廓做成有厚度的剪影，四个候选挑一个换上她。照片不保存、不联网；它没有骨骼，所以不会坐下或点头。
+        </p>
+
+        <div class="settings__row">
+          <span class="hud-label">她占多大</span>
+          <div class="settings__keyline">
+            <button
+              v-for="step in petScales"
+              :key="step.id"
+              class="hud-btn"
+              :class="{ 'hud-btn--primary': step.id === petScale }"
+              type="button"
+              :disabled="petBusy"
+              @click="chooseScale(step.id)"
+            >
+              {{ step.label }}
+            </button>
+            <button class="hud-btn" type="button" :disabled="petBusy" @click="flipIdle">
+              {{ petIdle ? '她会自己动一动：开着' : '她会自己动一动：关着' }}
+            </button>
+          </div>
+        </div>
+        <p class="settings__why">
+         四档分别是 {{ petBoxLine }}。放大只是把她画得更大，多出来那一圈仍然是透明的；
+        越大越费机器 —— 具体费多少按你这台算，这一句里不写别人机器上的数。
+        {{ petNote }}
           </p>
 
           <div class="settings__row">
@@ -822,6 +847,9 @@ import {
   modelServerStatus,
   modelServerStop,
   petAssets,
+  fetchPetState,
+  setPetIdle,
+  setPetScale,
   removeProviderModel,
   saveSettings,
   type AlertRuleSetting,
@@ -1333,6 +1361,73 @@ async function stopModelServer(): Promise<void> {
 }
 
 const petSummary = ref('读一下才知道')
+const petScales = ref<{ id: string; label: string; multiplier: number }[]>([
+  { id: 'small', label: '小', multiplier: 0.75 },
+  { id: 'normal', label: '中', multiplier: 1 },
+  { id: 'large', label: '大', multiplier: 1.35 },
+  { id: 'giant', label: '特大', multiplier: 1.7 },
+])
+const petScale = ref('normal')
+const petIdle = ref(true)
+const petBusy = ref(false)
+const petNote = ref('')
+/** 这一句里的数字必须是在这台机器上量出来的；没量过就明说没量过，不写"更吃 CPU"这种废话。 */
+/** 桥面报回来的当前像素框：底宽由它反推，界面这边不留第二份 420×640。 */
+const petBox = ref<{ w: number; h: number }>({ w: 0, h: 0 })
+
+/** 四档各是多少像素。这是代码里就定死的东西，写在界面上永远是真话。 */
+const petBoxLine = computed(() => {
+  const current = petScales.value.find((one) => one.id === petScale.value)
+  if (!current || !petBox.value.w || !petBox.value.h) return '读不到当前尺寸'
+  const baseW = petBox.value.w / current.multiplier
+  const baseH = petBox.value.h / current.multiplier
+  const words = petScales.value
+    .map((one) => `${one.label} ${Math.round(baseW * one.multiplier)}×${Math.round(baseH * one.multiplier)}`)
+    .join(' / ')
+  return `${words}（现在：${current.label}）`
+})
+
+async function readPetSize(): Promise<void> {
+  try {
+    const answer = await fetchPetState()
+    if (answer.scale) petScale.value = answer.scale
+    if (Array.isArray(answer.scales) && answer.scales.length) petScales.value = answer.scales
+    if (typeof answer.idle_motion === 'boolean') petIdle.value = answer.idle_motion
+    if (answer.width && answer.height) petBox.value = { w: Number(answer.width), h: Number(answer.height) }
+    if (answer.error) petNote.value = answer.error
+  } catch (caught) {
+    petNote.value = '读不到她多大：' + String(caught)
+  }
+}
+
+async function chooseScale(id: string): Promise<void> {
+  if (petBusy.value) return
+  petBusy.value = true
+  petNote.value = ''
+  try {
+    const answer = await setPetScale(id)
+    petScale.value = answer.scale || id
+    if (answer.error) petNote.value = answer.error
+  } catch (caught) {
+    petNote.value = '换大小没做成：' + String(caught)
+  } finally {
+    petBusy.value = false
+  }
+}
+
+async function flipIdle(): Promise<void> {
+  if (petBusy.value) return
+  petBusy.value = true
+  try {
+    const answer = await setPetIdle(!petIdle.value)
+    petIdle.value = typeof answer.idle_motion === 'boolean' ? answer.idle_motion : !petIdle.value
+    if (answer.error) petNote.value = answer.error
+  } catch (caught) {
+    petNote.value = '那颗开关没改成：' + String(caught)
+  } finally {
+    petBusy.value = false
+  }
+}
 
 async function readPets(): Promise<void> {
   try {
@@ -1364,6 +1459,7 @@ watch(
   ([open]) => {
     if (open) {
       void readPets()
+      void readPetSize()
       void readModelServer()
     }
   },
