@@ -17,6 +17,7 @@ from jarvis.tools.types import (
     RiskLevel,
     ToolHandler,
     ToolSpec,
+    integer_property,
     object_schema,
     string_property,
 )
@@ -37,7 +38,13 @@ class ImageEngineSurface(Protocol):
     def capabilities(self) -> str: ...
 
     def generate(
-        self, prompt: str, *, zh: object = None, size: object = None, steps: object = None
+        self,
+        prompt: str,
+        *,
+        zh: object = None,
+        size: object = None,
+        steps: object = None,
+        count: object = None,
     ) -> Mapping[str, object]: ...
 
 
@@ -47,17 +54,37 @@ def _words(answer: Mapping[str, object]) -> str:
     成功那半必须带上**路径、尺寸、用了哪条引擎、多少秒**：这四样是用户接着要问的东西
     （"存哪了"、"怎么这么慢"、"换个大一点的"），少了哪一样她都得再猜一次。
     失败那半照实把引擎给的那句人话转出去，不许改写成"画不出来"。
+
+    **一次几张时，每条路径各占一行**：`_artifacts_of` 是**按行**找「存在：」后面那段
+    路径的（`jarvis/app/chat_service.py`），一行里塞两条只会认第一条 —— 那样剩下的图
+    算出来了、也存下来了，屏上却不显示，等于白画。这一条不看格式就看不出来。
     """
-    if answer.get("ok"):
-        path = str(answer.get("path") or "")
-        engine = "本地 ComfyUI" if answer.get("engine") == "local" else "云端 API"
-        return (
-            f"画好了，存在：{path}"
-            f"（{answer.get('size')}，{answer.get('steps')} 步，{engine}，"
-            f"用了 {answer.get('seconds')} 秒，种子 {answer.get('seed')}）。"
-            "要改就再说一句，或让我换个尺寸/步数。"
-        )
-    return f"这一张没画成：{answer.get('error') or '引擎没给原因'}"
+    if not answer.get("ok"):
+        return f"这一张没画成：{answer.get('error') or '引擎没给原因'}"
+    raw_paths = answer.get("paths")
+    # 这里判类型而不是直接 `or []`：`answer` 是 Mapping[str, object]，mypy 不许把
+    # 一个 object 当成可迭代的 —— 而这一层确实也不该假设对面一定回了列表。
+    paths = (
+        [str(item) for item in raw_paths if str(item)]
+        if isinstance(raw_paths, (list, tuple))
+        else []
+    )
+    if not paths:
+        paths = [str(answer.get("path") or "")]
+    engine = "本地 ComfyUI" if answer.get("engine") == "local" else "云端 API"
+    tail = (
+        f"（{answer.get('size')}，{answer.get('steps')} 步，{engine}，"
+        f"用了 {answer.get('seconds')} 秒，种子 {answer.get('seed')}）。"
+    )
+    if len(paths) == 1:
+        return f"画好了，存在：{paths[0]}{tail}" "要改就再说一句，或让我换个尺寸/步数。"
+    listing = "\n".join(f"存在：{path}" for path in paths)
+    return (
+        f"画好了 {len(paths)} 张，挑一张用（每一张都能单独复制/打开）：\n"
+        f"{listing}\n"
+        f"{tail}"
+        "觉得都不像就说一声，我再画一批。"
+    )
 
 
 def _generate(engine: ImageEngineSurface) -> ToolHandler:
@@ -67,10 +94,16 @@ def _generate(engine: ImageEngineSurface) -> ToolHandler:
         # 而词典里那张表是对着这台引擎的权重调过的 —— 服务层要有原话才有机会用上它。
         zh = str(arguments.get("zh") or "").strip()
         size = arguments.get("size")
+        count = arguments.get("count")
         if not prompt:
             return "要一句画什么的描述，不能空着。"
         return _words(
-            engine.generate(prompt, zh=zh or None, size=size if isinstance(size, str) else None)
+            engine.generate(
+                prompt,
+                zh=zh or None,
+                size=size if isinstance(size, str) else None,
+                count=count if isinstance(count, int) and not isinstance(count, bool) else None,
+            )
         )
 
     return handler
@@ -114,6 +147,12 @@ _SPECS: Final[tuple[tuple[ToolSpec, str], ...]] = (
                         "用户原话，一个字不改，例如 生成一张在月光下翩翩起舞的猪头人"
                     ),
                     "size": string_property("宽x高，例如 512x512 / 768x768 / 1024x1024，可留空"),
+                    "count": integer_property(
+                        "一次画几张，只能是 1 / 2 / 4（默认按用户设置里那一档）。"
+                        "**用户嫌某张不像、或要求「多画几张让我挑」时才填 4**；"
+                        "他没提就留空，别自己加 —— 4 张要八十多秒，1 张二十多秒。",
+                        minimum=1,
+                    ),
                 },
                 required=("prompt",),
             ),

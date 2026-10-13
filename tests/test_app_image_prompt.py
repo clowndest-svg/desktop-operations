@@ -160,7 +160,7 @@ class TestTheModelsTranslationDoesNotOwnTheSubject:
     ``pink pig, pink skin, glowing pig, fiery pig, stars, moonlight, dreamlike, 头 人 起 舞 …``
 
     模型把「猪头人」翻成了**一头粉色的猪**，还把「翩翩起舞」整个丢了。词典对同一句给的是
-    ``pig head, anthropomorphic pig, humanoid`` —— 那几个标签是对着 anythingV3 调过的。
+    ``(pig head:1.4), anthropomorphic pig, humanoid`` —— 那几个标签是对着 anythingV3 调过的。
     所以这一类判据钉的是**两串撞上时谁赢**，不是"词典翻得对不对"。
     """
 
@@ -216,18 +216,22 @@ class TestTheModelsTranslationDoesNotOwnTheSubject:
         assert "moonlight" in final.prompt and "dancing" in final.prompt
 
     def test_the_shipped_prompt_is_byte_for_byte_the_string_that_was_measured(self) -> None:
-        """改完之后**真正进引擎**的那一句，正是量出 4/4 的那一句 —— 一个字都不许多。
+        """改完之后**真正进引擎**的那一句，正是量出 8/8 的那一句 —— 一个字都不许多。
 
         r112 的探针脚本一开始直接调 `expand(模型那串)`，印出来的合并结果和线上跑的不是
         同一件事（差在 `expand_model` 剥汉字那一步）。"量的东西和跑的东西不一样"比量错
         还难发现，所以把整串钉在这里当锚：谁改了词典、改了主体顺序、改了合并规矩，
         这一条立刻红。
+
+        这串换过一次：原先钉的是 `(pig head:1.4), humanoid`（N=4 下 4/4）。后来补了一轮
+        配对的 N=8（同一批全新种子、两串都跑），旧那串只有 3/8、新那串 8/8，所以换掉 ——
+        锚跟着**真正量过的那一串**走，不跟着"当时看起来最好的那一串"走。
         """
         dirty = f"{self.MODEL_WROTE}, {self.DEBRIS}"
         final = merge(expand(self.PIG), expand_model(dirty))
         assert final.prompt == (
-            "(pig head:1.4), humanoid, moonlight, full body, dynamic pose, "
-            "dancing, stars, dreamlike"
+            "(pig head:1.4), anthropomorphic pig, humanoid, moonlight, full body, "
+            "dynamic pose, dancing, stars, dreamlike"
         ), final.prompt
 
     def test_an_unrecognised_sentence_leaves_the_model_untouched(self) -> None:

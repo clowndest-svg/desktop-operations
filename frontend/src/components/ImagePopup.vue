@@ -38,9 +38,15 @@
               </select>
               <span class="hud-label">步数</span>
               <input v-model.number="steps" class="hud-field im__steps" type="number" min="4" max="60" :disabled="busy" @change="tune" />
+              <span class="hud-label">一次画几张</span>
+              <select v-model.number="countChoice" class="hud-field" :disabled="busy" @change="tune">
+                <option v-for="row in state.counts" :key="row.count" :value="row.count">{{ row.count }} 张</option>
+              </select>
             </div>
             <p class="im__why">{{ sizeNote }}</p>
-            <p class="im__why">步数是采样次数，多一步就慢一点；512x512 二十步，这一轮在这台 1650 上连画 24 张实测 24.5~26.6 秒。</p>
+            <p class="im__why">步数是采样次数，多一步就慢一点。512x512 二十步，这一轮在这台 1650 上一张实测 22.4 秒；「一次画几张」是一炉一起采样，4 张 83.6 秒（合每张 20.9 秒，比一张一张跑省）。</p>
+            <p v-if="countNote" class="im__why">{{ countNote }}</p>
+            <p class="im__why im__why--warn">「一次画几张」只对本地引擎生效 —— 云端那条一次只回一张，这一格留空。</p>
             <div class="im__actions">
               <button class="hud-btn hud-btn--primary" type="button" :disabled="busy || !prompt.trim()" @click="generate">
                 {{ busy ? '正在画…' : '画一张' }}
@@ -48,39 +54,48 @@
               <button class="hud-btn" type="button" :disabled="busy" @click="reprobe">检测本机引擎</button>
             </div>
             <p v-if="busy" class="im__note">
-              已经等了 {{ elapsed }} 秒 —— 512x512 二十步，这一轮在这台机器上连画 24 张实测 24.5~26.6 秒一张，你那张实拍是 67.1 秒（为什么慢这一次没量，别当断线）。别关这个框，画完会自己出现在下面。
+              已经等了 {{ elapsed }} 秒 —— 512x512 二十步，这台机器上一张 22.4 秒、一炉 4 张一起采样 83.6 秒。
+              如果这一次是软件刚替你起的引擎，还要多一段冷启动：实测 69.8 秒 = 起引擎 + 引擎自己报的 40.23 秒画图。
+              别关这个框，画完会自己出现在下面。
             </p>
           </div>
 
           <!-- 上一次那张 -->
           <div class="im__section">
-            <span class="hud-label">刚画的那张</span>
-            <div v-if="lastImage" class="im__result">
+            <span class="hud-label">{{ lastShots.length > 1 ? `刚画的这 ${lastShots.length} 张` : '刚画的那张' }}</span>
+            <div v-if="lastShots.length" class="im__shots">
               <!--
                 右键有菜单（复制图片 / 打开 / 所在文件夹），双击直接打开 —— 但这两件事
                 也各留一颗按钮：看不见不等于做不到，用户不该靠猜手势。
+
+                一格一张，**一次画几张就摆几张**：一次出 4 张而面板只显示第一张，
+                等于用户付了八十多秒只看见一张。
               -->
-              <img
-                class="im__pic"
-                :src="lastImage"
-                alt="刚生成的图"
-                @contextmenu.prevent="pictureMenu($event)"
-                @dblclick="openArtifact(lastPath, 'open')"
-              />
-              <div class="im__acts">
-                <button class="hud-btn im__btn" type="button" @click="copyImage(lastPath)">复制图片</button>
-                <button class="hud-btn im__btn" type="button" @click="openArtifact(lastPath, 'open')">打开</button>
-                <button class="hud-btn im__btn" type="button" @click="openArtifact(lastPath, 'folder')">所在文件夹</button>
+              <div v-for="shot in lastShots" :key="shot.path" class="im__result">
+                <img
+                  v-if="shot.url"
+                  class="im__pic"
+                  :src="shot.url"
+                  alt="刚生成的图"
+                  @contextmenu.prevent="pictureMenu($event, shot.path)"
+                  @dblclick="openArtifact(shot.path, 'open')"
+                />
+                <p v-else class="im__why">这一张还没读出来。</p>
+                <div class="im__acts">
+                  <button class="hud-btn im__btn" type="button" @click="copyImage(shot.path)">复制图片</button>
+                  <button class="hud-btn im__btn" type="button" @click="openArtifact(shot.path, 'open')">打开</button>
+                  <button class="hud-btn im__btn" type="button" @click="openArtifact(shot.path, 'folder')">所在文件夹</button>
+                </div>
+                <p class="im__file">{{ shot.path }}</p>
               </div>
-              <p class="im__file">{{ lastPath }}</p>
-              <p class="im__why">{{ lastWords }}</p>
-              <!-- 引擎实际听见的那句：中文被展开成英文标签，不写出来就是悄悄改写。 -->
-              <p v-if="lastSent && lastSent !== prompt.trim()" class="im__sent">
-                引擎听见的那句：<span class="im__sent-text">{{ lastSent }}</span>
-              </p>
-              <p v-if="lastNote" class="im__why im__why--warn">{{ lastNote }}</p>
             </div>
-            <p v-else class="im__empty">还没画过。上面那句写完按「画一张」。</p>
+            <p v-if="lastShots.length" class="im__why">{{ lastWords }}</p>
+            <!-- 引擎实际听见的那句：中文被展开成英文标签，不写出来就是悄悄改写。 -->
+            <p v-if="lastShots.length && lastSent && lastSent !== prompt.trim()" class="im__sent">
+              引擎听见的那句：<span class="im__sent-text">{{ lastSent }}</span>
+            </p>
+            <p v-if="lastShots.length && lastNote" class="im__why im__why--warn">{{ lastNote }}</p>
+            <p v-if="!lastShots.length" class="im__empty">还没画过。上面那句写完按「画一张」。</p>
           </div>
 
           <!-- 引擎的来历 -->
@@ -142,6 +157,7 @@
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 
 import {
+  artifactRead,
   copyImage,
   fetchImageState,
   generateImage,
@@ -160,6 +176,8 @@ const empty: ImageState = {
   sizes: [],
   size: '512x512',
   steps: 20,
+  count: 4,
+  counts: [],
   comfy_url: '',
   comfy_dir: '',
   cloud_base: '',
@@ -188,13 +206,18 @@ const busy = ref(false)
 const engineChoice = ref('auto')
 const sizeChoice = ref('512x512')
 const steps = ref(20)
+const countChoice = ref(4)
 const comfyUrl = ref('')
 const comfyDir = ref('')
 const cloudBase = ref('')
 const cloudModel = ref('')
 const cloudKey = ref('')
-const lastImage = ref('')
-const lastPath = ref('')
+/**
+ * 刚画的那几张。**一次画几张就列几张** —— 服务端只带了第一张的预览（省那份 base64），
+ * 第 2 张往后在这里自己去读，走的是给对话那条路同一个门（`artifact_read`），
+ * 它只认软件自己产出的目录。
+ */
+const lastShots = ref<{ path: string; url: string }[]>([])
 const lastWords = ref('')
 /**
  * 引擎**实际听见**的那一句（中文会被展开成英文标签）和没展开出来的词。
@@ -231,14 +254,24 @@ function stopClock(): void {
 onBeforeUnmount(stopClock)
 
 /** 预览图上那颗右键菜单：打包版没有原生菜单可退，只能自己给一份。 */
-function pictureMenu(event: MouseEvent): void {
-  if (!lastPath.value) return
+function pictureMenu(event: MouseEvent, path: string): void {
+  if (!path) return
   const entries: MenuEntry[] = [
-    { label: '复制图片', run: () => void copyImage(lastPath.value) },
-    { label: '打开', run: () => void openArtifact(lastPath.value, 'open') },
-    { label: '所在文件夹', run: () => void openArtifact(lastPath.value, 'folder') },
+    { label: '复制图片', run: () => void copyImage(path) },
+    { label: '打开', run: () => void openArtifact(path, 'open') },
+    { label: '所在文件夹', run: () => void openArtifact(path, 'folder') },
   ]
   openMenu(event, entries)
+}
+
+/** 第 2 张往后的预览。读不出来就留空 —— 那一格会写"这一张还没读出来"，不是空白。 */
+async function readShot(path: string): Promise<string> {
+  try {
+    const answer = await artifactRead(path)
+    return answer.ok ? answer.data_url : ''
+  } catch {
+    return ''
+  }
 }
 
 const WORDS: Record<string, string> = {
@@ -258,12 +291,14 @@ const phaseClass = computed(() => {
 })
 const engineNote = computed(() => state.engines.find((row) => row.id === engineChoice.value)?.note ?? '')
 const sizeNote = computed(() => state.sizes.find((row) => row.size === sizeChoice.value)?.note ?? '')
+const countNote = computed(() => state.counts.find((row) => row.count === countChoice.value)?.note ?? '')
 
 function apply(next: ImageState): void {
   Object.assign(state, next)
   engineChoice.value = next.engine
   sizeChoice.value = next.size
   steps.value = next.steps
+  countChoice.value = next.count
   comfyUrl.value = next.comfy_url
   comfyDir.value = next.comfy_dir
   cloudBase.value = next.cloud_base
@@ -281,7 +316,14 @@ async function refresh(): Promise<void> {
 async function tune(): Promise<void> {
   busy.value = true
   try {
-    apply(await tuneImage(engineChoice.value, sizeChoice.value, Number(steps.value) || 20))
+    apply(
+      await tuneImage(
+        engineChoice.value,
+        sizeChoice.value,
+        Number(steps.value) || 20,
+        Number(countChoice.value) || 4,
+      ),
+    )
   } finally {
     busy.value = false
   }
@@ -305,12 +347,18 @@ async function generate(): Promise<void> {
   try {
     const answer = await generateImage(text, sizeChoice.value)
     if (answer.ok) {
-      lastImage.value = answer.preview
-      lastPath.value = answer.path
-      lastWords.value = `${answer.size} · ${answer.steps} 步 · ${answer.engine === 'local' ? '本机 ComfyUI' : '云端 API'} · ${answer.seconds} 秒 · 种子 ${answer.seed}`
+      // 「都落了盘」和「都显示出来了」是两件事：`paths` 是前者，这里补后者。
+      const paths = answer.paths.length ? answer.paths : [answer.path]
+      lastShots.value = await Promise.all(
+        paths.map(async (path, index) => ({
+          path,
+          url: index === 0 && answer.preview ? answer.preview : await readShot(path),
+        })),
+      )
+      lastWords.value = `${answer.size} · ${answer.steps} 步 · ${answer.engine === 'local' ? '本机 ComfyUI' : '云端 API'} · ${answer.seconds} 秒 · 种子 ${answer.seed}${paths.length > 1 ? ` · 共 ${paths.length} 张` : ''}`
       lastSent.value = answer.prompt || ''
       lastNote.value = answer.prompt_note || ''
-      emit('changed', '画好了')
+      emit('changed', paths.length > 1 ? `画好了 ${paths.length} 张` : '画好了')
     } else {
       emit('changed', answer.error || '这一张没画成')
     }
@@ -497,6 +545,13 @@ watch(
   margin: 0;
   font-size: 12px;
   color: var(--hud-muted, #9aa3b2);
+}
+
+/* 一次几张就并排几格。宽度不够就换行，不横着滚 —— 横滚的第四张谁都不会去拉。 */
+.im__shots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
 }
 
 .im__result {

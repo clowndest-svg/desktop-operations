@@ -37,6 +37,7 @@ from jarvis.app.image_gen import (
 from jarvis.app.preferences import (
     IMAGE_CLOUD_BASE,
     IMAGE_COMFY_URL,
+    IMAGE_COUNT,
     IMAGE_ENGINE,
     IMAGE_KEEP_OUTPUT,
     Preferences,
@@ -132,11 +133,18 @@ class FakeEngine:
                     json.dumps({"p1": {"outputs": {}, "status": {"status_str": "error"}}}).encode(),
                     "application/json",
                 )
-            image = {"filename": "xiaoye_1_00001_.png", "subfolder": "", "type": "output"}
+            # 一炉几张就回几张 —— 真的 ComfyUI 是按 `batch_size` 编文件名的
+            # （实测 `…_00001_.png` 到 `…_00004_.png`），假的也照这个来。
+            # 固定回一张的话，「一次画几张」这条链在测试里永远是绿的，却从来没被测过。
+            batch = int(self.submitted.get("latent", {}).get("batch_size", 1) or 1)
+            images = [
+                {"filename": f"xiaoye_1_{index:05d}_.png", "subfolder": "", "type": "output"}
+                for index in range(1, max(1, batch) + 1)
+            ]
             return (
                 200,
                 json.dumps(
-                    {"p1": {"outputs": {"7": {"images": [image]}}, "status": {"completed": True}}}
+                    {"p1": {"outputs": {"7": {"images": images}}, "status": {"completed": True}}}
                 ).encode(),
                 "application/json",
             )
@@ -441,7 +449,8 @@ class TestLocalGenerate:
         # SD1.5 的编码器只认英文标签：中文原话送进去等于没说话（r105 实拍那个动漫美女）。
         assert got["positive"] == "orange cat, orange skin"
         assert answer["prompt_input"] == "一只橘猫", "原话必须留着，面板要说清引擎听见了什么"
-        assert got["latent"] == {"width": 512, "height": 512, "batch_size": 1}
+        # 默认一次 4 张（r112 量的：模型换种子就翻面，一张等于把错的直接交出去）。
+        assert got["latent"] == {"width": 512, "height": 512, "batch_size": 4}
         assert got["steps"] == 18
         assert got["node_count"] == 7, "节点少了就是工作流拼错，不是引擎的锅"
         assert isinstance(got["seed"], int) and got["seed"] > 0
@@ -476,6 +485,93 @@ class TestLocalGenerate:
         answer = hub.service.generate("没出图的猫")
         assert answer["ok"] is False
         assert "没出图" in answer["error"]
+
+
+class TestOneRequestDrawsSeveralCandidates:
+    """一次画几张：r112 加的那一格，为的是给"换种子就翻面"一个便宜的解法。
+
+    为什么值得单独一个类：这条链从 **偏好 → 工作流 → 把每一张都取回来 → 各自落盘 →
+    整理进 ``paths``** 一共五节。任何一节断了，表现都是"图出来了、屏上只有一张"——
+    从外面完全看不出错。所以每一节都要有一条判据。
+    """
+
+    def test_the_default_is_four_and_it_reaches_the_workflow(self, hub: Harness) -> None:
+        """默认 4，而且这个 4 必须真的走到 ``EmptyLatentImage`` 里。
+
+        默认为什么是 4 而不是 1：anythingV3 画「兽头人身的人形」这类分布外的东西换种子就
+        翻面 —— 照出厂配置（一炉四张、8 个种子、64 张逐张看过）量过：出厂那一串 24 张对、
+        3 张翻成"兽耳少女"，而换掉它之前那一串是 6 对 21 错（r112，`r112-cmp4-tally.md`）。
+        一张保证不了，就一次给四张让他自己挑。
+        """
+        hub.use_local()
+        answer = hub.service.generate("一只橘猫")
+        assert hub.engine.submitted["latent"]["batch_size"] == 4, "默认那一档没走到工作流里"
+        assert len(answer["paths"]) == 4
+
+    def test_every_candidate_lands_as_its_own_file(self, hub: Harness) -> None:
+        """四张得是四个**不同**的文件：同名就是互相覆盖，用户只拿到一张。
+
+        真的 ComfyUI 是按 ``…_00001_`` … ``…_0000N_`` 编文件名的（实测过），
+        可"引擎给的名字不撞"是"一次几张"能不能成立的前提，所以在这里也钉一条。
+        """
+        hub.use_local()
+        answer = hub.service.generate("一只橘猫")
+        assert len(set(answer["paths"])) == len(answer["paths"]) == 4, answer["paths"]
+        for item in answer["paths"]:
+            path = Path(item)
+            assert path.parent == hub.paths.images_dir
+            assert path.read_bytes() == PNG
+        assert answer["path"] == answer["paths"][0], "path 是第一张，老调用方还靠它"
+
+    def test_the_setting_that_went_in_is_the_number_that_came_out(self, hub: Harness) -> None:
+        hub.use_local()
+        for wanted in (1, 2, 4):
+            hub.prefs.set(IMAGE_COUNT, wanted)
+            answer = hub.service.generate("一只橘猫")
+            assert hub.engine.submitted["latent"]["batch_size"] == wanted
+            assert len(answer["paths"]) == wanted, wanted
+
+    def test_a_number_between_the_choices_snaps_and_says_which_way(self, hub: Harness) -> None:
+        """档位是 1/2/4。手改配置文件写成 3 时不许原样递给引擎，也不许悄悄抬到 4。
+
+        抬到 4 是替用户多等一倍时间；并列时取小的那一档，便宜优先。
+        """
+        hub.prefs.set(IMAGE_COUNT, 3)
+        assert hub.service.status()["count"] == 2
+        hub.prefs.set(IMAGE_COUNT, 9)
+        assert hub.service.status()["count"] == 4
+        hub.prefs.set(IMAGE_COUNT, "不是个数")
+        assert hub.service.status()["count"] == 4, "转不成整数才回退到默认"
+
+    def test_the_tool_can_ask_for_four_without_touching_the_setting(self, hub: Harness) -> None:
+        """模型说"多画几张"时按参数走，不改用户存在设置里的那一档。"""
+        hub.use_local()
+        hub.prefs.set(IMAGE_COUNT, 1)
+        answer = hub.service.generate("一只橘猫", count=4)
+        assert answer["ok"] is True
+        assert hub.engine.submitted["latent"]["batch_size"] == 4
+        assert hub.service.status()["count"] == 1, "一次请求不许改写偏好"
+
+    def test_an_empty_count_falls_back_to_the_setting(self, hub: Harness) -> None:
+        """工具没给 `count`（模型漏了这个参数）时按偏好走，不是变成 0 张。"""
+        hub.use_local()
+        hub.prefs.set(IMAGE_COUNT, 2)
+        answer = hub.service.generate("一只橘猫", count=None)
+        assert hub.engine.submitted["latent"]["batch_size"] == 2
+        assert len(answer["paths"]) == 2
+
+    def test_the_cloud_door_still_asks_for_exactly_one(self, hub: Harness) -> None:
+        """云端那条是 `n: 1` 写死的 —— 面板上那一格对它不生效，这一点得是**实测**的。
+
+        改它要连响应解析一起动，而且没有钥匙就测不了；所以宁可让它明确地只回一张，
+        也不许它看起来跟着设置走了、其实没有。
+        """
+        hub.use_cloud()
+        hub.prefs.set(IMAGE_COUNT, 4)
+        answer = hub.service.generate("一只橘猫")
+        assert answer["ok"] is True, answer["error"]
+        assert hub.engine.cloud_bodies[-1]["n"] == 1
+        assert len(answer["paths"]) == 1
 
     def test_a_missing_image_file_is_not_called_success(self, hub: Harness) -> None:
         hub.use_local()
@@ -762,6 +858,31 @@ class TestTheToolLayer:
         hub.use_local()
         text = self._handlers(hub.service)["image_status"]({})
         assert "本地引擎" in text and "云端" in text and "尺寸" in text
+
+    def test_four_candidates_are_all_written_out_one_path_per_line(self, hub: Harness) -> None:
+        """四张的路径必须**每条各占一行**。
+
+        这一条不看格式就看不出来：外壳是**按行**找「存在：」后面那段路径的
+        （`jarvis/app/chat_service.py` 的 `_artifacts_of`），一行里塞两条只会认第一条 ——
+        那样剩下的图算出来了、也存下来了，屏上却不显示，等于白画八十多秒。
+        """
+        from jarvis.app.chat_service import _artifacts_of
+
+        hub.use_local()
+        words = self._handlers(hub.service)["generate_image"]({"prompt": "一只橘猫"})
+        carried = _artifacts_of("generate_image", words)
+        assert len(carried) == 4, f"外壳只认出 {len(carried)} 张：\n{words}"
+        assert all(Path(item).is_file() for item in carried)
+        assert "4 张" in words, "回话里得说清这一批有几张"
+
+    def test_one_picture_still_reads_the_way_it_always_did(self, hub: Harness) -> None:
+        """一张时那句话一个字都不许变 —— 它是用了很多轮的那句，改它没有理由。"""
+        hub.use_local()
+        hub.prefs.set(IMAGE_COUNT, 1)
+        words = self._handlers(hub.service)["generate_image"]({"prompt": "一只橘猫"})
+        assert words.startswith("画好了，存在：")
+        assert words.count("存在：") == 1
+        assert "4 张" not in words
 
 
 def _tools_section() -> ToolsSection:

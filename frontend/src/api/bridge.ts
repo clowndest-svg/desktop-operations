@@ -250,6 +250,17 @@ export interface ExtensionCatalog {
   needs: string[]
   /** 技能：来源的 ref。钉了 commit 的那几条不会跟着上游改版漂走。 */
   pinned: string
+  /**
+   * 图标：emoji 那一两个字符，或一个 https 的 GitHub 头像地址（后端已过白名单）。
+   *
+   * 空串是**正常值**不是失败：npm 的搜索响应里就没有图标这一栏。界面退成名字首字母方块，
+   * 并在详情页写明「来源没给图标」。
+   */
+  icon: string
+  /** 详情页那一段长说明。``summary`` 是一行，这一栏是「它到底干什么、有什么前提」。 */
+  description: string
+  /** 来源自己报的版本。技能的「有没有新版」不看它 —— 看取回来的文件内容。 */
+  version: string
 }
 
 /** 一路搜索的交代：命中几条、花了多少毫秒、失败的话原文是什么。 */
@@ -268,6 +279,74 @@ export interface ExtensionSearch {
   /** 「这一路没通」的那几句（``标签：原文``）。它和「市场里没有」是两句不同的话。 */
   failures: string[]
   error: string
+}
+
+/** 打开页面就能看到的那一格。``error`` 非空时「空」是读不到，不是没有推荐。 */
+export interface ExtensionRecommended {
+  items: ExtensionCatalog[]
+  error: string
+  at: number
+  where: string
+}
+
+/** 一条记录在**这台机器上**现在是什么样子。三颗按钮画什么全看它。 */
+export interface ExtensionInstalled {
+  yes: boolean
+  kind: string
+  name: string
+  slug: string
+  path: string
+  at: number
+  files: string[]
+  digest: string
+  enabled: boolean
+  /** 盘上有没有那份来历记录。false = 更早那版装的，更新判断不了，只能删掉重装。 */
+  provenance: boolean
+  /** 清单上这一条和盘上登记的还是不是同一份（MCP 的「更新」就按这个决定给不给）。 */
+  changed: boolean
+  connected: boolean
+  words: string
+}
+
+/** 「能不能 + 为什么」。``can=false`` 时 ``words`` 就是屏上那句原话，不是提示文案。 */
+export interface ExtensionVerdict {
+  can: boolean
+  words: string
+}
+
+/** 点图标弹出来的那张卡要的全部东西。后端永远回完整形状。 */
+export interface ExtensionDetail {
+  found: boolean
+  id: string
+  item: Partial<ExtensionCatalog>
+  installed: ExtensionInstalled
+  install: ExtensionVerdict
+  update: ExtensionVerdict
+  remove: ExtensionVerdict
+  runtime: ExtensionRuntime
+  log: ExtensionLogRow[]
+  directory: string
+  servers_file: string
+  error: string
+}
+
+/** 一条记录的四句判词：装了没、能不能装、能不能更新、能不能删。后端算，页面不重复算。 */
+export interface ExtensionRowVerdicts {
+  installed: ExtensionInstalled
+  install: ExtensionVerdict
+  update: ExtensionVerdict
+  remove: ExtensionVerdict
+}
+
+/** 装 / 更新 / 删 三件事的结果行。``reason`` 必须能直接上屏。 */
+export interface ExtensionResultRow {
+  ok: boolean
+  kind: string
+  name: string
+  path: string
+  reason: string
+  detail: string
+  connect?: string
 }
 
 /** 已装的一份技能。``error`` 非空 = 盘上有这个目录但读不过来，那一行仍然要有删除钮。 */
@@ -361,17 +440,18 @@ export interface ExtensionState {
   /** 读 ``servers.json`` 本身失败的那一句 —— 和「一条 server 都连不上」不是一件事。 */
   store_error: string
   log: ExtensionLogRow[]
+  /**
+   * 按 catalog id 索引的判词。搜索结果那一行和详情卡读的是**同一份**，
+   * 所以同一个东西不会在两个位置上说出两句话。
+   */
+  verdicts: Record<string, ExtensionRowVerdicts>
   error: string
   /** 只有刚装过那一下才带。``reason`` 是能直接上屏的一句人话。 */
-  install?: {
-    ok: boolean
-    kind: string
-    name: string
-    path: string
-    reason: string
-    detail: string
-    connect: string
-  }
+  install?: ExtensionResultRow
+  /** 只有刚更新过那一下才带。「没动」也是一种 ok=true，靠 ``detail`` 那句话区分。 */
+  update?: ExtensionResultRow
+  /** 只有刚按条目删过那一下才带（从搜索结果或详情卡删的，不是「已装」那一格）。 */
+  removed?: ExtensionResultRow
 }
 
 /** One execution record, as both the scheduler and the workflow engine render it. */
@@ -733,7 +813,10 @@ export interface MirrorAction {
 /** 生图：本机 ComfyUI 或云端 API 的一次答复（服务端 ImageAnswer 的镜像）。 */
 export interface ImageAnswer {
   ok: boolean
+  /** 第一张的路径。**不是"就这一张"** —— 一次画几张看 `ImageState.count`。 */
   path: string
+  /** 这一次落盘的全部图。一次出好几张时，面板要一张一张都摆出来。 */
+  paths: string[]
   /** 实际走了哪条：``local`` | ``cloud``。空串是没画成。 */
   engine: string
   prompt: string
@@ -764,6 +847,12 @@ export interface ImageSizeOption {
   note: string
 }
 
+/** 一次画几张的那一档。**只对本地引擎生效** —— 云端那条是 `n: 1` 写死的。 */
+export interface ImageCountOption {
+  count: number
+  note: string
+}
+
 /** 本机引擎探到什么。``ok`` 是"有人答话"，不是"刚才画成功过"。 */
 export interface ImageProbe {
   kind: string
@@ -781,6 +870,9 @@ export interface ImageState {
   sizes: ImageSizeOption[]
   size: string
   steps: number
+  /** 一次画几张（只对本地引擎生效）。 */
+  count: number
+  counts: ImageCountOption[]
   comfy_url: string
   comfy_dir: string
   cloud_base: string
@@ -1941,7 +2033,7 @@ interface PywebviewApi {
   image_state(): Promise<ImageState>
   image_probe(): Promise<ImageState>
   image_generate(prompt: string, size: string): Promise<ImageAnswer>
-  image_tune(engine: string, size: string, steps: number): Promise<ImageState>
+  image_tune(engine: string, size: string, steps: number, count: number): Promise<ImageState>
   image_setup(
     comfy_url: string,
     comfy_dir: string,
@@ -2041,6 +2133,10 @@ interface PywebviewApi {
   extensions_state(): Promise<ExtensionState>
   extensions_search(query: string, kinds: string[]): Promise<ExtensionSearch>
   extensions_install(item_id: string): Promise<ExtensionState>
+  extensions_recommended(): Promise<ExtensionRecommended>
+  extensions_detail(item_id: string): Promise<ExtensionDetail>
+  extensions_update(item_id: string): Promise<ExtensionState>
+  extensions_remove_item(item_id: string, confirmed: boolean): Promise<ExtensionState>
   extensions_add_http(name: string, url: string): Promise<ExtensionState>
   extensions_layer_set(on: boolean): Promise<ExtensionState>
   extensions_server_set(name: string, on: boolean): Promise<ExtensionState>
@@ -2418,6 +2514,12 @@ const mockImage: ImageState = {
   ],
   size: '512x512',
   steps: 20,
+  count: 4,
+  counts: [
+    { count: 1, note: '最快：512x512 二十步实测 22.4 秒。代价是——模型换个种子就会翻面，一次只给一张，等于把那张错的直接交出去。' },
+    { count: 2, note: '这一档没有单独量过：两头是 1 张 22.4 秒、4 张一炉 83.6 秒，2 张按这两头推在 40~45 秒之间。比 1 张稳，比 4 张快。' },
+    { count: 4, note: '实测 83.6 秒（每张 20.9 秒，一炉出的比跑四遍省），4 GB 卡上装得下。一次给四张让你挑。' },
+  ],
   comfy_url: '',
   comfy_dir: '',
   cloud_base: '',
@@ -2442,6 +2544,7 @@ function mockImageFail(message: string): ImageAnswer {
   return {
     ok: false,
     path: '',
+    paths: [],
     engine: '',
     prompt: '',
     prompt_input: '',
@@ -2464,9 +2567,16 @@ const mockImageAnswer = (prompt: string): ImageAnswer => {
   mockImage.error = ''
   mockImage.last_path = `C:\\Users\\你\\生图\\xiaoye_mock_${mockImageSeed}.png`
   mockImage.last_seconds = seconds
+  // 一次画几张也照一遍：预览里那张卡本来就该是"四张并排长什么样"。
+  const paths = Array.from({ length: mockImage.count }, (_, index) =>
+    index === 0
+      ? mockImage.last_path
+      : `C:\\Users\\你\\生图\\xiaoye_mock_${mockImageSeed}_0000${index + 1}_.png`,
+  )
   return {
     ok: true,
     path: mockImage.last_path,
+    paths,
     engine: 'cloud',
     prompt,
     prompt_input: prompt,
@@ -2532,7 +2642,7 @@ const MOCK_EXT_SOURCE_LABELS: Record<string, string> = {
   github: 'GitHub · 技能仓库',
 }
 
-const mockExtCatalog: ExtensionCatalog[] = [
+const mockExtCatalogRaw = [
   {
     kind: 'mcp',
     id: 'curated:server-filesystem',
@@ -2545,6 +2655,10 @@ const mockExtCatalog: ExtensionCatalog[] = [
     downloads: 0,
     needs: ['npx'],
     pinned: '2026-09-30',
+    icon: '🗂️',
+    description:
+      '把指定文件夹读给她看：只在她要用的时候开，白名单外的路径一律拒。装之前那条命令行摊在这张卡上 —— 它是跑在小夜外面的独立进程，用你当前账户的权限。',
+    version: '2026-09-30',
   },
   {
     kind: 'skill',
@@ -2558,6 +2672,9 @@ const mockExtCatalog: ExtensionCatalog[] = [
     downloads: 0,
     needs: [],
     pinned: 'a1b2c3d',
+    icon: '📄',
+    description: '怎么把一份填好的表单读回来、并把答案写回同一个路径的说明书。只有文本，不会被执行；钉在 commit 上，上游改版不会漂走。',
+    version: '1.2.0',
   },
   {
     kind: 'mcp',
@@ -2597,6 +2714,9 @@ const mockExtCatalog: ExtensionCatalog[] = [
     downloads: 0,
     needs: [],
     pinned: 'main',
+    icon: 'https://avatars.githubusercontent.com/u/100976983?s=400',
+    description: '一个仓库里翻出来的技能目录（这一路的图标就是 GitHub 给的头像）。正文只在被用到的时候才取进上下文，不常驻。',
+    version: '',
   },
   {
     kind: 'mcp',
@@ -2613,8 +2733,27 @@ const mockExtCatalog: ExtensionCatalog[] = [
   },
 ]
 
+/**
+ * 预览里也照同一条规矩补默认值：``icon`` / ``description`` / ``version`` 三栏后端**永远给**，
+ * 少一栏界面就少画一块，而那块本来该说的话就没人说了。
+ */
+const mockExtCatalog: ExtensionCatalog[] = mockExtCatalogRaw.map((row) => ({
+  icon: '',
+  description: row.summary,
+  version: '',
+  ...row,
+}))
+
 /** 后端那张「只认搜出来的 id」的缓存表，预览照抄一份（空表＝什么都没搜过）。 */
 const mockExtById = new Map<string, ExtensionCatalog>()
+
+/**
+ * 预览里「这一份装的时候记下来历了」的那几个 slug。
+ *
+ * 预置的那两份故意不在里面 —— 它们演的是「更早那版装的、判断不了更新」那条真实路径，
+ * 那句话说错了，用户在真机上就会等一个永远不会来的更新。
+ */
+const mockExtProvenance = new Set<string>()
 
 /** 预览里也先留一行审计，好让第三格知道自己在说什么（``at`` 是 epoch 秒）。 */
 const mockExtSeedLog: ExtensionLogRow[] = [
@@ -2701,12 +2840,29 @@ const mockExtensions: ExtensionState = {
   search: { query: '', items: [], sources: [], failures: [] },
   store_error: '',
   log: mockExtSeedLog,
+  verdicts: {},
   error: '',
+}
+
+/** 预览也按同一条规矩算判词：装了没 / 能不能装 / 能不能更新 / 能不能删。 */
+function mockVerdicts(): Record<string, ExtensionRowVerdicts> {
+  const out: Record<string, ExtensionRowVerdicts> = {}
+  for (const [id, item] of mockExtById) {
+    const installed = mockInstalledOf(item)
+    out[id] = {
+      installed,
+      install: mockInstallVerdict(item, installed),
+      update: mockUpdateVerdict(item, installed),
+      remove: mockRemoveVerdict(installed),
+    }
+  }
+  return out
 }
 
 function mockExtSnapshot(): ExtensionState {
   return {
     ...mockExtensions,
+    verdicts: mockVerdicts(),
     servers: mockExtensions.servers.map((row) => ({ ...row, args: [...row.args], needs: [...row.needs], env_from: [...row.env_from] })),
     skills: mockExtensions.skills.map((row) => ({ ...row })),
     log: mockExtensions.log.map((row) => ({ ...row })),
@@ -2818,6 +2974,7 @@ function mockExtensionsInstall(itemId: string): ExtensionState {
         enabled: true,
       },
     ]
+    mockExtProvenance.add(slug)
     mockExtNote(`技能已装 ${slug} ← ${item.source}:${item.homepage || item.name}（预览只是记账，盘上没写文件）`)
     result = {
       ok: true,
@@ -2834,6 +2991,256 @@ function mockExtensionsInstall(itemId: string): ExtensionState {
   snapshot.install = result
   snapshot.error = ''
   return snapshot
+}
+
+/**
+ * 这一条在预览的账本里装了没有。
+ *
+ * 语义**镜像后端 `_installed_of`**：两边各写一套的话，预览里看着对的那三颗按钮
+ * 到了真版本上就是另一回事 —— 而用户只在真版本上点。
+ */
+function mockInstalledOf(item: ExtensionCatalog): ExtensionInstalled {
+  const blank: ExtensionInstalled = {
+    yes: false,
+    kind: item.kind,
+    name: '',
+    slug: '',
+    path: '',
+    at: 0,
+    files: [],
+    digest: '',
+    enabled: false,
+    provenance: false,
+    changed: false,
+    connected: false,
+    words: '还没装',
+  }
+  if (item.kind === 'mcp') {
+    const name = String(item.install['name'] || item.name).trim() || item.name
+    const found = mockExtensions.servers.find((one) => one.name === name)
+    if (!found) return blank
+    const live = mockExtensions.mcp.statuses.find((one) => String(one['name'] ?? '') === name)
+    const words = (key: string): string[] =>
+      Array.isArray(item.install[key]) ? (item.install[key] as unknown[]).map(String) : []
+    const changed =
+      String(item.install['command'] ?? '') !== found.command ||
+      String(item.install['url'] ?? '') !== found.url ||
+      words('args').join(' ') !== found.args.join(' ')
+    return {
+      ...blank,
+      yes: true,
+      changed,
+      name: found.name,
+      slug: found.name,
+      path: mockExtensions.servers_file,
+      enabled: found.enabled,
+      provenance: true,
+      connected: Boolean(live?.['connected']),
+      words: `已登记：${found.name}` + (found.enabled ? '' : '（停用）'),
+    }
+  }
+  const raw = String(item.install['path'] || item.name)
+  const slug = raw.replace(/\\/g, '/').split('/').filter(Boolean).pop() || 'skill'
+  const found = mockExtensions.skills.find((one) => one.slug === slug)
+  if (!found) return blank
+  const hasProv = mockExtProvenance.has(slug)
+  return {
+    ...blank,
+    yes: true,
+    name: found.slug,
+    slug: found.slug,
+    path: found.path,
+    enabled: found.enabled,
+    provenance: hasProv,
+    words:
+      `已装：${found.slug}` +
+      (found.enabled ? '' : '（关着）') +
+      (hasProv ? '' : '（没留下来历记录）'),
+  }
+}
+
+function mockInstallVerdict(item: ExtensionCatalog, installed: ExtensionInstalled): ExtensionVerdict {
+  if (installed.yes) return { can: false, words: '这一条已经装了，不用重复装' }
+  const gaps = item.needs.filter((need) => !mockExtensions.runtime.present.includes(need))
+  if (gaps.length) return { can: false, words: `这台机器上缺 ${gaps.join('、')}，装上了也起不来。` }
+  return { can: true, words: '可以装（装之前还会把要跑的那一条摊给你看）' }
+}
+
+/** 能不能更新、为什么不能。**这一句必须说实话**，不给一颗点了什么也不会变的按钮。 */
+function mockUpdateVerdict(item: ExtensionCatalog, installed: ExtensionInstalled): ExtensionVerdict {
+  if (!installed.yes) return { can: false, words: '还没装，谈不上更新' }
+  if (item.kind !== 'mcp') {
+    if (!installed.provenance)
+      return {
+        can: false,
+        words:
+          '这一份没留下来历记录（多半是更早那版装的，那时候还没记）—— 所以判断不了上游有没有出新内容。' +
+          '要换新内容：先删掉这一份，再装一次。',
+      }
+    return { can: true, words: '按盘上那份来历重新取一次，比内容决定要不要动（比的是文件，不是版本号）' }
+  }
+  const launcher = String(item.install['command'] || '').trim().toLowerCase()
+  if (['npx', 'uvx', 'pipx'].includes(launcher))
+    return {
+      can: false,
+      words: `这一条每次起进程都是 \`${launcher} -y\` 现拉最新版，没有「更新」这一步。`,
+    }
+  return { can: true, words: '按清单上这一条重写一次登记（保留它现在的启停），然后当场连一次' }
+}
+
+function mockRemoveVerdict(installed: ExtensionInstalled): ExtensionVerdict {
+  if (!installed.yes) return { can: false, words: '这条本来就没装，没什么可删' }
+  return { can: true, words: '删之前会再问一次，且只动它自己那一个目录 / 那一条登记' }
+}
+
+function mockEmptyDetail(itemId: string, reason: string): ExtensionDetail {
+  const blankItem: ExtensionCatalog = {
+    kind: '',
+    id: itemId,
+    name: '',
+    summary: '',
+    source: '',
+    install: {},
+    homepage: '',
+    stars: 0,
+    downloads: 0,
+    needs: [],
+    pinned: '',
+    icon: '',
+    description: '',
+    version: '',
+  }
+  const no = { can: false, words: reason }
+  return {
+    found: false,
+    id: itemId,
+    item: blankItem,
+    installed: { ...mockInstalledOf(blankItem), kind: '', words: '' },
+    install: no,
+    update: no,
+    remove: no,
+    runtime: { ...mockExtensions.runtime, present: [...mockExtensions.runtime.present] },
+    log: [],
+    directory: '',
+    servers_file: '',
+    error: reason,
+  }
+}
+
+function mockRecommended(): ExtensionRecommended {
+  const rows = mockExtCatalog.filter((row) => row.source === 'curated')
+  for (const row of rows) mockExtById.set(row.id, row)
+  return {
+    items: rows.map((row) => ({ ...row, needs: [...row.needs], install: { ...row.install } })),
+    error: '',
+    at: Date.now() / 1000,
+    where: '作者逐条验过的那份精选清单（预览不联网）',
+  }
+}
+
+function mockDetail(itemId: string): ExtensionDetail {
+  const wanted = String(itemId || '').trim()
+  const item = mockExtById.get(wanted)
+  if (!item)
+    return mockEmptyDetail(
+      wanted,
+      `这条不在我们给出去的那批里（id=${wanted || '空'}）。请先搜一次，或者从推荐那一格点进来。`,
+    )
+  const installed = mockInstalledOf(item)
+  return {
+    found: true,
+    id: item.id,
+    item: { ...item, needs: [...item.needs], install: { ...item.install } },
+    installed,
+    install: mockInstallVerdict(item, installed),
+    update: mockUpdateVerdict(item, installed),
+    remove: mockRemoveVerdict(installed),
+    runtime: { ...mockExtensions.runtime, present: [...mockExtensions.runtime.present] },
+    log: mockExtensions.log.slice(0, 5).map((row) => ({ ...row })),
+    directory: mockExtensions.directory,
+    servers_file: mockExtensions.servers_file,
+    error: '',
+  }
+}
+
+function mockUpdate(itemId: string): ExtensionState {
+  const wanted = String(itemId || '').trim()
+  const item = mockExtById.get(wanted)
+  const snapshot = mockExtSnapshot()
+  if (!item) {
+    snapshot.error = '这条不在我们给出去的那批里，更新不接受页面传来的形状。'
+    return snapshot
+  }
+  const installed = mockInstalledOf(item)
+  const verdict = mockUpdateVerdict(item, installed)
+  if (!verdict.can) {
+    snapshot.error = verdict.words
+    return snapshot
+  }
+  if (item.kind === 'mcp') {
+    const name = installed.name
+    mockExtensions.servers = mockExtensions.servers.map((one) =>
+      one.name === name ? { ...one, note: item.summary.slice(0, 200), needs: [...item.needs] } : one,
+    )
+    mockExtNote(`更新 MCP 登记 ${name}（保住启停=${installed.enabled}）`)
+    snapshot.update = {
+      ok: true,
+      kind: 'mcp',
+      name,
+      path: mockExtensions.servers_file,
+      reason: '',
+      detail: '预览只重写账本；真版本会按清单重写这条登记并当场连一次',
+    }
+  } else {
+    mockExtNote(`技能检查更新 ${installed.slug}：预览不取网络`)
+    snapshot.update = {
+      ok: true,
+      kind: 'skill',
+      name: installed.name,
+      path: installed.path,
+      reason: '',
+      detail: '预览不取网络：真版本会重新取一次，比的是取回的全部文件内容，一模一样就不写盘',
+    }
+  }
+  snapshot.error = ''
+  return snapshot
+}
+
+function mockRemoveItem(itemId: string, confirmed: boolean): ExtensionState {
+  const wanted = String(itemId || '').trim()
+  const item = mockExtById.get(wanted)
+  const snapshot = mockExtSnapshot()
+  if (!item) {
+    snapshot.error = '这条不在我们给出去的那批里，删除不接受页面传来的形状。'
+    return snapshot
+  }
+  const installed = mockInstalledOf(item)
+  if (!installed.yes) {
+    snapshot.error = '这条本来就没装，什么都没动。'
+    return snapshot
+  }
+  if (!confirmed) {
+    snapshot.error = '删除需要明确的确认（confirmed），这一步不会替你决定'
+    return snapshot
+  }
+  if (item.kind === 'mcp') {
+    mockExtensions.servers = mockExtensions.servers.filter((one) => one.name !== installed.name)
+    mockExtNote(`从扩展页删掉 mcp ${installed.name}（按条目 id 解析出来的那一个）`)
+  } else {
+    mockExtensions.skills = mockExtensions.skills.filter((one) => one.slug !== installed.slug)
+    mockExtProvenance.delete(installed.slug)
+    mockExtNote(`从扩展页删掉 skill ${installed.slug}（按条目 id 解析出来的那一个）`)
+  }
+  const next = mockExtSnapshot()
+  next.removed = {
+    ok: true,
+    kind: item.kind,
+    name: installed.name,
+    path: installed.path,
+    reason: '',
+    detail: item.kind === 'mcp' ? `删掉了这条登记：${installed.name}` : `删掉了这一份：${installed.slug}`,
+  }
+  return next
 }
 
 const mock: PywebviewApi = {
@@ -3662,6 +4069,18 @@ const mock: PywebviewApi = {
   async extensions_install(item_id) {
     return mockExtensionsInstall(item_id)
   },
+  async extensions_recommended() {
+    return mockRecommended()
+  },
+  async extensions_detail(item_id) {
+    return mockDetail(item_id)
+  },
+  async extensions_update(item_id) {
+    return mockUpdate(item_id)
+  },
+  async extensions_remove_item(item_id, confirmed) {
+    return mockRemoveItem(item_id, confirmed)
+  },
   async extensions_add_http(name, url) {
     const clean = String(name || '').trim()
     const link = String(url || '').trim()
@@ -4061,10 +4480,12 @@ const mock: PywebviewApi = {
     await new Promise((resolve) => setTimeout(resolve, 400))
     return mockImageAnswer(String(prompt))
   },
-  async image_tune(engine, size, steps) {
+  async image_tune(engine, size, steps, count) {
     mockImage.engine = String(engine || mockImage.engine)
     mockImage.size = String(size || mockImage.size)
     mockImage.steps = Number(steps) || mockImage.steps
+    const wanted = Number(count)
+    if (mockImage.counts.some((row) => row.count === wanted)) mockImage.count = wanted
     return { ...mockImage }
   },
   async image_setup(comfyUrl, comfyDir, cloudBase, cloudModel) {
@@ -5381,6 +5802,29 @@ export function extensionsInstall(itemId: string): Promise<ExtensionState> {
   return bridge().then((target) => target.extensions_install(itemId))
 }
 
+/**
+ * 打开页面就能看到的那一格。读不到时 ``error`` 非空 —— 「这份清单没读到」和
+ * 「没有推荐」在屏上是两句话，混成一句用户就会去换关键词。
+ */
+export function extensionsRecommended(): Promise<ExtensionRecommended> {
+  return bridge().then((target) => target.extensions_recommended())
+}
+
+/** 点图标弹出来的那张卡。只认我们给出去的 id，和装同一条规矩。 */
+export function extensionsDetail(itemId: string): Promise<ExtensionDetail> {
+  return bridge().then((target) => target.extensions_detail(itemId))
+}
+
+/** 更新这一条。判断不了的（旧版装的技能、每次现拉的那类）后端会拒绝并说明原因。 */
+export function extensionsUpdate(itemId: string): Promise<ExtensionState> {
+  return bridge().then((target) => target.extensions_update(itemId))
+}
+
+/** 从搜索结果或详情卡删掉这一条。名字由后端解析，页面不拼。 */
+export function extensionsRemoveItem(itemId: string, confirmed: boolean): Promise<ExtensionState> {
+  return bridge().then((target) => target.extensions_remove_item(itemId, confirmed))
+}
+
 /** 手工加一条 **http** 的 MCP server（不起本机进程）。stdio 只能从搜索结果装。 */
 export function extensionsAddHttp(name: string, url: string): Promise<ExtensionState> {
   return bridge().then((target) => target.extensions_add_http(name, url))
@@ -5907,9 +6351,14 @@ export function generateImage(prompt: string, size: string): Promise<ImageAnswer
   return bridge().then((target) => target.image_generate(prompt, size))
 }
 
-/** 档位、尺寸、步数一次发齐（分开发会互相盖掉，投屏那两格第 95 轮就是这么坏的）。 */
-export function tuneImage(engine: string, size: string, steps: number): Promise<ImageState> {
-  return bridge().then((target) => target.image_tune(engine, size, steps))
+/** 档位、尺寸、步数、一次几张一次发齐（分开发会互相盖掉，投屏那两格第 95 轮就是这么坏的）。 */
+export function tuneImage(
+  engine: string,
+  size: string,
+  steps: number,
+  count: number,
+): Promise<ImageState> {
+  return bridge().then((target) => target.image_tune(engine, size, steps, count))
 }
 
 /** 两个地址、一个目录、一个模型名。钥匙不在这儿 —— 它走设置那扇门，只进环境变量。 */

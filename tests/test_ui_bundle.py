@@ -582,11 +582,29 @@ class TestTheImagePanelIsReachable:
             "image_state(): Promise<ImageState>",
             "image_probe(): Promise<ImageState>",
             "image_generate(prompt: string, size: string): Promise<ImageAnswer>",
-            "image_tune(engine: string, size: string, steps: number): Promise<ImageState>",
+            "image_tune(engine: string, size: string, steps: number, count: number): "
+            "Promise<ImageState>",
         ):
             assert door in bridge, f"这一扇门在 Python 上有、页面声明里没有：{door}"
         assert "vendored_engine: boolean" in bridge, "包里有没带引擎必须能让面板知道"
         assert "vendored_engine: false" in bridge, "浏览器 mock 也得给这一格"
+
+    def test_the_count_door_is_the_whole_way_through(self) -> None:
+        """「一次画几张」从面板到落盘一路都得在 —— 断在哪一节都是它悄悄不生效。
+
+        r112 加这一格的时候，云端那条的 `_ok(path, …)` 还是老签名（只收一个路径），
+        整条云端路直接 `TypeError: 'WindowsPath' object is not subscriptable`。
+        所以这一条不查"有没有这个字符串"，查**这条链的每一节**：
+        面板有那一格 → 桥上有这个参数 → Python 有这扇门 → 服务层读得出这个偏好。
+        """
+        popup = _page("components/ImagePopup.vue")
+        assert "一次画几张" in popup and "countChoice" in popup, "面板上没有那一格"
+        assert "tuneImage(" in popup and "countChoice.value" in popup, "那一格没接到桥上"
+        desk = (REPO_ROOT / "jarvis" / "ui" / "desktop.py").read_text(encoding="utf-8")
+        assert "count: object = None" in desk, "桥那头不收这个参数"
+        gen = (REPO_ROOT / "jarvis" / "app" / "image_gen.py").read_text(encoding="utf-8")
+        assert "IMAGE_COUNT" in gen and "def set_count(" in gen, "服务层没读这个偏好"
+        assert "def _parse_count(" in gen, "工具传来的张数没有解析那一步"
 
     def test_the_browser_mock_carries_a_whole_state(self) -> None:
         """浏览器预览里的 mock 必须像后端一样记账，不然开发模式下看到的形状是假的。"""

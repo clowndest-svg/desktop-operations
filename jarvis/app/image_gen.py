@@ -44,6 +44,7 @@ from jarvis.app.preferences import (
     IMAGE_CLOUD_MODEL,
     IMAGE_COMFY_DIR,
     IMAGE_COMFY_URL,
+    IMAGE_COUNT,
     IMAGE_ENGINE,
     IMAGE_KEEP_OUTPUT,
     IMAGE_SIZE,
@@ -78,6 +79,22 @@ DEFAULT_SIZE: Final = "512x512"
 DEFAULT_STEPS: Final = 20
 MIN_STEPS: Final = 4
 MAX_STEPS: Final = 60
+
+COUNT_CHOICES: Final[tuple[int, ...]] = (1, 2, 4)
+"""一次画几张。**只对本地引擎生效** —— 云端那条是 ``n: 1`` 写死的
+（见 :meth:`ImageService._generate_cloud`）。"""
+
+DEFAULT_COUNT: Final = 4
+"""默认一次画 4 张，量出来的。
+
+为什么不是 1：anythingV3 画「兽头人身的人形」这类分布外的东西，**换种子就翻面**。
+r112 照出厂配置量过（一炉四张、8 个种子、64 张逐张看过）：出厂这一串 32 张里
+24 张画成猪头人身、**3 张翻成"兽耳少女"**；换成它之前那一串是 6 对 21 错
+（`reports/r112-cmp4-tally.md` 是逐张判读表）。比例不高，但**换一个种子就可能撞上** ——
+所以一张保证不了就别只给一张：一次四张他自己挑，八炉里**炉炉都至少有一张对的**。
+
+代价是实话：**4 张 83.6 秒，1 张 22.4 秒**（512x512、20 步，GTX 1650 4 GB）。要快就把
+「一次画几张」调回 1。"""
 MAX_PREVIEW_EDGE: Final = 768
 """回给界面当预览的那张图最长边。原图按原样落盘，预览只是为了让弹窗立刻看得见东西。"""
 
@@ -143,6 +160,11 @@ class ImageSizeRow(TypedDict):
     note: str
 
 
+class ImageCountRow(TypedDict):
+    count: int
+    note: str
+
+
 class ImageStatus(TypedDict):
     """面板那一格读的快照。轮询安全：不发网络请求、不起进程。"""
 
@@ -151,6 +173,8 @@ class ImageStatus(TypedDict):
     sizes: list[ImageSizeRow]
     size: str
     steps: int
+    count: int
+    counts: list[ImageCountRow]
     comfy_url: str
     comfy_dir: str
     cloud_base: str
@@ -172,6 +196,13 @@ class ImageAnswer(TypedDict):
 
     ok: bool
     path: str
+    """第一张的路径。**不是"就这一张"** —— 一次画几张看 :data:`COUNT_CHOICES`，
+    全部的在 ``paths`` 里。留着它是为了让老调用方（面板的预览、``last_path``）不用改。"""
+
+    paths: list[str]
+    """这一次落盘的全部图，按引擎给的顺序。回话里要把每一条都写出来 ——
+    前端是从回话文本里扫图片路径的，写几条它就画几张。"""
+
     engine: str
     prompt: str
     prompt_input: str
@@ -240,11 +271,16 @@ def build_workflow(
     steps: int,
     seed: int,
     filename_prefix: str,
+    batch: int = 1,
 ) -> dict[str, object]:
     """ComfyUI 的图。一张 SD1.5 的标准图，节点 id 用字符串数字（它要的那样）。
 
     写在这里而不是抄一份 JSON 文件：随包的 ComfyUI 换了节点名，单元测试会指着这一行说
     "positive 不是 ['2', 0] 了"，而埋在数据文件里的那份只会在用户按下去的时候崩。
+
+    ``batch`` 是一次采样出几张。**同一个种子出的是不同的图** —— SD1.5 的噪声张量是
+    ``(B, C, H, W)``，一炉里的每一张各拿一份噪声。r112 实测：4 张一炉 83.6 秒
+    （每张 20.9 秒），比跑四遍省，而且在 4 GB 卡上装得下（引擎占 2117 MiB、空闲 1979 MiB）。
     """
     return {
         "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": checkpoint}},
@@ -252,7 +288,7 @@ def build_workflow(
         "3": {"class_type": "CLIPTextEncode", "inputs": {"text": negative, "clip": ["1", 1]}},
         "4": {
             "class_type": "EmptyLatentImage",
-            "inputs": {"width": width, "height": height, "batch_size": 1},
+            "inputs": {"width": width, "height": height, "batch_size": max(1, batch)},
         },
         "5": {
             "class_type": "KSampler",
@@ -384,6 +420,8 @@ class ImageService:
                 "sizes": [{"size": item, "note": _size_note(item)} for item in SIZE_CHOICES],
                 "size": self._size(),
                 "steps": self._steps(),
+                "count": self._count(),
+                "counts": [{"count": item, "note": _count_note(item)} for item in COUNT_CHOICES],
                 "comfy_url": self._comfy_url(),
                 "comfy_dir": self._comfy_dir(),
                 "cloud_base": self._cloud_base(),
@@ -423,7 +461,10 @@ class ImageService:
         else:
             missing = "没配地址" if not self._cloud_base() else f"没配钥匙（{IMAGE_KEY_ENV}）"
             lines.append(f"云端：{missing}")
-        lines.append(f"尺寸 {self._size()}，步数 {self._steps()}。")
+        lines.append(
+            f"尺寸 {self._size()}，步数 {self._steps()}，"
+            f"一次画 {self._count()} 张（只对本地引擎）。"
+        )
         return "\n".join(lines)
 
     # -- 写 ---------------------------------------------------------------
@@ -458,6 +499,21 @@ class ImageService:
         self._prefs.set(IMAGE_STEPS, steps)
         return ""
 
+    def set_count(self, value: object) -> str:
+        # 这一格的规矩和另外三格不同：**留空＝不动**。另外三格留空会因为 int("") 报一句
+        # "要一个整数"，而这一格是后加的，老调用方（页面、脚本）不传它 —— 那种时候该
+        # 保持原样，不是把已有的张数清掉、也不是回一句没人看得懂的错。
+        if value is None or str(value).strip() == "":
+            return ""
+        try:
+            count = int(str(value).strip())
+        except ValueError:
+            return "张数要一个整数"
+        if count not in COUNT_CHOICES:
+            return f"张数只能是：{'、'.join(str(row) for row in COUNT_CHOICES)}"
+        self._prefs.set(IMAGE_COUNT, count)
+        return ""
+
     def set_comfy_url(self, value: object) -> str:
         text = str(value or "").strip()
         if text and not text.lower().startswith(("http://", "https://")):
@@ -488,7 +544,13 @@ class ImageService:
         return ""
 
     def generate(
-        self, prompt: str, *, zh: object = None, size: object = None, steps: object = None
+        self,
+        prompt: str,
+        *,
+        zh: object = None,
+        size: object = None,
+        steps: object = None,
+        count: object = None,
     ) -> ImageAnswer:
         """出一张图。**中文那句在这里展开成英文标签**，两条引擎、面板和工具都走这一步。
 
@@ -500,7 +562,7 @@ class ImageService:
         ``zh`` 是**用户原话**（只有对话那条路给得出来）。有它的时候词典先展开原话，
         再按 :func:`jarvis.app.image_prompt.merge` 的规矩和模型写的那串合并 —— r112 实拍
         「在月光下翩翩起舞的猪头人」，模型写的是 `pink pig, …`（一头粉猪），
-        词典对同一句给的是 `(pig head:1.4), humanoid, moonlight, dancing`。
+        词典对同一句给的是 `(pig head:1.4), anthropomorphic pig, humanoid, moonlight, dancing`。
         把用户原话顺着递下来，这一层才有机会用上它那张调过的表。
         """
         raw = str(prompt or "").strip()
@@ -519,13 +581,20 @@ class ImageService:
                 f"（{plan.note or '引擎的文本编码器只认英文标签'}）。"
                 "换个说法，或者直接把英文标签写给我。"
             )
-        answer = self._run(plan.prompt, size=size, steps=steps)
+        answer = self._run(plan.prompt, size=size, steps=steps, count=count)
         # 原话与"没翻出来的词"一起回：面板要把它显示出来，不许悄悄改写用户说的话。
         answer["prompt_input"] = native or raw
         answer["prompt_note"] = plan.note
         return answer
 
-    def _run(self, prompt: str, *, size: object = None, steps: object = None) -> ImageAnswer:
+    def _run(
+        self,
+        prompt: str,
+        *,
+        size: object = None,
+        steps: object = None,
+        count: object = None,
+    ) -> ImageAnswer:
         """出一张图。两条引擎都从这里出去，失败一定带一句能照着做的话。"""
         text = str(prompt or "").strip()
         if not text:
@@ -533,11 +602,17 @@ class ImageService:
         width, height = parse_size(size if size is not None else self._size())
         edge_size = f"{width}x{height}"
         step_count = self._parse_steps(steps)
+        # 张数只喂给本地那条：云端是 `n: 1` 写死的（见 `_generate_cloud`），
+        # 在这儿解析出来却只传半边，是为了让"要 4 张"在最上面那一层就被收下，
+        # 而不是等落到云端才发现自己白说了。
+        draw_count = self._parse_count(count)
         chosen = self._engine_choice()
         started = self._clock()
         if chosen in (Engine.AUTO.value, Engine.LOCAL.value):
             try:
-                answer = self._generate_local(text, edge_size, width, height, step_count, started)
+                answer = self._generate_local(
+                    text, edge_size, width, height, step_count, draw_count, started
+                )
             except _EngineError as exc:
                 # 逃出来的一句人话也要变成"没画成 + 那句话"，不是把栈抛给面板：
                 # 落盘失败（盘满、目录被删、路径过长）走的正是这条路，而那次的图是真的画好了。
@@ -568,7 +643,14 @@ class ImageService:
     # -- 本地：ComfyUI -----------------------------------------------------
 
     def _generate_local(
-        self, prompt: str, size: str, width: int, height: int, steps: int, started: float
+        self,
+        prompt: str,
+        size: str,
+        width: int,
+        height: int,
+        steps: int,
+        count: int,
+        started: float,
     ) -> ImageAnswer:
         probe = self._find_engine()
         with self._lock:
@@ -584,17 +666,23 @@ class ImageService:
         # （masterpiece/best quality 前置 + worst quality/low quality 负面），
         # 同一台引擎同一权重同一尺寸下"绿色占比"从 0.099 掉到 0.007，前置更惨（0.0003）。
         # 颜色都保不住，谈不上"质量"。要再动这两个参数，先按 N>=4 个种子重测。
-        graph = build_workflow(checkpoint, prompt, "", width, height, steps, seed, prefix)
+        graph = build_workflow(checkpoint, prompt, "", width, height, steps, seed, prefix, count)
         try:
             pid = self._submit(probe["url"], graph)
-            image = self._wait_for_image(probe["url"], pid)
+            drawn = self._wait_for_images(probe["url"], pid)
         except _EngineError as exc:
             return self._fail(str(exc))
-        if image is None:
+        if not drawn:
             return self._fail(f"{probe['url']} 那一边跑完了却没给出图片。")
-        filename, blob = image
-        path = self._save(filename, blob)
-        return self._ok(path, "local", prompt, size, steps, seed, started, blob)
+        # 一炉几张由引擎说了算：要了 4 张它给回 3 张时，如实存 3 张、如实回 3 条路径，
+        # 不补一个空位假装是 4 张。文件名是它自己编的（`…_00001_` 到 `…_00004_`），不撞。
+        paths: list[Path] = []
+        for filename, blob in drawn:
+            try:
+                paths.append(self._save(filename, blob))
+            except _EngineError as exc:
+                return self._fail(str(exc))
+        return self._ok(paths, "local", prompt, size, steps, seed, started, drawn[0][1])
 
     def _find_engine(self) -> ImageProbe:
         """找一个在答话的 ComfyUI。指了地址就只问那个，没指就按端口扫一遍。"""
@@ -698,11 +786,14 @@ class ImageService:
             raise _EngineError(f"{base} 收了图但没给 prompt_id：{str(answer)[:200]}")
         return pid
 
-    def _wait_for_image(self, base: str, pid: str) -> tuple[str, bytes] | None:
-        """轮询 ``/history/<id>`` 直到那条进了历史，然后取第一张图。
+    def _wait_for_images(self, base: str, pid: str) -> list[tuple[str, bytes]]:
+        """轮询 ``/history/<id>`` 直到那条进了历史，然后把这一炉**每一张**都取回来。
 
         进历史就意味着跑完了（成功或失败都在 ``status`` 里）。中途崩的引擎不给历史，
         所以这里必须有一条 900 秒的截止 —— 音色试听那回没有截止，界面就永远转圈。
+
+        为什么要取全部而不是第一张：一次采样出几张是这一版的事（:data:`COUNT_CHOICES`），
+        "只取第一张"会让那一炉白算 —— 用户付了 83.6 秒却只拿到一张。
         """
         deadline = self._clock() + GENERATE_DEADLINE_SECONDS
         with self._lock:
@@ -717,19 +808,21 @@ class ImageService:
                 images = _history_images(entry)
                 if not images:
                     raise _EngineError(f"引擎说这一张跑完了，却没出图：{_status_words(entry)}")
-                first = images[0]
-                blob = self._fetch(
-                    base
-                    + "/view?"
-                    + urllib.parse.urlencode(
-                        {
-                            "filename": str(first.get("filename", "")),
-                            "subfolder": str(first.get("subfolder", "")),
-                            "type": str(first.get("type", "output")),
-                        }
+                out: list[tuple[str, bytes]] = []
+                for image in images:
+                    blob = self._fetch(
+                        base
+                        + "/view?"
+                        + urllib.parse.urlencode(
+                            {
+                                "filename": str(image.get("filename", "")),
+                                "subfolder": str(image.get("subfolder", "")),
+                                "type": str(image.get("type", "output")),
+                            }
+                        )
                     )
-                )
-                return str(first.get("filename", "image.png")), blob
+                    out.append((str(image.get("filename", "image.png")), blob))
+                return out
             if self._proc is not None and self._proc.poll() is not None:
                 raise _EngineError(
                     f"本软件起的引擎退出了（退出码 {self._proc.poll()}）。"
@@ -830,14 +923,16 @@ class ImageService:
         blob, note = parse_cloud_answer(answer)
         if blob:
             path = self._save(f"xiaoye_cloud_{time.strftime('%Y%m%d-%H%M%S')}.png", blob)
-            return self._ok(path, "cloud", prompt, size, steps, seed, started, blob)
+            # 云端这条**只回一张**（`n: 1` 写死，见上面 body 那一行），
+            # 所以这里给 `_ok` 的是只有一项的列表 —— 面板那格「一次画几张」对它不生效。
+            return self._ok([path], "cloud", prompt, size, steps, seed, started, blob)
         if note.startswith("NEED_FETCH:"):
             try:
                 blob = self._fetch(note[len("NEED_FETCH:") :], timeout=CLOUD_TIMEOUT_SECONDS)
             except _EngineError as exc:
                 return self._fail(f"云端给了图片地址却取不下来：{exc}")
             path = self._save(f"xiaoye_cloud_{time.strftime('%Y%m%d-%H%M%S')}.png", blob)
-            return self._ok(path, "cloud", prompt, size, steps, seed, started, blob)
+            return self._ok([path], "cloud", prompt, size, steps, seed, started, blob)
         return self._fail(f"云端（{base}）：{note}")
 
     # -- 落盘与回话 --------------------------------------------------------
@@ -860,7 +955,7 @@ class ImageService:
 
     def _ok(
         self,
-        path: Path,
+        paths: list[Path],
         engine: str,
         prompt: str,
         size: str,
@@ -869,20 +964,24 @@ class ImageService:
         started: float,
         blob: bytes,
     ) -> ImageAnswer:
+        """``paths`` 是这一次落盘的全部图，``blob`` 是第一张的字节（面板那张小预览用）。"""
+        first = paths[0]
         seconds = round(self._clock() - started, 1)
         with self._lock:
             self._phase = "idle"
-            self._detail = f"存到 {path.name}"
-            self._last_path = str(path)
+            self._detail = f"存到 {first.name}" if len(paths) == 1 else f"存了 {len(paths)} 张"
+            self._last_path = str(first)
             self._last_seconds = seconds
             self._note = ""
         if not self._prefs.flag(IMAGE_KEEP_OUTPUT, default=True):
-            # 勾了"不留文件"：预览还是要给的，落盘那一份删掉，别在机器上留一堆图。
-            with contextlib.suppress(OSError):
-                path.unlink(missing_ok=True)
+            # 勾了"不留文件"：预览还是要给的，落盘那几份删掉，别在机器上留一堆图。
+            for path in paths:
+                with contextlib.suppress(OSError):
+                    path.unlink(missing_ok=True)
         return {
             "ok": True,
-            "path": str(path),
+            "path": str(first),
+            "paths": [str(path) for path in paths],
             "engine": engine,
             "prompt": prompt,
             "prompt_input": "",
@@ -904,6 +1003,7 @@ class ImageService:
         return {
             "ok": False,
             "path": "",
+            "paths": [],
             "engine": "",
             "prompt": "",
             "prompt_input": "",
@@ -931,6 +1031,16 @@ class ImageService:
     def _steps(self) -> int:
         steps = self._prefs.number(IMAGE_STEPS)
         return steps if MIN_STEPS <= steps <= MAX_STEPS else DEFAULT_STEPS
+
+    def _count(self) -> int:
+        pref = self._prefs.number(IMAGE_COUNT)
+        return _snap_count(pref, DEFAULT_COUNT) if pref else DEFAULT_COUNT
+
+    def _parse_count(self, value: object) -> int:
+        """工具传来的张数。留空＝用偏好那一档，给了数就收到最近的档位上。"""
+        if value is None or str(value).strip() == "":
+            return self._count()
+        return _snap_count(value, self._count())
 
     def _parse_steps(self, value: object) -> int:
         if value is None or str(value).strip() == "":
@@ -1220,6 +1330,33 @@ def _size_note(size: str) -> str:
     return notes.get(size, "")
 
 
+def _snap_count(value: object, fallback: int) -> int:
+    """把任意输入收到档位上。转不成整数就回退，能转就取**最近**的一档。
+
+    为什么不夹到区间里：档位是 1/2/4，夹的话 3 会被抬成 4 —— 而 4 是八十多秒。
+    并列时取小的那一档（3 → 2），便宜优先：多花一倍的等待换"多一张挑"这件事，
+    得是用户自己点出来的，不是软件替他猜出来的。
+    """
+    try:
+        count = int(str(value).strip())
+    except (TypeError, ValueError):
+        return fallback
+    return min(COUNT_CHOICES, key=lambda row: (abs(row - count), row))
+
+
+def _count_note(count: int) -> str:
+    """这一档的说明。量过的写「实测」，没单独量的按两头推、并在字面上写明是推的。"""
+    notes = {
+        1: "最快：512x512 二十步实测 22.4 秒。代价是——模型换个种子就会翻面，"
+        "一次只给一张，等于把那张错的直接交出去。",
+        2: "这一档没有单独量过：两头是 1 张 22.4 秒、4 张一炉 83.6 秒，"
+        "2 张按这两头推在 40~45 秒之间。比 1 张稳，比 4 张快。",
+        4: "实测 83.6 秒（每张 20.9 秒，一炉出的比跑四遍省），4 GB 卡上装得下。"
+        "一次给四张让你挑 —— 这是把「换种子就翻面」变成「挑一张」的办法。",
+    }
+    return notes.get(count, "")
+
+
 def _failed_probe(url: str, detail: str) -> ImageProbe:
     return {
         "kind": "comfyui",
@@ -1239,6 +1376,7 @@ def _user_agent() -> str:
 
 
 __all__ = [
+    "COUNT_CHOICES",
     "ENGINES",
     "IMAGE_KEY_ENV",
     "SIZE_CHOICES",

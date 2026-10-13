@@ -320,6 +320,13 @@ IMAGE_STEPS = "image.steps"
 """Sampler steps. A real cost knob: 20 steps measured 22 s on a GTX 1650, and the same
 card roughly triples that at 40 -- this is the difference between 「等一会儿」 and 「算了」."""
 
+IMAGE_COUNT = "image.count"
+"""How many candidates one local request draws. Also a real cost knob, and a *quality*
+one: the model flips between "a pig-headed humanoid" and "a girl with pig ears" from seed
+to seed, so one image means a real chance of handing the user the wrong one. Four measured
+83.6 s on a GTX 1650 (20.9 s each); one measured 22.4 s. Cloud endpoints ignore it --
+that path sends ``n: 1``."""
+
 IMAGE_KEEP_OUTPUT = "image.keep"
 
 KNOWLEDGE_AUTO_LEARN = "knowledge.auto_learn"
@@ -444,6 +451,7 @@ PREFERENCE_TYPES: dict[str, type] = {
     IMAGE_CLOUD_MODEL: str,
     IMAGE_SIZE: str,
     IMAGE_STEPS: int,
+    IMAGE_COUNT: int,
     IMAGE_KEEP_OUTPUT: bool,
     KNOWLEDGE_AUTO_LEARN: bool,
     KNOWLEDGE_AUTO_SEEN: list,

@@ -291,3 +291,30 @@ class TestThroughTheChatDoor:
         assert _artifacts_of("read_file", f"文件内容：存在：{fake}") == ()
         assert _artifacts_of("generate_image", "这一张没画成：本机没有答话的 ComfyUI") == ()
         assert _artifacts_of("generate_image", "画好了，存在：Z:\\没有这个文件.png（512）") == ()
+
+    def test_every_picture_in_a_multi_picture_turn_is_carried(self, tmp_path: Path) -> None:
+        """一次画几张时，回话里**每一条路径都要被认出来**。
+
+        r112 加「一次画几张」时，这条链的接口是"**按行**找「存在：」"：一炉 4 张写成
+        一行里四条路径的话，只有第一条会被交到页面上 —— 另外三张算出来了、也存下来了，
+        屏上却不显示。所以这条判据钉的是"四条一行都不少"，不是"含不含某条路径"。
+        """
+        from jarvis.app.chat_service import _artifacts_of
+
+        shots = []
+        for index in range(1, 5):
+            shot = tmp_path / f"xiaoye_1_{index:05d}_.png"
+            shot.write_bytes(b"x")
+            shots.append(shot)
+        reply = (
+            "画好了 4 张，挑一张用（每一张都能单独复制/打开）：\n"
+            + "\n".join(f"存在：{shot}" for shot in shots)
+            + "\n（512x512，20 步，本地 ComfyUI，用了 83.6 秒，种子 4242）。"
+        )
+        assert _artifacts_of("generate_image", reply) == tuple(str(shot) for shot in shots)
+        # 反过来说：挤在一行里就只剩一条 —— 这正是上面那个格式必须成立的原因。
+        # 分隔符用「，」而不是「、」：扫描器认的是「，」「。」「（」这几个，
+        # 拿它不认的符号去拼，只会拼出一条根本不存在的路径（认出来 0 条），
+        # 那不是"只剩一条"，是另一个错，测不到想测的那件事。
+        squeezed = "画好了，存在：" + "，".join(str(shot) for shot in shots)
+        assert len(_artifacts_of("generate_image", squeezed)) == 1

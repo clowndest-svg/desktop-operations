@@ -34,6 +34,8 @@ from jarvis.app import local_model, voice_cloud
 from jarvis.app.collaboration import MODE_BOSS, MODE_TABLE, MODE_VOTE
 from jarvis.app.endpoint_catalog import list_endpoint_models
 from jarvis.app.image_gen import (
+    COUNT_CHOICES,
+    DEFAULT_COUNT,
     DEFAULT_SIZE,
     DEFAULT_STEPS,
     ENGINES,
@@ -186,6 +188,14 @@ class ExtensionsSurface(Protocol):
     def set_layer_enabled(self, on: object) -> dict[str, object]: ...
 
     def remove_server(self, name: str, *, confirmed: object) -> dict[str, object]: ...
+
+    def recommended(self) -> dict[str, object]: ...
+
+    def detail(self, item_id: str) -> dict[str, object]: ...
+
+    def update(self, item_id: str) -> dict[str, object]: ...
+
+    def remove_item(self, item_id: str, *, confirmed: object) -> dict[str, object]: ...
 
 
 class McpSurface(Protocol):
@@ -366,6 +376,54 @@ def _extensions_empty(reason: str) -> dict[str, object]:
         "search": {"query": "", "items": [], "sources": [], "failures": []},
         "store_error": "",
         "log": [],
+        "verdicts": {},
+        "error": reason,
+    }
+
+
+def _recommended_empty(reason: str) -> dict[str, object]:
+    """推荐那一格读不到时的形状。**空列表必须带着一句原因回去**。
+
+    「这份清单没读到」和「没有推荐」在屏上要是长一样，用户就会去换关键词，
+    而该修的是网 —— 这一层反复付过账的就是这一笔。
+    """
+    return {"items": [], "error": reason, "at": 0.0, "where": ""}
+
+
+def _detail_empty(item_id: str, reason: str) -> dict[str, object]:
+    """详情卡读不到时的完整形状。少一个键，卡上那一块就不画，"为什么没有"就没人说。"""
+    return {
+        "found": False,
+        "id": item_id,
+        "item": {},
+        "installed": {
+            "yes": False,
+            "kind": "",
+            "name": "",
+            "slug": "",
+            "path": "",
+            "at": 0.0,
+            "files": [],
+            "digest": "",
+            "enabled": False,
+            "provenance": False,
+            "changed": False,
+            "connected": False,
+            "words": "",
+        },
+        "install": {"can": False, "words": reason},
+        "update": {"can": False, "words": reason},
+        "remove": {"can": False, "words": reason},
+        "runtime": {
+            "present": [],
+            "paths": {},
+            "labels": {},
+            "missing": ["node", "npx", "python", "uvx"],
+            "error": "",
+        },
+        "log": [],
+        "directory": "",
+        "servers_file": "",
         "error": reason,
     }
 
@@ -589,6 +647,8 @@ def _image_unavailable(detail: str) -> ImageStatus:
         "sizes": [{"size": item, "note": ""} for item in SIZE_CHOICES],
         "size": DEFAULT_SIZE,
         "steps": DEFAULT_STEPS,
+        "count": DEFAULT_COUNT,
+        "counts": [{"count": item, "note": ""} for item in COUNT_CHOICES],
         "comfy_url": "",
         "comfy_dir": "",
         "cloud_base": "",
@@ -610,6 +670,7 @@ def _image_answer_unavailable(detail: str) -> ImageAnswer:
     return {
         "ok": False,
         "path": "",
+        "paths": [],
         "engine": "",
         "prompt": "",
         "prompt_input": "",
@@ -1379,6 +1440,57 @@ class HudBridge:
         except Exception as exc:
             logger.exception("extension install failed")
             snapshot = _extensions_empty("装这一下失败了")
+            snapshot["error"] = f"{type(exc).__name__}: {exc}"
+            return snapshot
+
+    def extensions_recommended(self) -> dict[str, object]:
+        """打开扩展页就能看到的那几条推荐（读的是作者逐条验过的那份精选清单）。
+
+        读不到也回**一整份**并带着原因：那一格空着和"这台机器没有推荐"在屏上必须是两回事。
+        """
+        bridge = self._extensions
+        if bridge is None:
+            return _recommended_empty("这个进程没有接扩展这一层")
+        try:
+            return bridge.recommended()
+        except Exception as exc:
+            logger.exception("reading the recommended list failed")
+            return _recommended_empty(f"{type(exc).__name__}: {exc}")
+
+    def extensions_detail(self, item_id: str) -> dict[str, object]:
+        """点图标弹出来的那张详情卡要的全部东西。只认我们给出去的 id。"""
+        bridge = self._extensions
+        if bridge is None:
+            return _detail_empty(str(item_id or ""), "这个进程没有接扩展这一层")
+        try:
+            return bridge.detail(str(item_id or ""))
+        except Exception as exc:
+            logger.exception("reading one extension detail failed")
+            return _detail_empty(str(item_id or ""), f"{type(exc).__name__}: {exc}")
+
+    def extensions_update(self, item_id: str) -> dict[str, object]:
+        """更新这一条。判断不了的（旧版装的技能、每次现拉的 npm）后端会拒绝并说明原因。"""
+        bridge = self._extensions
+        if bridge is None:
+            return _extensions_empty("这个进程没有接扩展这一层")
+        try:
+            return bridge.update(str(item_id or ""))
+        except Exception as exc:
+            logger.exception("updating one extension failed")
+            snapshot = _extensions_empty("更新这一下失败了")
+            snapshot["error"] = f"{type(exc).__name__}: {exc}"
+            return snapshot
+
+    def extensions_remove_item(self, item_id: str, confirmed: object) -> dict[str, object]:
+        """从搜索结果或详情卡删掉这一条对应的东西。**名字由后端解析**，页面不拼。"""
+        bridge = self._extensions
+        if bridge is None:
+            return _extensions_empty("这个进程没有接扩展这一层")
+        try:
+            return bridge.remove_item(str(item_id or ""), confirmed=confirmed is True)
+        except Exception as exc:
+            logger.exception("removing one extension item failed")
+            snapshot = _extensions_empty("删这一条失败了")
             snapshot["error"] = f"{type(exc).__name__}: {exc}"
             return snapshot
 
@@ -3278,11 +3390,16 @@ class HudBridge:
             return _image_answer_unavailable("这个进程没有接生图服务")
         return self._images.generate(str(prompt or ""), size=str(size or "") or None)
 
-    def image_tune(self, engine: object, size: object, steps: object) -> ImageStatus:
-        """档位、尺寸、步数一次发齐。
+    def image_tune(
+        self, engine: object, size: object, steps: object, count: object = None
+    ) -> ImageStatus:
+        """档位、尺寸、步数、一次几张一次发齐。
 
         合在一扇门里是故意的：分开三扇，页面上任何一格回得慢一点就会把另一格刚选的值盖掉 ——
         投屏那两格（显示方式 + 拉伸）第 95 轮就是这么坏的。
+
+        ``count`` 有默认值，为的是**老调用方不传它时不是报错、也不是被清零**：
+        少给一格参数就该"这一格不动"，不是"张数变成空"。``set_count`` 那边按同一句话实现。
         """
         if self._images is None:
             return _image_unavailable("这个进程没有接生图服务")
@@ -3292,6 +3409,7 @@ class HudBridge:
                 self._images.set_choice(engine),
                 self._images.set_size(size),
                 self._images.set_steps(steps),
+                self._images.set_count(count),
             )
             if text
         ]
