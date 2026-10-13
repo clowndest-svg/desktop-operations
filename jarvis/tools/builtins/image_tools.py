@@ -37,7 +37,7 @@ class ImageEngineSurface(Protocol):
     def capabilities(self) -> str: ...
 
     def generate(
-        self, prompt: str, *, size: object = None, steps: object = None
+        self, prompt: str, *, zh: object = None, size: object = None, steps: object = None
     ) -> Mapping[str, object]: ...
 
 
@@ -63,10 +63,15 @@ def _words(answer: Mapping[str, object]) -> str:
 def _generate(engine: ImageEngineSurface) -> ToolHandler:
     def handler(arguments: Mapping[str, object]) -> str:
         prompt = str(arguments.get("prompt") or "").strip()
+        # 用户原话原封不动往下递。模型翻错过主体（r112 实拍「猪头人」→ `pink pig`），
+        # 而词典里那张表是对着这台引擎的权重调过的 —— 服务层要有原话才有机会用上它。
+        zh = str(arguments.get("zh") or "").strip()
         size = arguments.get("size")
         if not prompt:
             return "要一句画什么的描述，不能空着。"
-        return _words(engine.generate(prompt, size=size if isinstance(size, str) else None))
+        return _words(
+            engine.generate(prompt, zh=zh or None, size=size if isinstance(size, str) else None)
+        )
 
     return handler
 
@@ -86,11 +91,16 @@ _SPECS: Final[tuple[tuple[ToolSpec, str], ...]] = (
             description=(
                 "按一句话生成一张图片，存到本机「生图」目录并回一个路径。用户说「画一张…」"
                 "「生成一张…的图」「给我做个头像/壁纸」，或者任何让你画点什么的说法，都用这一条。"
-                "**调之前先把用户那句话扩写成英文标签**：引擎那边的文本编码器只认英文，"
-                "中文整句对它约等于没听见（实测「生成一个绿色的哥布林」出来的是一张动漫美女）。"
-                "顺序是 主体 → 主体的关键属性（颜色这类写在名词前面，必要时重复一次）→ 场景 → "
-                "光照 → 风格/媒介；逗号分隔的短语，不要写完整句子，也不要加用户没提的人物或性别。"
-                "用户说得很随便时，由你补成一句具体能画的描述。"
+                "**两个参数都要给**：`zh` 是用户原话（一个字不改，连标点都照抄），"
+                "`prompt` 是你把那句话扩写成的英文标签串。软件会拿 `zh` 过一遍本机那张"
+                "中文→标签表（它对这台引擎的权重调过），认得主体就用表里的，认不出来才用你写的。"
+                "`zh` 漏了不会报错，但那张表就用不上了，所以**每次都带上**。"
+                "`prompt` 里**不许留汉字**：引擎的文本编码器只认英文，漏进去的汉字会被逐字拆开"
+                "变成噪声（实测一句话漏了 21 个字，画出来是一团粉色色块）。整句中文翻不动的词，"
+                "宁可不写，也不要原样抄进 `prompt`。"
+                "英文标签的顺序是 主体 → 主体的关键属性（颜色这类写在名词前面，必要时重复一次）→ "
+                "场景 → 光照 → 风格/媒介；逗号分隔的短语，不要写完整句子，也不要加用户没提的"
+                "人物或性别。用户说得很随便时，由你补成一句具体能画的描述。"
                 "size 可留空，留空用软件记着的那一档。"
             ),
             parameters=object_schema(
@@ -98,6 +108,10 @@ _SPECS: Final[tuple[tuple[ToolSpec, str], ...]] = (
                     "prompt": string_property(
                         "扩写后的英文标签串，例如 green goblin, green skin, muscular, "
                         "pointed ears, standing, dark forest, moonlight, fantasy illustration"
+                        "（只能有英文，不要夹汉字）"
+                    ),
+                    "zh": string_property(
+                        "用户原话，一个字不改，例如 生成一张在月光下翩翩起舞的猪头人"
                     ),
                     "size": string_property("宽x高，例如 512x512 / 768x768 / 1024x1024，可留空"),
                 },

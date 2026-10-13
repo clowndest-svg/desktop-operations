@@ -18,16 +18,39 @@ from __future__ import annotations
 
 import threading
 import time
+from typing import NamedTuple
 
 import pytest
 
 from jarvis.tools.monitor import (
+    CPU_BASELINE_MAX_AGE_SECONDS,
+    CPU_SAMPLE_SECONDS,
     PROCESS_CPU_WINDOW_SECONDS,
     ProcessReading,
     SystemMonitor,
     SystemSnapshot,
 )
 from jarvis.tools.proctable import ProcessSample
+
+
+class _CpuTimes(NamedTuple):
+    """One core's cumulative times, shaped like psutil's Windows ``scputimes``."""
+
+    user: float
+    system: float
+    idle: float
+
+
+def _frozen_times(cores: int) -> tuple[_CpuTimes, ...]:
+    """Counters that never move, for the doubles below.
+
+    A psutil whose ``cpu_times`` stands still is a machine where no CPU time passed
+    between two reads, and the monitor's answer to that is to stop differencing and
+    take a sampled reading instead -- which is the path every double in this file
+    was written against, so their scripted ``cpu_percent`` lines keep advancing one
+    step per snapshot. The cheap differencing path has its own doubles, below.
+    """
+    return tuple(_CpuTimes(user=1.0, system=1.0, idle=8.0) for _ in range(cores))
 
 
 class _FakeTable:
@@ -58,6 +81,9 @@ class _UnusablePs:
     def cpu_percent(self, interval: float | None = None, *, percpu: bool = False) -> object:
         return [0.0] * 4 if percpu else 0.0
 
+    def cpu_times(self, *, percpu: bool = False) -> tuple[_CpuTimes, ...]:
+        return _frozen_times(4)
+
     def cpu_count(self) -> int:
         return 4
 
@@ -75,6 +101,9 @@ class _FakePs:
 
     def cpu_percent(self, interval: float | None = None, *, percpu: bool = False) -> object:
         return [0.0, 0.0] if percpu else 0.0
+
+    def cpu_times(self, *, percpu: bool = False) -> tuple[_CpuTimes, ...]:
+        return _frozen_times(2)
 
     def cpu_count(self) -> int:
         return 4
@@ -341,6 +370,9 @@ class _NetPs:
     def cpu_percent(self, interval: float | None = None, *, percpu: bool = False) -> object:
         return [0.0, 0.0] if percpu else 0.0
 
+    def cpu_times(self, *, percpu: bool = False) -> tuple[_CpuTimes, ...]:
+        return _frozen_times(2)
+
     def cpu_count(self) -> int:
         return 2
 
@@ -541,25 +573,18 @@ class TestTheMachineCpuRead:
     before read 0.0 (measured: four fresh threads read ``[100.0, 100.0, 0.0, 0.0]``,
     and ``percpu=True`` returned a row of zeros every time). No fake psutil can
     reproduce that, so this one drives the real library.
+
+    These pin the *property* rather than the call that used to deliver it. The first
+    cut asserted "every ``cpu_percent`` is asked with a positive interval", which was
+    true of the fix available at the time and false of a cheaper one that holds the
+    guarantee better: the monitor now keeps the baseline itself and only sleeps to
+    prime it. What has to stay true is what the operator sees -- a reading on the
+    first poll, and the same reading no matter which thread asked.
     """
 
-    def test_the_read_never_relies_on_the_thread_local_baseline(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        import psutil
-
-        seen: list[float | None] = []
-        real = psutil.cpu_percent
-
-        def spy(interval: float | None = None, *, percpu: bool = False) -> object:
-            seen.append(interval)
-            return real(interval=interval, percpu=percpu)
-
-        monkeypatch.setattr(psutil, "cpu_percent", spy)
-
+    def test_a_fresh_monitors_first_read_is_a_reading(self) -> None:
         # 一台完全空闲的机器读出来就是 0.0 —— 那是真话，不是这条测试要抓的东西。
-        # 想钉的是"这一格读的是刚采的 0.05 秒，不是某个线程从没问过的基线"，
-        # 所以自己造一点负载再读：忙碌的机器不会被读成 0。
+        # 想钉的是"第一帧就有数"，所以自己造一点负载再读：忙碌的机器不会被读成 0。
         stop = time.monotonic() + 0.4
         burn = threading.Thread(target=lambda: _spin_until(stop))
         burn.start()
@@ -568,17 +593,75 @@ class TestTheMachineCpuRead:
         finally:
             burn.join(timeout=5)
 
-        assert seen, "the snapshot must ask for a CPU reading at all"
-        assert all(
-            value is not None and value > 0 for value in seen
-        ), "interval=None means 'since the last call on this thread', which is the bug"
-        assert snapshot.cpu.percent > 0.0
+        assert snapshot.cpu.percent > 0.0, "a first poll that reads 0 is the priming zero"
         assert len(snapshot.cpu.per_core) >= 1
+
+    def test_a_poll_from_a_brand_new_thread_still_reads_the_machine(self) -> None:
+        """The reported bug, reproduced the way the thread pool caused it.
+
+        One monitor, polled twice, the second time from a thread that has never asked
+        psutil anything. Under ``interval=None`` that second read is 0.0 whatever the
+        machine is doing; against a baseline the monitor owns, the thread does not
+        come into it.
+        """
+        monitor = SystemMonitor(top_processes=0)
+        stop = time.monotonic() + 0.6
+        burn = threading.Thread(target=lambda: _spin_until(stop))
+        burn.start()
+        try:
+            monitor.snapshot()  # primes the baseline, on *this* thread
+            time.sleep(0.1)  # 让基线和第二次读之间真的过去一点时间
+            from_pool: list[float] = []
+            poller = threading.Thread(
+                target=lambda: from_pool.append(monitor.snapshot().cpu.percent)
+            )
+            poller.start()
+            poller.join(timeout=5)
+        finally:
+            burn.join(timeout=5)
+
+        assert from_pool, "the second poll never finished"
+        assert from_pool[0] > 0.0, "0% from a fresh thread is the thread-local baseline again"
+
+    def test_only_the_priming_read_sleeps(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The 50 ms is paid once per monitor, not once per poll.
+
+        Measured before this changed: ``snapshot()`` cost 68 ms, 50.60 ms of which was
+        this sleep, every 1.5 s for as long as the window was open.
+        """
+        import psutil
+
+        sampled: list[float | None] = []
+        real = psutil.cpu_percent
+
+        def spy(interval: float | None = None, *, percpu: bool = False) -> object:
+            sampled.append(interval)
+            return real(interval=interval, percpu=percpu)
+
+        monkeypatch.setattr(psutil, "cpu_percent", spy)
+
+        monitor = SystemMonitor(top_processes=0)
+        monitor.snapshot()
+        assert len(sampled) == 1, "the first read has to prime with a real sample"
+
+        worst = 0.0
+        for _ in range(3):
+            # Windows counts CPU time in ~15.6 ms ticks, so two polls in the same tick
+            # have nothing to difference and fall back to sampling -- correct, and not
+            # what a 1.5 s cadence looks like. Wait a few ticks, like the page does.
+            time.sleep(0.1)
+            started = time.monotonic()
+            monitor.snapshot()
+            worst = max(worst, time.monotonic() - started)
+
+        assert len(sampled) == 1, f"the sampled call is the priming one only, saw {sampled}"
+        assert sampled[0] is not None and sampled[0] > 0, "priming must not use interval=None"
+        assert worst < CPU_SAMPLE_SECONDS, f"a poll still cost {worst * 1000:.1f} ms"
 
     def test_the_machine_number_is_the_mean_of_the_cores(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """One sampled call answers both, so ring and bars cannot disagree."""
+        """One reading answers both, so ring and bars cannot disagree."""
         import psutil
 
         monkeypatch.setattr(psutil, "cpu_percent", lambda interval=None, percpu=False: [40.0, 20.0])
@@ -587,3 +670,100 @@ class TestTheMachineCpuRead:
 
         assert snapshot.cpu.percent == pytest.approx(30.0)
         assert snapshot.cpu.per_core == (40.0, 20.0)
+
+
+class _TickingPs:
+    """A psutil whose ``cpu_times`` advance by a scripted (busy, idle) step per read.
+
+    The opposite of the doubles at the top of this file: they freeze their counters to
+    stay on the sampled path, and this one exists to drive the differencing path, where
+    the number on screen comes from two rows the monitor held itself. ``cpu_percent``
+    answers a value no real machine would produce, so a reading that came from the
+    sampled call is unmistakable.
+    """
+
+    PRIMED = 11.0
+
+    def __init__(self, steps: list[tuple[float, float]]) -> None:
+        self._steps = steps
+        self._reads = 0
+        self._busy = 0.0
+        self._idle = 0.0
+        self.sampled = 0
+
+    def cpu_times(self, *, percpu: bool = False) -> tuple[_CpuTimes, ...]:
+        del percpu
+        if self._reads < len(self._steps):
+            busy, idle = self._steps[self._reads]
+            self._busy += busy
+            self._idle += idle
+        self._reads += 1
+        return (_CpuTimes(user=self._busy, system=0.0, idle=self._idle),)
+
+    def cpu_percent(self, interval: float | None = None, *, percpu: bool = False) -> object:
+        del interval
+        self.sampled += 1
+        return [self.PRIMED] if percpu else self.PRIMED
+
+    def cpu_count(self) -> int:
+        return 1
+
+
+class TestTheBaselineTheMonitorOwns:
+    """The differencing path: what the HUD reads on every poll after the first."""
+
+    def test_the_share_is_busy_over_total_between_two_rows(self) -> None:
+        """psutil's own arithmetic, so switching paths does not move the gauge."""
+        ps = _TickingPs([(0.0, 0.0), (30.0, 70.0), (90.0, 10.0)])
+        monitor = SystemMonitor(top_processes=0, psutil_module=ps)  # type: ignore[arg-type]
+
+        assert monitor.snapshot().cpu.percent == pytest.approx(ps.PRIMED)
+        assert monitor.snapshot().cpu.percent == pytest.approx(30.0)
+        assert monitor.snapshot().cpu.percent == pytest.approx(90.0)
+        assert ps.sampled == 1, "only the priming read is allowed to sleep"
+
+    def test_counters_that_did_not_move_are_sampled_instead_of_read_as_idle(self) -> None:
+        """Two polls inside one clock tick have nothing to difference.
+
+        ``[0.0, 0.0, 0.0]`` from three reads microseconds apart is the shape of the
+        original bug; the honest answer there is to sample, not to print 0%.
+        """
+        ps = _TickingPs([(0.0, 0.0), (0.0, 0.0)])
+        monitor = SystemMonitor(top_processes=0, psutil_module=ps)  # type: ignore[arg-type]
+
+        monitor.snapshot()
+        assert monitor.snapshot().cpu.percent == pytest.approx(ps.PRIMED)
+        assert ps.sampled == 2
+
+    def test_a_baseline_older_than_the_limit_is_thrown_away(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An average over the gap is arithmetic; printed as "现在" it is a lie.
+
+        The machine slept, or the page stopped polling. The scripted step says the CPU
+        was pinned for the whole gap -- which is true of the gap and says nothing about
+        this moment, so the reading has to come from a fresh sample.
+        """
+        clock = {"now": 1000.0}
+        monkeypatch.setattr("jarvis.tools.monitor.time.monotonic", lambda: clock["now"])
+        ps = _TickingPs([(0.0, 0.0), (100.0, 0.0)])
+        monitor = SystemMonitor(top_processes=0, psutil_module=ps)  # type: ignore[arg-type]
+
+        monitor.snapshot()
+        clock["now"] += CPU_BASELINE_MAX_AGE_SECONDS + 1.0
+
+        assert monitor.snapshot().cpu.percent == pytest.approx(ps.PRIMED)
+        assert ps.sampled == 2
+
+    def test_a_gap_inside_the_limit_is_differenced(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The slowest cadence the settings panel allows (60 s) still rides free."""
+        clock = {"now": 1000.0}
+        monkeypatch.setattr("jarvis.tools.monitor.time.monotonic", lambda: clock["now"])
+        ps = _TickingPs([(0.0, 0.0), (100.0, 0.0)])
+        monitor = SystemMonitor(top_processes=0, psutil_module=ps)  # type: ignore[arg-type]
+
+        monitor.snapshot()
+        clock["now"] += 60.0
+
+        assert monitor.snapshot().cpu.percent == pytest.approx(100.0)
+        assert ps.sampled == 1

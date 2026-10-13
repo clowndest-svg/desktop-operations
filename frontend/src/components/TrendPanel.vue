@@ -45,8 +45,7 @@
  * actual time span, and what the top of the scale means.
  */
 import { computed, ref, watch } from 'vue'
-import type { EChartsOption } from 'echarts'
-import { useChart } from '@/composables/useChart'
+import { useChart, type ChartOption } from '@/composables/useChart'
 import { useSystemStore } from '@/stores/system'
 
 const store = useSystemStore()
@@ -104,7 +103,7 @@ const cpuKeyHint = computed(
     '不是死机。第一次读数没有可比较的前一个样本，所以先显示 --。',
 )
 
-const option = computed<EChartsOption>(() => ({
+const option = computed<ChartOption>(() => ({
   animation: false,
   grid: { top: 18, right: 12, bottom: 20, left: 34 },
   // Off was the original setting, and it is why the chart could not be read: with
@@ -161,7 +160,14 @@ const option = computed<EChartsOption>(() => ({
 
 const { chart } = useChart(canvas, () => option.value)
 
-watch(option, (next) => chart.value?.setOption(next), { deep: true })
+/*
+ * No `deep: true`. `option` is a computed that rebuilds the whole object every run,
+ * so the watcher already fires on identity -- and the dependencies are the ones the
+ * computed collected for itself (`store.cpuHistory` / `memoryHistory`). Walking the
+ * tree again every 1.5 s bought nothing: two 60-point arrays and a dozen nested
+ * style objects, traversed for a change that had already been detected.
+ */
+watch(option, (next) => chart.value?.setOption(next))
 </script>
 
 <style scoped>

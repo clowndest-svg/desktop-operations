@@ -38,7 +38,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final, Protocol, TypedDict
 
-from jarvis.app.image_prompt import expand
+from jarvis.app.image_prompt import expand, expand_model, merge
 from jarvis.app.preferences import (
     IMAGE_CLOUD_BASE,
     IMAGE_CLOUD_MODEL,
@@ -487,19 +487,41 @@ class ImageService:
         self._prefs.set(IMAGE_CLOUD_MODEL, str(model or "").strip())
         return ""
 
-    def generate(self, prompt: str, *, size: object = None, steps: object = None) -> ImageAnswer:
+    def generate(
+        self, prompt: str, *, zh: object = None, size: object = None, steps: object = None
+    ) -> ImageAnswer:
         """出一张图。**中文那句在这里展开成英文标签**，两条引擎、面板和工具都走这一步。
 
         为什么做在服务层而不是面板里：对话那条路一直是模型先把中文扩写成英文标签再调
-        ``generate_image``（r105 的工具描述硬性要求），面板却把用户原话一个字不改送进
-        ``CLIPTextEncode`` —— 同一句「画一个绿色瘦弱的哥布林」在那边画对了、在这边画成了
-        动漫美女。差的是同一层展开，不是同一个模型。
+        ``generate_image``，面板却把用户原话一个字不改送进 ``CLIPTextEncode`` ——
+        同一句「画一个绿色瘦弱的哥布林」在那边画对了、在这边画成了动漫美女。
+        差的是同一层展开，不是同一个模型。
+
+        ``zh`` 是**用户原话**（只有对话那条路给得出来）。有它的时候词典先展开原话，
+        再按 :func:`jarvis.app.image_prompt.merge` 的规矩和模型写的那串合并 —— r112 实拍
+        「在月光下翩翩起舞的猪头人」，模型写的是 `pink pig, …`（一头粉猪），
+        词典对同一句给的是 `(pig head:1.4), humanoid, moonlight, dancing`。
+        把用户原话顺着递下来，这一层才有机会用上它那张调过的表。
         """
         raw = str(prompt or "").strip()
-        plan = expand(raw)
+        native = str(zh or "").strip()
+        # `zh` 在的时候 `raw` 是模型写的那串，里面的汉字一定是它拆碎原话漏下来的残渣
+        # （工具那张表就是让它把中文放进 `zh` 的）。`expand_model` 先把残渣抹掉再展开：
+        # 不然词典会把残渣当正经词吃成标签 —— r112 实拍那串里「头 饰」「温 暖」「童 话」
+        # 就变成了 hair ornament / warm lighting / fairytale，其中一个还和 moonlight 打架。
+        plan = merge(expand(native), expand_model(raw)) if native and native != raw else expand(raw)
+        if raw and not plan.prompt:
+            # 展开完是空的：这一句里**一个词都没认出来**。r112 之前这里会把原话原样递给
+            # 引擎，于是一串汉字进了 CLIPTextEncode 画出一团噪声，还报成功。
+            # 说不出来就说不出来，别拿噪声冒充能力。
+            return self._fail(
+                "这句话我一个词都没翻成英文标签，没有东西能递给引擎"
+                f"（{plan.note or '引擎的文本编码器只认英文标签'}）。"
+                "换个说法，或者直接把英文标签写给我。"
+            )
         answer = self._run(plan.prompt, size=size, steps=steps)
         # 原话与"没翻出来的词"一起回：面板要把它显示出来，不许悄悄改写用户说的话。
-        answer["prompt_input"] = raw
+        answer["prompt_input"] = native or raw
         answer["prompt_note"] = plan.note
         return answer
 

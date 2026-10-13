@@ -410,10 +410,17 @@ class TestChineseBecomesTags:
         assert answer.unknown, "认不出来却不说 = 用户以为引擎听见了"
         assert "没翻出来" in answer.note
 
-    def test_a_sentence_nothing_matches_is_left_alone(self) -> None:
+    def test_a_sentence_nothing_matches_gets_no_prompt_at_all(self) -> None:
+        """一个词都认不出来时回**空串**，不是回原话。
+
+        r112 之前这里回的是原话，于是一串汉字原样进了 ``CLIPTextEncode``。
+        那不是"原样退回"，是"把噪声当提示词送出去"——从 PNG 里读出来的现场是
+        ``pink pig, …, 头 人 起 舞 头 饰 随 舞 动 …``，画出来一团粉色色块。
+        空串让服务层能拦住它并说实话；回原话只会让它报成功。
+        """
         from jarvis.app.image_prompt import expand
 
-        assert expand("这张不画").prompt == "这张不画", "一个词都没认出来时不许拼半句英文糊弄"
+        assert expand("这张不画").prompt == "", "一个词都没认出来时不许把汉字当提示词送出去"
 
     def test_measure_words_do_not_become_part_of_the_picture(self) -> None:
         from jarvis.app.image_prompt import expand
@@ -451,14 +458,14 @@ class TestLocalGenerate:
     def test_the_seed_and_seconds_come_back_for_a_reason(self, hub: Harness) -> None:
         """回话里的数必须是引擎真用过的 —— "就刚才那张再来一遍"要能对上。"""
         hub.use_local()
-        answer = hub.service.generate("同一个种子再来一次")
+        answer = hub.service.generate("同一只猫再来一次")
         assert answer["seed"] == hub.engine.submitted["seed"]
         assert answer["seconds"] >= 0
 
     def test_a_rejected_prompt_says_so_with_the_address(self, hub: Harness) -> None:
         hub.use_local()
         hub.engine.prompt_status = 500
-        answer = hub.service.generate("这张它不画")
+        answer = hub.service.generate("这只猫它不画")
         assert answer["ok"] is False
         assert hub.url in answer["error"]
         assert answer["path"] == ""
@@ -466,7 +473,7 @@ class TestLocalGenerate:
     def test_finished_without_an_image_is_not_called_success(self, hub: Harness) -> None:
         hub.use_local()
         hub.engine.history_outputs = False
-        answer = hub.service.generate("没出图")
+        answer = hub.service.generate("没出图的猫")
         assert answer["ok"] is False
         assert "没出图" in answer["error"]
 
@@ -484,7 +491,7 @@ class TestLocalGenerate:
     def test_keep_turned_off_removes_the_file_but_keeps_the_preview(self, hub: Harness) -> None:
         hub.use_local()
         hub.prefs.set(IMAGE_KEEP_OUTPUT, False)
-        answer = hub.service.generate("不留文件")
+        answer = hub.service.generate("不留文件的猫")
         assert answer["ok"] is True
         assert answer["preview"].startswith("data:image/")
         assert not Path(answer["path"]).exists()
@@ -493,13 +500,13 @@ class TestLocalGenerate:
         hub.use_local()
         assert hub.service.set_size("768x768") == ""
         assert hub.service.set_steps(30) == ""
-        answer = hub.service.generate("按记着的档位画")
+        answer = hub.service.generate("按记着的档位画一只猫")
         assert answer["size"] == "768x768"
         assert hub.engine.submitted["steps"] == 30
 
     def test_the_status_snapshot_carries_the_last_run(self, hub: Harness) -> None:
         hub.use_local()
-        hub.service.generate("记一下这次")
+        hub.service.generate("记一下这只猫")
         status = hub.service.status()
         assert status["last_path"] and status["last_seconds"] >= 0
         assert status["error"] == ""
@@ -533,7 +540,7 @@ class TestStartEngine:
         hub.dead_address()
         hub.service.set_comfy_dir(str(hub.fake_comfyui_on_disk(tmp_path)))
         hub.proc.exit_code = 3
-        answer = hub.service.generate("起不来的那张")
+        answer = hub.service.generate("起不来的那只猫")
         assert answer["ok"] is False
         assert hub.spawned, "指了目录就该真去起一次"
         argv = hub.spawned[0][0]
@@ -541,7 +548,7 @@ class TestStartEngine:
 
     def test_no_directory_means_no_process_is_forked(self, hub: Harness) -> None:
         hub.dead_address()
-        answer = hub.service.generate("没指目录")
+        answer = hub.service.generate("没指目录的猫")
         assert answer["ok"] is False and hub.spawned == []
         assert "要么" in answer["error"], "被拒时必须给出下一步，不是只剩一句连不上"
 
@@ -553,7 +560,7 @@ class TestStartEngine:
         hub.dead_address()
         hub.service.set_comfy_dir(str(hub.fake_comfyui_on_disk(tmp_path)))
         hub.proc.exit_code = None  # 活着，但永远不答话
-        answer = hub.service.generate("起活了但不理人")
+        answer = hub.service.generate("起活了但不理人的猫")
         assert answer["ok"] is False
         assert hub.spawned, "指了目录就该真去起一次"
         hub.service.stop()
@@ -565,7 +572,7 @@ class TestCloud:
 
     def test_the_key_travels_in_a_header_and_nowhere_else(self, hub: Harness) -> None:
         hub.use_cloud()
-        answer = hub.service.generate("云端的一张")
+        answer = hub.service.generate("云端的那只猫")
         assert answer["ok"] is True, answer["error"]
         assert hub.engine.cloud_headers[-1]["authorization"] == "Bearer sk-test-key"
         assert "sk-test" not in json.dumps(hub.engine.cloud_bodies[-1]), "钥匙不许混进请求体"
@@ -575,25 +582,25 @@ class TestCloud:
     def test_a_url_instead_of_bytes_gets_fetched(self, hub: Harness) -> None:
         hub.use_cloud()
         hub.engine.cloud_mode = "url"
-        answer = hub.service.generate("只给链接的那家")
+        answer = hub.service.generate("只给链接的那只猫")
         assert answer["ok"] is True, answer["error"]
         assert Path(answer["path"]).read_bytes() == PNG
 
     def test_a_401_names_the_variable_to_fill(self, hub: Harness) -> None:
         hub.use_cloud()
         hub.engine.cloud_status = 401
-        answer = hub.service.generate("没钱的云端")
+        answer = hub.service.generate("没钱的云端画只猫")
         assert IMAGE_KEY_ENV in answer["error"], "要说出该填哪个环境变量，不是丢一句「鉴权失败」"
 
     def test_an_empty_data_array_is_not_reported_as_a_picture(self, hub: Harness) -> None:
         hub.use_cloud()
         hub.engine.cloud_mode = "empty"
-        answer = hub.service.generate("这张被过滤了")
+        answer = hub.service.generate("这只猫被过滤了")
         assert answer["ok"] is False and answer["path"] == ""
 
     def test_no_base_url_means_not_one_request_leaves(self, hub: Harness) -> None:
         hub.prefs.set(IMAGE_ENGINE, "cloud")
-        answer = hub.service.generate("没配地址")
+        answer = hub.service.generate("没配地址的猫")
         assert answer["ok"] is False
         assert hub.engine.cloud_bodies == []
         assert "服务地址" in answer["error"]
@@ -603,7 +610,7 @@ class TestCloud:
         hub.prefs.set(IMAGE_ENGINE, "cloud")
         hub.prefs.set(IMAGE_CLOUD_BASE, hub.url + "/v1")
         hub.service._environ = {}
-        answer = hub.service.generate("只有地址没有钥匙")
+        answer = hub.service.generate("只有地址没有钥匙的猫")
         assert answer["ok"] is False
         assert IMAGE_KEY_ENV in answer["error"], answer["error"]
         assert hub.engine.cloud_bodies == []
@@ -615,14 +622,14 @@ class TestCloud:
     def test_the_size_sent_to_the_cloud_is_a_supported_one(self, hub: Harness) -> None:
         hub.use_cloud()
         hub.service.set_size("768x768")
-        hub.service.generate("云端按档位来")
+        hub.service.generate("云端按档位画猫")
         assert hub.engine.cloud_bodies[-1]["size"] == "768x768"
 
     def test_a_key_with_chinese_in_it_is_refused_not_crashed(self, hub: Harness) -> None:
         """钥匙里粘进中文：要给一句能照着做的话，不是把 UnicodeEncodeError 抛到界面上。"""
         hub.use_cloud()
         hub.service._environ = cast(Any, {IMAGE_KEY_ENV: "sk-我的钥匙"})
-        answer = hub.service.generate("中文钥匙")
+        answer = hub.service.generate("中文钥匙配只猫")
         assert answer["ok"] is False
         assert "ASCII" in answer["error"]
         assert hub.engine.cloud_bodies == [], "这种钥匙根本不该发出去"
@@ -635,13 +642,13 @@ class TestAutoOrder:
         hub.prefs.set(IMAGE_ENGINE, "auto")
         hub.prefs.set(IMAGE_COMFY_URL, hub.url)
         hub.prefs.set(IMAGE_CLOUD_BASE, hub.url + "/v1")
-        assert hub.service.generate("自动这一档")["engine"] == "local"
+        assert hub.service.generate("自动这一档的猫")["engine"] == "local"
 
     def test_a_broken_local_falls_back_to_cloud(self, hub: Harness) -> None:
         hub.prefs.set(IMAGE_ENGINE, "auto")
         hub.prefs.set(IMAGE_COMFY_URL, "http://127.0.0.1:1")
         hub.prefs.set(IMAGE_CLOUD_BASE, hub.url + "/v1")
-        answer = hub.service.generate("本机没了，云端顶上")
+        answer = hub.service.generate("本机没了云端顶上画猫")
         assert answer["ok"] is True and answer["engine"] == "cloud"
 
     def test_local_only_never_leaks_to_the_cloud(self, hub: Harness) -> None:
@@ -649,7 +656,7 @@ class TestAutoOrder:
         hub.prefs.set(IMAGE_ENGINE, "local")
         hub.prefs.set(IMAGE_COMFY_URL, "http://127.0.0.1:1")
         hub.prefs.set(IMAGE_CLOUD_BASE, hub.url + "/v1")
-        answer = hub.service.generate("只许本地")
+        answer = hub.service.generate("只许本地的猫")
         assert answer["ok"] is False
         assert hub.engine.cloud_bodies == []
         assert "本地没走通" not in answer["error"], "local 档不该去检查云端有没有配好"
@@ -658,9 +665,68 @@ class TestAutoOrder:
     def test_two_holes_are_explained_in_one_sentence(self, hub: Harness) -> None:
         hub.prefs.set(IMAGE_ENGINE, "auto")
         hub.prefs.set(IMAGE_COMFY_URL, "http://127.0.0.1:1")
-        answer = hub.service.generate("两边都没有")
+        answer = hub.service.generate("两边都没有的猫")
         assert answer["ok"] is False
         assert "本地没走通" in answer["error"] and "云端" in answer["error"]
+
+
+class TestTheUsersOwnWordsReachTheEngine:
+    """用户原话要**顺着工具递到引擎前面那一层**，不然词典那张表白调。
+
+    r110 给 `expand()` 写了一整个类的判据，全绿，图还是错的 —— 因为对话那条路
+    从来不把用户原话交给 `expand()`：模型先翻成英文，进引擎的是模型那串。
+    r112 从 PNG 里读出来的现场，模型把「猪头人」翻成了 `pink pig`（一头粉猪）。
+    这一类判据钉的就是那条管子：**原话进得来，词典的主体压得住模型的猜测。**
+    """
+
+    def _handlers(self, service: ImageService) -> dict[str, Any]:
+        return {spec.name: handler for spec, handler in image_tools.build(service)}
+
+    PIG = "生成一张在月光下翩翩起舞的猪头人"
+    MODEL_WROTE = "pink pig, pink skin, glowing pig, fiery pig, stars, moonlight, dreamlike"
+
+    def test_the_table_beats_the_models_guess_at_the_subject(self, hub: Harness) -> None:
+        hub.use_local()
+        words = self._handlers(hub.service)["generate_image"](
+            {"prompt": self.MODEL_WROTE, "zh": self.PIG}
+        )
+        assert "画好了" in words, words
+        positive = hub.engine.submitted["positive"]
+        assert "pig head" in positive and "humanoid" in positive, positive
+        assert "pink pig" not in positive, "模型那四个「猪」的说法会把猪头人压成一头猪"
+        assert "fiery pig" not in positive, positive
+        assert "dancing" in positive, "模型把「翩翩起舞」整句丢了，词典要把它补回来"
+
+    def test_the_scene_the_model_added_is_not_thrown_away(self, hub: Harness) -> None:
+        """只换抢主体的那几条，剩下的（星空、梦幻）一条不动。"""
+        hub.use_local()
+        self._handlers(hub.service)["generate_image"]({"prompt": self.MODEL_WROTE, "zh": self.PIG})
+        positive = hub.engine.submitted["positive"]
+        assert "stars" in positive and "dreamlike" in positive, positive
+
+    def test_the_panel_sees_what_the_user_said_not_what_the_model_wrote(self, hub: Harness) -> None:
+        hub.use_local()
+        answer = hub.service.generate(self.MODEL_WROTE, zh=self.PIG)
+        assert answer["prompt_input"] == self.PIG, "屏上要显示用户自己那句，不是模型的译文"
+
+    def test_a_model_that_forgets_zh_still_gets_its_picture(self, hub: Harness) -> None:
+        """`zh` 是选填的：模型漏了只是用不上词典，不许整个生成失败。
+
+        把它设成必填试过一次 —— 工具框架当场回「缺少必填参数 zh」，
+        模型漏一次用户就一张图都拿不到。那是拿可用性换纯洁。
+        """
+        hub.use_local()
+        words = self._handlers(hub.service)["generate_image"]({"prompt": self.MODEL_WROTE})
+        assert "画好了" in words, words
+        assert "pink pig" in hub.engine.submitted["positive"], "没有原话时就该照模型写的画"
+
+    def test_an_unknown_sentence_is_said_out_loud_not_drawn_as_noise(self, hub: Harness) -> None:
+        """一个词都没认出来时不许把汉字交给引擎 —— 那是用户看到的那团色块。"""
+        hub.use_local()
+        answer = hub.service.generate("这张不画")
+        assert answer["ok"] is False
+        assert hub.engine.submitted == {}, "汉字一个都不许到引擎那边去"
+        assert "没翻成英文标签" in answer["error"], answer["error"]
 
 
 class TestTheToolLayer:
@@ -679,7 +745,7 @@ class TestTheToolLayer:
     def test_a_refusal_is_passed_through_in_the_engine_s_own_words(self, hub: Harness) -> None:
         hub.use_local()
         hub.engine.prompt_status = 500
-        words = self._handlers(hub.service)["generate_image"]({"prompt": "这张不画"})
+        words = self._handlers(hub.service)["generate_image"]({"prompt": "这只猫它不画"})
         assert "没画成" in words and hub.url in words
 
     def test_an_empty_prompt_is_refused_before_the_engine(self, hub: Harness) -> None:
@@ -833,7 +899,7 @@ class TestRoutingAndBridge:
             "vendored_engine",
         ):
             assert key in empty, f"没服务时那一格缺了 {key}：面板会留着上一次的显示"
-        refused = bridge.image_generate("一句描述")
+        refused = bridge.image_generate("一句描述里的猫")
         assert refused["ok"] is False and refused["path"] == "" and refused["error"]
         assert "没有接生图服务" in bridge.image_probe()["detail"]
         assert "没有接生图服务" in bridge.image_tune("auto", "512x512", 20)["detail"]
@@ -883,7 +949,7 @@ class TestRoutingAndBridge:
         try:
             # **不注入 opener**：注入的那个是测试自己造的计数器，用它就等于绕过了要验的东西。
             service = ImageService(hub.prefs, hub.paths, environ={IMAGE_KEY_ENV: "sk-test-key"})
-            answer = service.generate("代理挡路也要画")
+            answer = service.generate("代理挡路也要画的猫")
         finally:
             for key, value in before.items():
                 if value is None:
@@ -893,7 +959,7 @@ class TestRoutingAndBridge:
             service.stop()
         assert answer["ok"] is True, answer["error"]
         assert proxy.hits == 0, f"请求被假代理接走了 {proxy.hits} 次 —— 本机地址必须直达"
-        assert hub.engine.submitted["positive"] == "代理挡路也要画"
+        assert hub.engine.submitted["positive"] == "cat"
 
 
 class _LyingProxy:
@@ -929,9 +995,9 @@ class TestPathsAndWords:
     def test_a_deleted_output_directory_is_made_again(self, hub: Harness) -> None:
         """用户在软件外面把 数据/生图 删了 —— 下一次该把图画进去，不是抛"存不下"。"""
         hub.use_local()
-        hub.service.generate("先把目录建出来")
+        hub.service.generate("先把目录建出来画猫")
         shutil.rmtree(hub.paths.images_dir)
-        answer = hub.service.generate("目录没了也要画")
+        answer = hub.service.generate("目录没了也要画猫")
         assert answer["ok"] is True, answer["error"]
         assert Path(answer["path"]).parent == hub.paths.images_dir
 
@@ -957,7 +1023,7 @@ class TestPathsAndWords:
 
         hub.server.engine = cast(Any, Exploding())
         _Handler.engine = hub.server.engine
-        answer = hub.service.generate("引擎会骂回来的一张")
+        answer = hub.service.generate("引擎会骂回来的那只猫")
         assert answer["ok"] is False
         assert "这个包没带运行时的图片" in answer["error"], answer["error"]
         assert "{" not in answer["error"], "整包 JSON 被当成话甩给用户了"
@@ -986,7 +1052,7 @@ class TestPathsAndWords:
         hub.use_local()
         hub.server.engine = cast(Any, Sneaky())
         _Handler.engine = hub.server.engine
-        answer = hub.service.generate("想跑出去的一张")
+        answer = hub.service.generate("想跑出去的那只猫")
         assert answer["ok"] is True, answer["error"]
         landed = Path(answer["path"])
         assert landed.parent == hub.paths.images_dir

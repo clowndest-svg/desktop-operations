@@ -653,7 +653,7 @@ def stamp_docs(facts03: str, facts_readme: str) -> list[str]:
             path.write_text(rebuilt, encoding="utf-8")
             notes.append(f"{name}：数字表已改写成本次实测")
         else:
-            notes.append(f"{name}：数字表本来就是这次의值，没动")
+            notes.append(f"{name}：数字表本来就是这次的值，没动")
     return notes
 
 

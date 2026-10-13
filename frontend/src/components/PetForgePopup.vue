@@ -340,7 +340,16 @@ watch(
   },
 )
 
-onMounted(() => void load())
+/*
+ * 判 `props.open`，和隔壁 ExtensionsPopup 一样。App.vue 里这些弹窗是无条件挂载的
+ * （靠 `:open` 控制显示），所以不判就等于每次启动都替一个关着的对话框拉一遍数据 ——
+ * 而 `load()` 那一路是 `PetService.assets()`：每个宠物读一个 PNG 再 base64（上限
+ * MAX_FIGURES = 12），加一次分割权重的盘上检查，加一次随包模型枚举。
+ * 上面那条 `watch(props.open)` 已经管了"打开时要有数据"这件事。
+ */
+onMounted(() => {
+  if (props.open) void load()
+})
 </script>
 
 <style scoped>

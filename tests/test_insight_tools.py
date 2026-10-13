@@ -21,7 +21,7 @@ import time
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 import pytest
 
@@ -34,6 +34,14 @@ from jarvis.tools.monitor import SystemMonitor
 from jarvis.tools.registry import ToolRegistry
 
 CPU_SERIES = [0.0, 20.0, 60.0, 40.0, 40.0]
+
+
+class _CpuTimes(NamedTuple):
+    """One core's cumulative times, shaped like psutil's Windows ``scputimes``."""
+
+    user: float
+    system: float
+    idle: float
 
 
 class _FakePs:
@@ -50,6 +58,17 @@ class _FakePs:
         value = self._cpu[min(self._reads, len(self._cpu) - 1)]
         self._reads += 1
         return [value, value] if percpu else value
+
+    def cpu_times(self, *, percpu: bool = False) -> list[_CpuTimes]:
+        """Counters that never move, so the scripted line above is what gets read.
+
+        The monitor prefers to difference two ``cpu_times`` rows rather than sleep
+        through a sampled reading; a machine where no CPU time passed between reads
+        cannot be differenced, so it falls back to ``cpu_percent`` -- which is the
+        call ``CPU_SERIES`` is written for, one step per snapshot.
+        """
+        del percpu
+        return [_CpuTimes(user=1.0, system=1.0, idle=8.0) for _ in range(2)]
 
     def cpu_count(self) -> int:
         return 4

@@ -129,6 +129,34 @@ class TestBundleHint:
         html = index_path().read_text(encoding="utf-8")
         assert 'type="module"' in html
 
+    @requires_bundle
+    def test_the_startup_chunk_stays_under_its_ceiling(self) -> None:
+        """每一个字节都在首屏之前下载、解析、执行 —— 所以这里有一道上限。
+
+        这条测试是为一个具体的失误存在的：`useChart.ts` 从 `import * as echarts from
+        'echarts'` 拉整个 ECharts（柱状、饼、雷达、地图、关系图、桑基、K 线、仪表盘，
+        加两套渲染器），而这一窗只画一条折线。改成 `echarts/core` 按需注册之后：
+
+        * 改前实测 2,381,870 字节
+        * 改后实测 1,753,443 字节（r111，本机 `npm run build`）
+        * 那一条 import 的代价就是这两者之差：628,427 字节
+
+        上限定在 1,900,000：比改后留了约 146 KB 给后续功能，又远低于 2,381,870
+        —— 谁再把 barrel 写回来，这里当场红，而不是等用户去等一个慢窗口。
+        """
+        chunks = [
+            WEB_DIR / reference
+            for reference in _referenced_assets(index_path())
+            if reference.endswith(".js")
+        ]
+        assert chunks, "index.html 没有引用任何 js —— 产物不对"
+        biggest = max(chunks, key=lambda path: path.stat().st_size)
+        size = biggest.stat().st_size
+        assert size <= 1_900_000, (
+            f"{biggest.name} 是 {size:,} 字节，超过上限 1,900,000。"
+            "要么瘦回去，要么连同实测数字一起把上限调高并说明为什么。"
+        )
+
 
 class TestBundleServer:
     def test_serves_index_and_assets(self, tmp_path: Path) -> None:

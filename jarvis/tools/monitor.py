@@ -81,7 +81,7 @@ _PROC_CPU_SAMPLES: Final[int] = 32
 """Upper bound on samples kept per pid: the window evicts long before this does."""
 
 CPU_SAMPLE_SECONDS: Final[float] = 0.05
-"""How long one CPU reading watches, sampled inside a single call.
+"""How long a *priming* CPU reading watches, sampled inside a single call.
 
 ``cpu_percent(interval=None)`` keeps its baseline **per calling thread**, and the
 HUD is served by pywebview's thread pool -- so a call from a thread that had never
@@ -93,10 +93,66 @@ the reported "一下 100% 一下 0%", and it was never about the machine.
 
 Asking with an explicit interval samples t1 and t2 *inside the same call*, so the
 answer does not depend on who asked or when they last asked -- and the first read
-of a fresh monitor is a real reading rather than a priming zero. The price is a
-50 ms sleep on the polling thread against a 1.5 s cadence (and nothing at all while
-the window is hidden, because the page stops polling).
+of a fresh monitor is a real reading rather than a priming zero.
+
+The price is a 50 ms **sleep** on the calling thread, which is why this is now only
+the priming path: measured at 50.60 ms out of a 68 ms ``snapshot()``, i.e. three
+quarters of every poll, repeated every 1.5 s for as long as the window is open.
+:meth:`SystemMonitor._cpu_percents` pays it once and then differences a baseline of
+its own; measured after that change, the whole CPU read costs 0.16 ms and a steady
+``snapshot()`` 19.4 ms.
 """
+
+CPU_BASELINE_MAX_AGE_SECONDS: Final[float] = 90.0
+"""Past this gap the monitor re-primes instead of differencing its own baseline.
+
+A difference over the interval since the last poll is a *better* reading than a
+50 ms spot sample -- it is the average over exactly the window the operator was
+looking away for. But only while that window is a cadence. If the machine slept,
+or the page stopped polling, the difference spans the whole gap, and an average
+over twenty minutes printed in the box labelled "现在" is a lie even though the
+arithmetic is right.
+
+90 seconds because the poll interval is the operator's to set and tops out at 60 s
+(``TELEMETRY_INTERVAL_BOUNDS`` in :mod:`jarvis.app.settings_service`), so the cheap
+path has to survive the slowest cadence the settings panel will accept, plus room
+for a thread that got scheduled late. Anything longer than that is not a cadence.
+"""
+
+
+def _busy_percents(before: Sequence[Any], after: Sequence[Any]) -> tuple[float, ...] | None:
+    """Per-core busy share between two ``cpu_times(percpu=True)`` rows.
+
+    Deliberately a transcription of psutil's own arithmetic rather than a tidier
+    formula: the number on screen has to be the same number the sampled call would
+    have returned, or switching paths would move the gauge for a reason the machine
+    did not have. Busy is everything that is not idle -- and not ``iowait``, which
+    is the CPU waiting rather than working -- while ``guest`` comes back out of the
+    total because it is already counted inside ``user``. Both of those fields only
+    exist on Linux, so asking by name is the same test psutil makes by platform.
+
+    ``None`` means these two rows cannot be differenced: a different number of cores
+    (one came online), or no ticks elapsed at all between them. The caller samples
+    instead of printing a zero -- "three reads microseconds apart read [0.0, 0.0,
+    0.0]" is the bug in :data:`CPU_SAMPLE_SECONDS`, and it is this case.
+    """
+    if not after or len(before) != len(after):
+        return None
+    percents: list[float] = []
+    for old, new in zip(before, after, strict=True):
+        try:
+            total = float(sum(new)) - float(sum(old))
+            idle = 0.0
+            for field in ("idle", "iowait"):
+                idle += float(getattr(new, field, 0.0)) - float(getattr(old, field, 0.0))
+            for field in ("guest", "guest_nice"):
+                total -= float(getattr(new, field, 0.0)) - float(getattr(old, field, 0.0))
+        except (TypeError, ValueError):
+            return None
+        if total <= 0.0:
+            return None
+        percents.append(round(min(max(0.0, (total - idle) / total * 100.0), 100.0), 1))
+    return tuple(percents)
 
 
 class Pslike(Protocol):
@@ -105,6 +161,8 @@ class Pslike(Protocol):
     def cpu_count(self) -> int: ...
 
     def cpu_percent(self, interval: float | None = None, *, percpu: bool = ...) -> Any: ...
+
+    def cpu_times(self, *, percpu: bool = ...) -> Any: ...
 
     def virtual_memory(self) -> Any: ...
 
@@ -294,6 +352,11 @@ class SystemMonitor:
         self._proc_cpu: dict[int, deque[tuple[float, float]]] = {}
         # (monotonic, sent, received) from the previous snapshot: a rate needs two.
         self._net_sample: tuple[float, int, int] | None = None
+        # (monotonic, per-core cpu_times) from the previous CPU read. The baseline a
+        # load reading is differenced against, kept on *this object* rather than in
+        # psutil's per-thread one -- see _cpu_percents for why that distinction is
+        # the whole point.
+        self._cpu_baseline: tuple[float, tuple[Any, ...]] | None = None
         self._samples_taken = 0
         self._trend: deque[TrendPoint] = deque(maxlen=TREND_CAPACITY)
         self._last: SystemSnapshot | None = None
@@ -375,16 +438,54 @@ class SystemMonitor:
         both questions, and the two can never disagree on screen.
         """
         try:
-            per_core = tuple(
-                float(value)
-                for value in self._ps.cpu_percent(interval=CPU_SAMPLE_SECONDS, percpu=True)
-            )
+            per_core = self._cpu_percents()
             cores = int(self._ps.cpu_count() or 0)
         except Exception as exc:  # pragma: no cover - platform specific
             warnings.append(f"cpu: {type(exc).__name__}: {exc}")
             return CpuReading(percent=0.0, cores=0)
         percent = sum(per_core) / len(per_core) if per_core else 0.0
         return CpuReading(percent=percent, cores=cores, per_core=per_core)
+
+    def _cpu_percents(self) -> tuple[float, ...]:
+        """Per-core load since *this monitor* last looked, without sleeping for it.
+
+        The obvious cheap call, ``cpu_percent(interval=None)``, is the one this module
+        is forbidden to make: psutil files that baseline under the **calling thread**,
+        the HUD is answered by pywebview's thread pool, and a thread that never asked
+        before gets 0.0 (see :data:`CPU_SAMPLE_SECONDS` for the measurements). The
+        baseline is the problem, not the arithmetic -- so this keeps its own.
+
+        ``cpu_times(percpu=True)`` is stateless: every caller on every thread reads
+        the same cumulative counters, measured at 0.01 ms against 50.60 ms for one
+        sampled ``cpu_percent``. Holding the previous row on the instance and
+        differencing it gives the same answer psutil would compute, from whichever
+        thread happens to ask -- which is a *stronger* guarantee than the sampled
+        call bought, because two threads a millisecond apart now agree as well.
+
+        The sampled call is still paid wherever there is nothing honest to difference
+        against: the first read of a fresh monitor, which has to be a real reading
+        rather than a priming zero (``--self-check`` and the assistant's
+        ``system_report`` each read a monitor exactly once); a baseline older than
+        :data:`CPU_BASELINE_MAX_AGE_SECONDS`; and two reads inside one of Windows's
+        ~15.6 ms clock ticks, where the counters have not moved (see
+        :func:`_busy_percents`).
+        """
+        now = time.monotonic()
+        baseline = self._cpu_baseline
+        if baseline is not None and now - baseline[0] <= CPU_BASELINE_MAX_AGE_SECONDS:
+            times = tuple(self._ps.cpu_times(percpu=True))
+            measured = _busy_percents(baseline[1], times)
+            if measured is not None:
+                self._cpu_baseline = (now, times)
+                return measured
+        sampled = tuple(
+            float(value) for value in self._ps.cpu_percent(interval=CPU_SAMPLE_SECONDS, percpu=True)
+        )
+        # The baseline is taken *after* the sampled call, not before it: that call just
+        # slept through the window it is reporting, so the next poll has to difference
+        # against where the machine is now, not against where it was 50 ms ago.
+        self._cpu_baseline = (time.monotonic(), tuple(self._ps.cpu_times(percpu=True)))
+        return sampled
 
     def _read_memory(self, warnings: list[str]) -> MemoryReading:
         try:
