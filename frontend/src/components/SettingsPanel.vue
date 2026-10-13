@@ -632,10 +632,10 @@
           </div>
         </div>
         <p class="settings__why">
-         四档分别是 {{ petBoxLine }}。放大只是把她画得更大，多出来那一圈仍然是透明的；
-        越大越费机器 —— 具体费多少按你这台算，这一句里不写别人机器上的数。
-        {{ petNote }}
-          </p>
+          <span>四档分别是 {{ petBoxLine }}。放大只是把她画得更大，多出来那一圈仍然是透明的。</span>
+          <span>越大越费机器 —— 具体费多少按你这台算，这一句里不写别人机器上的数。</span>
+          <span v-if="petNote">{{ petNote }}</span>
+        </p>
 
           <div class="settings__row">
             <span class="hud-label">麦克风自动待命</span>
