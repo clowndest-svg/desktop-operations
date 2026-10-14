@@ -2121,8 +2121,12 @@ interface PywebviewApi {
   video_set_engine(engine: string): Promise<VideoState>
   video_cloud_save(fields: Record<string, string>): Promise<VideoState>
   video_cloud_reset(): Promise<VideoState>
+  video_cancel(): Promise<{ ok: boolean; message: string; error: string }>
+  video_restart_engine(): Promise<VideoState>
   artifact_video(path: string): Promise<{ ok: boolean; data_url: string; error: string }>
   image_probe(): Promise<ImageState>
+  image_cancel(): Promise<{ ok: boolean; message: string; error: string }>
+  image_restart_engine(): Promise<ImageState>
   image_generate(prompt: string, size: string): Promise<ImageAnswer>
   image_tune(engine: string, size: string, steps: number, count: number): Promise<ImageState>
   image_setup(
@@ -4608,6 +4612,12 @@ const mock: PywebviewApi = {
   async video_cloud_reset() {
     return mockVideoState()
   },
+  async video_cancel() {
+    return { ok: true, message: '预览里没有真在生成，停止只是给你看按钮的形状', error: '' }
+  },
+  async video_restart_engine() {
+    return mockVideoState()
+  },
   async video_generate(prompt) {
     return { ok: false, path: '', error: '浏览器预览没有本地视频引擎',
       prompt_input: prompt, prompt: '', prompt_note: '', seconds: 0, duration: 0 }
@@ -4629,6 +4639,12 @@ const mock: PywebviewApi = {
       vram_free_mb: 0,
     }
     mockImage.error = ''
+    return { ...mockImage }
+  },
+  async image_cancel() {
+    return { ok: true, message: '预览里没有真在生成，停止只是给你看按钮的形状', error: '' }
+  },
+  async image_restart_engine() {
     return { ...mockImage }
   },
   async image_generate(prompt, size) {
@@ -6540,6 +6556,12 @@ export function saveVideoCloud(fields: Record<string, string>): Promise<VideoSta
 export function resetVideoCloud(): Promise<VideoState> {
   return bridge().then((target) => target.video_cloud_reset())
 }
+export function cancelVideo(): Promise<{ ok: boolean; message: string; error: string }> {
+  return bridge().then((target) => target.video_cancel())
+}
+export function restartVideoEngine(): Promise<VideoState> {
+  return bridge().then((target) => target.video_restart_engine())
+}
 export function artifactVideo(path: string): Promise<{ ok: boolean; data_url: string; error: string }> {
   return bridge().then((target) => target.artifact_video(path))
 }
@@ -6547,6 +6569,16 @@ export function artifactVideo(path: string): Promise<{ ok: boolean; data_url: st
 /** 真去问一次本机有没有 ComfyUI 在跑。只在按键时发，不进轮询。 */
 export function probeImageEngine(): Promise<ImageState> {
   return bridge().then((target) => target.image_probe())
+}
+
+/** 叫停在跑的这一张图（生视频共用同一引擎）。 */
+export function cancelImage(): Promise<{ ok: boolean; message: string; error: string }> {
+  return bridge().then((target) => target.image_cancel())
+}
+
+/** 重启本软件起的本地引擎（不动用户自己开的 ComfyUI）。 */
+export function restartImageEngine(): Promise<ImageState> {
+  return bridge().then((target) => target.image_restart_engine())
 }
 
 /** 画一张。慢是常态，所以调用方自己转圈，别挂在 1.5 秒的轮询上。 */

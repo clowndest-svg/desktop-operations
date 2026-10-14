@@ -391,6 +391,10 @@ class ImageService:
         self._last_seconds = 0.0
         self._tail: list[str] = []
         self._reader: threading.Thread | None = None
+        # 停止生成用的共享取消位 + 当前在跑的引擎地址（生图和生视频共用一把引擎，
+        # 所以这一个 Event 同时服务两条路；轮询循环每轮查它，被置位就 /interrupt 中止）。
+        self._cancel = threading.Event()
+        self._active_base = ""
 
     # -- 生命周期 ----------------------------------------------------------
 
@@ -409,6 +413,45 @@ class ImageService:
             except subprocess.TimeoutExpired:  # pragma: no cover - 收不掉也要走
                 proc.kill()
         self._phase = "off"
+
+    # -- 停止 / 重启引擎 ---------------------------------------------------
+
+    def cancel(self) -> str:
+        """叫停在跑的这一张图/这一段视频：置取消位 + 让引擎中断当前任务。
+
+        返回一句给界面显示的话。取消位被生图/生视频的轮询循环下一轮读到就中止；
+        /interrupt 让 ComfyUI 真的停下算，不再白烧显卡。没有任务在跑时置位也无害
+        （下一次 generate 开头会 clear）。
+        """
+        running = self.generation_lock.locked()
+        self._cancel.set()
+        base = self._active_base
+        if base:
+            try:
+                request = urllib.request.Request(
+                    base + "/interrupt",
+                    data=b"{}",
+                    headers={"Content-Type": "application/json", "User-Agent": _user_agent()},
+                    method="POST",
+                )
+                self._opener(request, 5.0).close()
+            except Exception as exc:  # 中断失败也要中止本地等待，别把"停不下来"再抛给用户
+                logger.warning("向 %s 发 /interrupt 失败：%s", base, exc)
+        return "已请求停止" if running else "当前没有正在生成的任务"
+
+    def restart_engine(self) -> ImageStatus:
+        """重启本软件起的本地引擎：先收掉自己起的那个（绝不动用户自己开的 ComfyUI），
+        再按指过的目录重新起一个并等它答话。没指目录又没在跑时给一句实话。
+        """
+        self.cancel()
+        self.stop()
+        if not self._can_start_local():
+            with self._lock:
+                self._detail = "没指定引擎目录，无法由软件重启；请自己开着 ComfyUI 或在设置里指目录"
+                self._phase = "off"
+            return self.status()
+        self._try_start_engine(None)
+        return self.status()
 
     def available(self) -> bool:
         """有没有至少一条引擎可能走得通 —— 工具要不要广告出去就看这个。
@@ -569,6 +612,7 @@ class ImageService:
         """
         raw = str(prompt or "").strip()
         native = str(zh or "").strip()
+        self._cancel.clear()
         if not self.generation_lock.acquire(blocking=False):
             return self._fail("本地生成任务正在运行，请等图片或视频完成后再试。")
         try:
@@ -580,6 +624,8 @@ class ImageService:
                 return answer
             answer = self._run(plan.english, size=size, steps=steps, count=count)
         finally:
+            with self._lock:
+                self._active_base = ""
             self.generation_lock.release()
         answer["prompt_input"] = native or raw
         answer["prompt_note"] = plan.note
@@ -666,6 +712,8 @@ class ImageService:
         # 颜色都保不住，谈不上"质量"。要再动这两个参数，先按 N>=4 个种子重测。
         graph = build_workflow(checkpoint, prompt, "", width, height, steps, seed, prefix, count)
         try:
+            with self._lock:
+                self._active_base = probe["url"]
             pid = self._submit(probe["url"], graph)
             drawn = self._wait_for_images(probe["url"], pid)
         except _EngineError as exc:
@@ -807,6 +855,8 @@ class ImageService:
             self._phase = "running"
             self._detail = "引擎在画"
         while self._clock() < deadline:
+            if self._cancel.is_set():
+                raise _EngineError("已停止生成")
             history = self._get_json(
                 base + "/history/" + urllib.parse.quote(pid), POLL_TIMEOUT_SECONDS
             )

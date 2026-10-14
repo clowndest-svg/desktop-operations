@@ -77,7 +77,9 @@
           </template>
           <div class="vp__actions">
             <button class="hud-btn hud-btn--primary" type="button" :disabled="busy || !prompt.trim()" @click="generate">{{ busy ? `正在生成 · ${elapsed} 秒` : (engine === 'cloud' ? '云端生成视频' : '生成视频') }}</button>
+            <button v-if="busy && engine !== 'cloud'" class="hud-btn hud-btn--warn" type="button" @click="stop">停止</button>
             <button v-if="engine !== 'cloud'" class="hud-btn" type="button" :disabled="busy" @click="reprobe">检测本机引擎</button>
+            <button v-if="engine !== 'cloud'" class="hud-btn" type="button" :disabled="busy" @click="restartEngine">重启引擎</button>
           </div>
           <p v-if="busy" class="vp__why">{{ state.detail || '正在提交…' }} 关闭弹窗后任务仍继续。</p>
         </div>
@@ -163,6 +165,8 @@ import {
   setVideoEngine,
   saveVideoCloud,
   resetVideoCloud,
+  cancelVideo,
+  restartVideoEngine,
   artifactVideo,
   openArtifact,
   type VideoAnswer,
@@ -342,6 +346,27 @@ async function reprobe(): Promise<void> {
   busy.value = true
   try {
     absorb(await probeVideoEngine())
+  } finally {
+    busy.value = false
+  }
+}
+
+/** 叫停在跑的这一段（共用生图那条引擎取消位）。 */
+async function stop(): Promise<void> {
+  try {
+    const result = await cancelVideo()
+    error.value = result.ok ? '' : result.error
+    state.detail = result.message || state.detail
+  } catch (err) {
+    error.value = err instanceof Error ? String(err) : ''
+  }
+}
+
+/** 重启共享的本地引擎，回整份新的视频状态。 */
+async function restartEngine(): Promise<void> {
+  busy.value = true
+  try {
+    absorb(await restartVideoEngine())
   } finally {
     busy.value = false
   }

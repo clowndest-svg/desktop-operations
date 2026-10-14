@@ -392,6 +392,15 @@ class VideoService:
         self._images.probe()
         return self.status()
 
+    def cancel(self) -> str:
+        """叫停在跑的视频：共用生图那条取消位 + 引擎中断。"""
+        return self._images.cancel()
+
+    def restart_engine(self) -> dict[str, Any]:
+        """重启共享的本地引擎，然后把新的视频状态还给面板。"""
+        self._images.restart_engine()
+        return self.status()
+
     def _vram_mb(self) -> float:
         """最近一次探测读到的显存总量。没探测过＝0.0，调用方按保守档走。"""
         probe = self._images.status().get("local")
@@ -652,6 +661,7 @@ class VideoService:
     ) -> dict[str, Any]:
         """按引擎档位把一次生成派给本地或云端。frames 是老调用方的兼容口。"""
         source = str(prompt or "").strip()
+        self._images._cancel.clear()
         given: dict[str, object] = {"size": size, "fps": fps, "seconds": seconds, "steps": steps}
         if frames is not None and seconds in (None, "", 0):
             # 老口径（r113 及以前：frames 16/24/32 @8fps）换算成最近的时长档，帧率同时钉 8。
@@ -726,6 +736,7 @@ class VideoService:
                 height=plan["height"],
                 fps=plan["fps"],
             )
+            self._images._active_base = base
             pid = self._images._submit(base, graph)
             filename, blob = self._wait(base, pid)
             directory = self._paths.videos_dir
@@ -763,6 +774,7 @@ class VideoService:
         except (TranslationError, _EngineError, OSError) as exc:
             return self._fail(str(exc), source)
         finally:
+            self._images._active_base = ""
             self._images.generation_lock.release()
 
     def _generate_cloud(self, source: str, given: Mapping[str, object]) -> dict[str, Any]:
@@ -835,6 +847,8 @@ class VideoService:
     def _wait(self, base: str, pid: str) -> tuple[str, bytes]:
         deadline = time.monotonic() + VIDEO_DEADLINE
         while time.monotonic() < deadline:
+            if self._images._cancel.is_set():
+                raise _EngineError("已停止生成")
             history = self._images._get_json(f"{base}/history/{pid}", 15)
             entry = history.get(pid) if isinstance(history, dict) else None
             if isinstance(entry, dict):

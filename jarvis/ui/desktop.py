@@ -3441,6 +3441,19 @@ class HudBridge:
         self._videos.probe()
         return self._videos.status()
 
+    def video_cancel(self) -> dict[str, Any]:
+        """叫停在跑的这一段视频。"""
+        if self._videos is None:
+            return {"ok": False, "error": "没有接本地视频服务"}
+        message = self._videos.cancel()
+        return {"ok": True, "message": message}
+
+    def video_restart_engine(self) -> dict[str, Any]:
+        """重启共享的本地引擎，回整份新的视频状态。"""
+        if self._videos is None:
+            return {"phase": "off", "error": "没有接本地视频服务", "last_path": ""}
+        return self._videos.restart_engine()
+
     def video_set_engine(self, engine: object) -> dict[str, Any]:
         """切本地/云端/自动三档。返回最新状态（含 engine/cloud/cloud_ready）。"""
         if self._videos is None:
@@ -3509,6 +3522,19 @@ class HudBridge:
             return _image_unavailable("这个进程没有接生图服务")
         self._images.probe()
         return self._images.status()
+
+    def image_cancel(self) -> dict[str, Any]:
+        """叫停在跑的这一张图（生视频共用同一引擎，也走这条）。"""
+        if self._images is None:
+            return {"ok": False, "error": "这个进程没有接生图服务"}
+        message = self._images.cancel()
+        return {"ok": True, "message": message}
+
+    def image_restart_engine(self) -> ImageStatus:
+        """重启本软件起的本地引擎（不动用户自己开的 ComfyUI），回整份新状态。"""
+        if self._images is None:
+            return _image_unavailable("这个进程没有接生图服务")
+        return self._images.restart_engine()
 
     def image_generate(self, prompt: object, size: object = "") -> ImageAnswer:
         """画一张。慢是常态（本机 ComfyUI 实测 512x512 二十步 22 秒），所以这一扇门

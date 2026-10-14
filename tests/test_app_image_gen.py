@@ -505,6 +505,39 @@ class TestLocalGenerate:
         assert "没出图" in answer["error"]
 
 
+class TestCancelAndRestart:
+    """停止按钮和重启引擎：取消位要真能让轮询停下，重启只能收自己起的那个引擎。"""
+
+    def test_cancel_when_idle_sets_flag_and_reports_no_task(self, hub: Harness) -> None:
+        message = hub.service.cancel()
+        assert "没有正在生成" in message
+        assert hub.service._cancel.is_set()
+
+    def test_poll_loop_stops_the_moment_cancel_is_set(self, hub: Harness) -> None:
+        hub.service._cancel.set()
+        with pytest.raises(image_gen._EngineError, match="已停止"):
+            # 循环开头就查取消位，一个网络请求都不发。
+            hub.service._wait_for_images(hub.url, "pid-ignored")
+
+    def test_generate_clears_a_stale_cancel_so_the_next_run_works(self, hub: Harness) -> None:
+        hub.use_local()
+        hub.service._cancel.set()  # 上一次「停止」留下的位
+        answer = hub.service.generate("一只橘猫")
+        assert answer["ok"] is True, answer["error"]
+        assert hub.service._cancel.is_set() is False
+
+    def test_restart_without_a_dir_does_not_spawn_and_says_so(self, hub: Harness) -> None:
+        status = hub.service.restart_engine()
+        assert hub.spawned == []  # 没指目录就不该替用户起一个
+        assert "没指定引擎目录" in status["detail"]
+
+    def test_restart_terminates_only_the_engine_it_started(self, hub: Harness) -> None:
+        hub.service._proc = cast("Any", hub.proc)  # 假装这是本软件起的引擎
+        hub.service.restart_engine()  # 没指目录：收掉之后不再起
+        assert hub.proc.terminated is True
+        assert hub.service._proc is None
+
+
 class TestOneRequestDrawsSeveralCandidates:
     """一次画几张：r112 加的那一格，为的是给"换种子就翻面"一个便宜的解法。
 

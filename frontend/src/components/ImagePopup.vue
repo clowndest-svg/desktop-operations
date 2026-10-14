@@ -52,7 +52,9 @@
               <button class="hud-btn hud-btn--primary" type="button" :disabled="busy || !prompt.trim()" @click="generate">
                 {{ busy ? '正在画…' : '画一张' }}
               </button>
+              <button v-if="busy" class="hud-btn hud-btn--warn" type="button" @click="stop">停止</button>
               <button class="hud-btn" type="button" :disabled="busy" @click="reprobe">检测本机引擎</button>
+              <button class="hud-btn" type="button" :disabled="busy" @click="restartEngine">重启引擎</button>
             </div>
             <p v-if="busy" class="im__note">
               已经等了 {{ elapsed }} 秒 —— 512x512 二十步，这台机器上一张 22.4 秒、一炉 4 张一起采样 83.6 秒。
@@ -159,11 +161,13 @@ import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 
 import {
   artifactRead,
+  cancelImage,
   copyImage,
   fetchImageState,
   generateImage,
   openArtifact,
   probeImageEngine,
+  restartImageEngine,
   saveSettings,
   setupImage,
   tuneImage,
@@ -335,6 +339,28 @@ async function reprobe(): Promise<void> {
   try {
     apply(await probeImageEngine())
     emit('changed', state.local?.ok ? '找到本机引擎' : '本机没有引擎，走云端')
+  } finally {
+    busy.value = false
+  }
+}
+
+/** 叫停在跑的这一张：后端置取消位 + 中断引擎，正在 await 的 generate 会很快带着「已停止」返回。 */
+async function stop(): Promise<void> {
+  try {
+    const result = await cancelImage()
+    state.error = result.ok ? '' : result.error
+    state.detail = result.message || ''
+  } catch (err) {
+    state.error = err instanceof Error ? err.message : String(err)
+  }
+}
+
+/** 重启本软件起的本地引擎（不动用户自己开的 ComfyUI）。冷启动要等一会儿。 */
+async function restartEngine(): Promise<void> {
+  busy.value = true
+  try {
+    apply(await restartImageEngine())
+    emit('changed', state.local?.ok ? '引擎已重启' : '重启后暂时没连上引擎')
   } finally {
     busy.value = false
   }

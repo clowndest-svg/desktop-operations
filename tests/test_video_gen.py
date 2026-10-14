@@ -494,3 +494,27 @@ def test_status_exposes_engine_and_cloud_defaults(tmp_path: Path, monkeypatch: A
     assert status["options"]["engines"] == ["auto", "local", "cloud"]
     assert status["cloud_defaults"]["submit_url"] == DEFAULT_SUBMIT_URL
     assert "多家可自填" in video.capabilities()
+
+
+# -- r114：停止生成 + 重启引擎（共用生图那条取消位与引擎） ----------------------
+
+
+def test_video_cancel_delegates_to_the_shared_engine(tmp_path: Path, monkeypatch: Any) -> None:
+    video, images, _ = _service(tmp_path, monkeypatch)
+    assert "没有正在生成" in video.cancel()  # 此刻没在跑，只置位
+    assert images._cancel.is_set()
+
+
+def test_video_generate_clears_a_stale_cancel(tmp_path: Path, monkeypatch: Any) -> None:
+    video, images, _ = _service(tmp_path, monkeypatch)
+    images._cancel.set()
+    answer = video.generate("一只橘猫散步", size="256x256", fps=8, seconds=2)
+    assert answer["ok"] is True
+    assert images._cancel.is_set() is False
+
+
+def test_video_restart_returns_status_without_spawning(tmp_path: Path, monkeypatch: Any) -> None:
+    video, images, _ = _service(tmp_path, monkeypatch)
+    status = video.restart_engine()
+    assert "plan" in status  # 回的是整份视频状态
+    assert images._proc is None  # 没指 comfy_dir：重启不该真去起进程
