@@ -10,6 +10,7 @@
         @phone="phoneOpen = true"
         @mirror="mirrorOpen = true"
         @images="imagesOpen = true"
+        @videos="videosOpen = true"
       @assistant="assistantOpen = true"
       @extensions="extensionsOpen = true"
       @skin="skinOpen = true"
@@ -144,6 +145,7 @@
     -->
     <MirrorPopup :open="mirrorOpen" @close="mirrorOpen = false" />
     <ImagePopup :open="imagesOpen" @close="imagesOpen = false" />
+    <VideoPopup :open="videosOpen" @close="videosOpen = false" />
     <AssistantPopup :open="assistantOpen" @close="assistantOpen = false" />
     <!--
       扩展（插件市场）挂在助手之后、皮肤之前：它是从顶栏和设置都开得动的入口，而它自己里面
@@ -202,6 +204,7 @@ import ComputerAccessPopup from '@/components/ComputerAccessPopup.vue'
 import MobileAccessPopup from '@/components/MobileAccessPopup.vue'
 import MirrorPopup from '@/components/MirrorPopup.vue'
 import ImagePopup from '@/components/ImagePopup.vue'
+import VideoPopup from '@/components/VideoPopup.vue'
 import OfflineNotice from '@/components/OfflineNotice.vue'
 import ContextMenu from '@/components/ContextMenu.vue'
 import ProcessPanel from '@/components/ProcessPanel.vue'
@@ -247,6 +250,7 @@ const accessOpen = ref(false)
 const phoneOpen = ref(false)
 const mirrorOpen = ref(false)
 const imagesOpen = ref(false)
+const videosOpen = ref(false)
 const usageOpen = ref(false)
 const voiceOpen = ref(false)
 const petOpen = ref(false)

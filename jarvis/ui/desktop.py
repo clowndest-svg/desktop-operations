@@ -69,6 +69,7 @@ from jarvis.app.turns import (
     STATE_FAILED,
     STATE_RUNNING,
 )
+from jarvis.app.video_gen import VideoService
 from jarvis.app.voice_library import VoiceLibraryError
 from jarvis.config import MobileSection
 from jarvis.config.paths import AppPaths
@@ -731,6 +732,7 @@ class HudBridge:
 
     _mirror: ScreenMirrorService | None = None
     _images: ImageService | None = None
+    _videos: VideoService | None = None
     _phone: PhoneScreenReader | None = None
     """Class-level default for the same reason as ``_pets``: a mirror door asked of a
     half-built bridge answers 「这个进程没有接投屏」 rather than raising through the
@@ -779,6 +781,7 @@ class HudBridge:
         alerts: Any | None = None,
         mirror: ScreenMirrorService | None = None,
         images: ImageService | None = None,
+        videos: VideoService | None = None,
         documents: DocumentService | None = None,
         paths: AppPaths | None = None,
         network: NetworkWatch | None = None,
@@ -822,6 +825,7 @@ class HudBridge:
         self._planner = planner
         self._mirror = mirror
         self._images = images
+        self._videos = videos
         self._documents = documents
         # 读本轮产出文件的那几扇门，要知道哪些目录算软件自己写的。
         self._paths = paths or AppPaths.resolve()
@@ -3373,6 +3377,35 @@ class HudBridge:
             return _image_unavailable("这个进程没有接生图服务")
         return self._images.status()
 
+    def video_state(self) -> dict[str, Any]:
+        if self._videos is None:
+            return {"phase": "off", "error": "没有接本地视频服务", "last_path": ""}
+        return self._videos.status()
+
+    def video_generate(
+        self, prompt: object, frames: object = 16, steps: object = 16
+    ) -> dict[str, Any]:
+        if self._videos is None:
+            return {"ok": False, "error": "没有接本地视频服务", "path": ""}
+        return self._videos.generate(str(prompt or ""), frames=frames, steps=steps)
+
+    def artifact_video(self, path: object) -> dict[str, object]:
+        """Small locally generated clips only; never expose arbitrary disk paths."""
+        where = self._artifact_here(path)
+        if where is None or where.suffix.lower() != ".mp4":
+            return {"ok": False, "data_url": "", "error": "不是软件生成的视频"}
+        try:
+            if where.stat().st_size > 32 * 1024 * 1024:
+                return {"ok": False, "data_url": "", "error": "视频较大，请用打开按钮播放"}
+            return {
+                "ok": True,
+                "data_url": "data:video/mp4;base64,"
+                + base64.b64encode(where.read_bytes()).decode("ascii"),
+                "error": "",
+            }
+        except OSError:
+            return {"ok": False, "data_url": "", "error": "视频读不出来"}
+
     def image_probe(self) -> ImageStatus:
         """真问一次本地引擎在不在，然后把新的整份状态还给面板。
 
@@ -3445,6 +3478,7 @@ class HudBridge:
 
     _ARTIFACT_IMAGE_SUFFIXES: tuple[str, ...] = (".png", ".jpg", ".jpeg", ".webp")
     _ARTIFACT_FILE_SUFFIXES: tuple[str, ...] = (
+        ".mp4",
         ".png",
         ".jpg",
         ".jpeg",
@@ -3471,7 +3505,12 @@ class HudBridge:
             where = Path(raw).expanduser().resolve()
         except OSError:
             return None
-        roots = [self._paths.images_dir, self._paths.exports_dir, self._paths.notes_dir]
+        roots = [
+            self._paths.images_dir,
+            self._paths.videos_dir,
+            self._paths.exports_dir,
+            self._paths.notes_dir,
+        ]
         for root in roots:
             try:
                 where.relative_to(root.resolve())
@@ -4234,6 +4273,7 @@ def run(
     model_probe: ModelProber | None = None,
     mirror: ScreenMirrorService | None = None,
     images: ImageService | None = None,
+    videos: VideoService | None = None,
     phone_screen: PhoneScreenReader | None = None,
     documents: DocumentService | None = None,
     growth: GrowthSurface | None = None,
@@ -4442,6 +4482,7 @@ def run(
         alerts=alerts,
         mirror=mirror,
         images=images,
+        videos=videos,
         phone_screen=phone_screen,
     )
     gateway = build_mobile_gateway(bridge, mobile, mobile_dir)
@@ -4607,7 +4648,9 @@ def run(
     try:
         # gui="edgechromium" pins the WebView2 backend instead of letting pywebview
         # fall back to Qt/GTK, which are not installed here and would fail obscurely.
-        webview.start(debug=debug, gui="edgechromium")
+        webview.start(
+            debug=debug, gui="edgechromium", storage_path=str(bridge._paths.cache_dir / "webview")
+        )
     finally:
         # Reaching here means the message loop ended, which since the tray exists
         # only happens after a real quit: the X hides, and the only door out is the

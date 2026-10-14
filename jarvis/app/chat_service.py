@@ -258,7 +258,9 @@ def _never() -> bool:
 
 #: 只有这两个工具的"存在：…"算产出。别的工具（read_file、open_app）的输出里也会出现
 #: 绝对路径，把它们当"这一轮画了一张图"就是凭空多出一张不存在的图。
-ARTIFACT_TOOLS: Final[frozenset[str]] = frozenset({"generate_image", "write_document"})
+ARTIFACT_TOOLS: Final[frozenset[str]] = frozenset(
+    {"generate_image", "generate_video", "write_document"}
+)
 _ARTIFACT_MARK: Final = "存在："
 #: 我们自己的两句话里，路径后面紧跟的一定是这些字符之一（图片那句是「（512x512 …」，
 #: 文档那句是「，中文字体 …」/句号）。不用正则：路径里本来就可能有空格。

@@ -26,6 +26,7 @@ from jarvis.tools.builtins import (
     text_tools,
     time_tools,
     update_tools,
+    video_tools,
     web_tools,
 )
 from jarvis.tools.disk_cleaner import DiskCleaner
@@ -57,6 +58,7 @@ def build_builtin_tools(
     mirror: mirror_tools.MirrorSurface | None = None,
     phone: mirror_tools.PhoneScreenSurface | None = None,
     images: image_tools.ImageEngineSurface | None = None,
+    videos: video_tools.VideoSurface | None = None,
     documents: document_tools.DocumentSurface | None = None,
     release_fetch: update_tools.Fetcher | None = None,
 ) -> list[tuple[ToolSpec, ToolHandler]]:
@@ -136,6 +138,7 @@ def build_builtin_tools(
         *selfconfig_tools.build(settings=settings, voices=voices, conversations=conversations),
         *(mirror_tools.build(mirror, phone) if mirror is not None else []),
         *image_tools.build(images),
+        *video_tools.build(videos),
         *document_tools.build(documents),
         *update_tools.build(release_fetch),
     ]

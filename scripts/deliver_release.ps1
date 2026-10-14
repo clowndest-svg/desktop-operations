@@ -4,6 +4,7 @@ param(
     [ValidatePattern('^(auto|r[0-9]+)$')][string]$Round='auto',
     [string]$Root='E:\BianChengGongJu\JarvisBuild',
     [string]$Out='',
+    [string]$MediaEngineRoot='',
     [switch]$CleanOld,
     [switch]$UpdateShortcut,
     [switch]$Build,
@@ -41,8 +42,12 @@ if ($Build) {
         --workpath (Join-Path $release 'build') (Join-Path $repo 'packaging\jarvis.spec')
     if ($LASTEXITCODE -ne 0) { throw 'PyInstaller 失败，交付包未生成' }
     Write-Output '③ 落位随包权重'
-    & $python (Join-Path $PSScriptRoot 'place_bundled_model.py') --round $Round
+    & $python (Join-Path $PSScriptRoot 'place_bundled_model.py') --round $Round --build-root $Root
     if ($LASTEXITCODE -ne 0) { throw '随包权重没放好，不能交付' }
+    if ($MediaEngineRoot) {
+        & $python (Join-Path $PSScriptRoot 'place_media_engine.py') --round $Round --build-root $Root --engine-root $MediaEngineRoot
+        if ($LASTEXITCODE -ne 0) { throw '本地图片/视频引擎没有完整落位' }
+    }
     # ④ 随包运行时按「文件在不在产物里」核对，不按打包日志判：spec 少一条 datas 时的
     # 表现代码是「PyInstaller 退出码 0、产物里没那个目录、界面上一按就说没带」—— 那是把
     # 假能力发出去。自带模型(r87)和投屏(r91)两条都收在这一道门里。

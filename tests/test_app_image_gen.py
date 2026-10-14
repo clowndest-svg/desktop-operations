@@ -262,6 +262,23 @@ class _Server(ThreadingHTTPServer):
     engine: FakeEngine
 
 
+class _TestTranslator:
+    """Keep engine protocol tests offline; translation is tested independently."""
+
+    def translate(self, text: str) -> Any:
+        from jarvis.app.media_prompt import Translation, TranslationError
+
+        if not text or text == "这张不画":
+            raise TranslationError("翻译不可用，不能空着或提交未翻译的描述。")
+        translations = {
+            "一只橘猫": "an orange cat",
+            "画一只蓝色的鸟": "draw a blue bird",
+            "生成一张在月光下翩翩起舞的猪头人": "a humanoid with a pig head dancing in moonlight",
+        }
+        english = translations.get(text, "cat" if any(ord(c) > 127 for c in text) else text)
+        return Translation(text, english, "auto", "test")
+
+
 class Harness:
     def __init__(self, tmp_path: Path, server: _Server) -> None:
         self.server = server
@@ -278,6 +295,7 @@ class Harness:
             environ={IMAGE_KEY_ENV: "sk-test-key"},
             opener=self.requests,
             spawn=cast("Any", self._spawn),
+            translator=_TestTranslator(),
         )
         self.service.start()
 
@@ -447,7 +465,7 @@ class TestLocalGenerate:
         got = hub.engine.submitted
         assert got["checkpoint"] == "anythingV3_fp16.safetensors"
         # SD1.5 的编码器只认英文标签：中文原话送进去等于没说话（r105 实拍那个动漫美女）。
-        assert got["positive"] == "orange cat, orange skin"
+        assert got["positive"] == "an orange cat"
         assert answer["prompt_input"] == "一只橘猫", "原话必须留着，面板要说清引擎听见了什么"
         # 默认一次 4 张（r112 量的：模型换种子就翻面，一张等于把错的直接交出去）。
         assert got["latent"] == {"width": 512, "height": 512, "batch_size": 4}
@@ -793,12 +811,12 @@ class TestTheUsersOwnWordsReachTheEngine:
         assert "fiery pig" not in positive, positive
         assert "dancing" in positive, "模型把「翩翩起舞」整句丢了，词典要把它补回来"
 
-    def test_the_scene_the_model_added_is_not_thrown_away(self, hub: Harness) -> None:
-        """只换抢主体的那几条，剩下的（星空、梦幻）一条不动。"""
+    def test_the_model_cannot_add_a_scene_the_user_never_requested(self, hub: Harness) -> None:
+        """Whole-sentence translation uses the original, without invented scenery."""
         hub.use_local()
         self._handlers(hub.service)["generate_image"]({"prompt": self.MODEL_WROTE, "zh": self.PIG})
         positive = hub.engine.submitted["positive"]
-        assert "stars" in positive and "dreamlike" in positive, positive
+        assert "stars" not in positive and "dreamlike" not in positive, positive
 
     def test_the_panel_sees_what_the_user_said_not_what_the_model_wrote(self, hub: Harness) -> None:
         hub.use_local()
@@ -822,7 +840,7 @@ class TestTheUsersOwnWordsReachTheEngine:
         answer = hub.service.generate("这张不画")
         assert answer["ok"] is False
         assert hub.engine.submitted == {}, "汉字一个都不许到引擎那边去"
-        assert "没翻成英文标签" in answer["error"], answer["error"]
+        assert "翻译不可用" in answer["error"], answer["error"]
 
 
 class TestTheToolLayer:
@@ -833,7 +851,7 @@ class TestTheToolLayer:
         hub.use_local()
         words = self._handlers(hub.service)["generate_image"]({"prompt": "一只橘猫"})
         assert "画好了" in words
-        assert hub.engine.submitted["positive"] == "orange cat, orange skin"
+        assert hub.engine.submitted["positive"] == "an orange cat"
         assert hub.service.status()["last_path"] in words, "回话里没给路径，用户不知道图去哪了"
         for needle in ("512x512", "本地 ComfyUI", "秒", "种子"):
             assert needle in words, f"回话缺了 {needle}：用户下一句就要问它"
@@ -1034,7 +1052,7 @@ class TestRoutingAndBridge:
         hub.use_local()
         answer = bridge.image_generate("画一只蓝色的鸟", "512x512")
         assert answer["ok"] is True, answer["error"]
-        assert hub.engine.submitted["positive"] == "blue bird, blue skin"
+        assert hub.engine.submitted["positive"] == "draw a blue bird"
         assert answer["prompt_input"] == "画一只蓝色的鸟"
         state = bridge.image_tune("local", "768x768", 24)
         assert state["size"] == "768x768" and state["steps"] == 24 and state["error"] == ""
@@ -1069,7 +1087,12 @@ class TestRoutingAndBridge:
             os.environ[key] = f"http://127.0.0.1:{port}"
         try:
             # **不注入 opener**：注入的那个是测试自己造的计数器，用它就等于绕过了要验的东西。
-            service = ImageService(hub.prefs, hub.paths, environ={IMAGE_KEY_ENV: "sk-test-key"})
+            service = ImageService(
+                hub.prefs,
+                hub.paths,
+                environ={IMAGE_KEY_ENV: "sk-test-key"},
+                translator=_TestTranslator(),
+            )
             answer = service.generate("代理挡路也要画的猫")
         finally:
             for key, value in before.items():

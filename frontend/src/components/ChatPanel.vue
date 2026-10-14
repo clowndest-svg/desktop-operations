@@ -262,6 +262,7 @@
                   中间名字 + 大小两行，右边只留一颗主操作和一颗 ⋯。四颗按钮平铺会把
                   名字挤到换行，用户说的"太丑"就是这一处。
                 -->
+                <video v-else-if="suffixOf(art) === '.mp4' && videos[art]" :src="videos[art]" controls loop playsinline class="chat__art-pic"></video>
                 <div v-else class="chat__art-file">
                   <span class="chat__art-icon" :data-ext="extLabel(art)">{{ extLabel(art) }}</span>
                   <span class="chat__art-meta">
@@ -540,6 +541,7 @@ const pictureAsked = new Set<string>()
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   artifactRead,
+  artifactVideo,
   artifactStat,
   chatCancel,
   chatSend,
@@ -1119,6 +1121,16 @@ const listening = computed(() => voice.turn === 'listening')
  * 还在读」在屏上必须是两件事；按钮那一句结果 2.6 秒后退回按钮本名，不许常驻。
  */
 const pictures = ref<Record<string, string>>({})
+const videos = ref<Record<string, string>>({})
+const videoAsked = new Set<string>()
+const videoPaths = computed(() => lines.value.flatMap(line => line.artifacts).filter(path => suffixOf(path) === '.mp4'))
+watch(() => videoPaths.value.join('\n'), () => {
+  for (const path of videoPaths.value) {
+    if (videoAsked.has(path)) continue
+    videoAsked.add(path)
+    artifactVideo(path).then(result => { if (result.ok) videos.value[path] = result.data_url }).catch(() => {})
+  }
+}, { immediate: true })
 const pictureFails = ref<Record<string, string>>({})
 const flashes = ref<Record<string, string>>({})
 const bubbleMarks = ref<Record<number, CopyOutcome>>({})

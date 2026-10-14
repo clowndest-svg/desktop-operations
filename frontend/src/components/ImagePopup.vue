@@ -31,6 +31,7 @@
               <span class="hud-label">画什么</span>
               <textarea v-model="prompt" class="hud-field im__prompt" rows="3" placeholder="一只在月光下的橘猫，插画风，柔光"></textarea>
             </label>
+            <p class="im__why">支持任意语言描述，先整句联网翻译为英文，再送给生图模型。颜色、动作、数量和位置关系按原文保留。</p>
             <div class="im__row im__row--inline">
               <span class="hud-label">尺寸</span>
               <select v-model="sizeChoice" class="hud-field" :disabled="busy" @change="tune">
@@ -92,7 +93,7 @@
             <p v-if="lastShots.length" class="im__why">{{ lastWords }}</p>
             <!-- 引擎实际听见的那句：中文被展开成英文标签，不写出来就是悄悄改写。 -->
             <p v-if="lastShots.length && lastSent && lastSent !== prompt.trim()" class="im__sent">
-              引擎听见的那句：<span class="im__sent-text">{{ lastSent }}</span>
+              实际英文描述：<span class="im__sent-text">{{ lastSent }}</span>
             </p>
             <p v-if="lastShots.length && lastNote" class="im__why im__why--warn">{{ lastNote }}</p>
             <p v-if="!lastShots.length" class="im__empty">还没画过。上面那句写完按「画一张」。</p>

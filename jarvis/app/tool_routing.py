@@ -50,6 +50,7 @@ PACKS: Final[dict[str, tuple[str, ...]]] = {
     ),
     "mirror": ("mirror_devices", "mirror_start", "mirror_stop", "phone_screen_read"),
     "image": ("generate_image", "image_status"),
+    "video": ("generate_video", "video_status"),
     "documents": ("write_document", "document_kinds"),
     "release": ("check_update",),
     "process": ("list_processes", "propose_kill_process"),
@@ -71,7 +72,14 @@ PACKS: Final[dict[str, tuple[str, ...]]] = {
     # names no picture-word at all, so no regex can catch it, and the model was handed
     # a tool table with no way to draw -- 「当前我无法直接生成图片」 on a machine where
     # ComfyUI was running two metres away.
-    GENERAL: ("memory_search", "remember", "knowledge_search", "chat_search", "generate_image"),
+    GENERAL: (
+        "memory_search",
+        "remember",
+        "knowledge_search",
+        "chat_search",
+        "generate_image",
+        "generate_video",
+    ),
 }
 """Intent -> the tools that can answer it.
 
@@ -145,6 +153,10 @@ _PATTERNS: Final[dict[str, re.Pattern[str]]] = {
         # 「帮我做一张壁纸」。少了这一条，generate_image 根本没进请求，她只能回
         # 「当前我无法直接生成图片」。中文没有词边界，所以按"动词 + 最多八个字 + 图画类名词"收。
         r"(生成|做|来|整|要|给我|帮我).{0,8}(图|图片|照片|壁纸|头像|插画|海报|logo)",
+        re.IGNORECASE,
+    ),
+    "video": re.compile(
+        r"视频|短片|动画|文生视频|video|animate|animation|動画|비디오|видео|vidéo|vídeo",
         re.IGNORECASE,
     ),
     # 买家问"我这版旧不旧"不需要精确措辞，但一句都命中不了就等于这条能力不存在

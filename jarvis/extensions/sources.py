@@ -58,6 +58,37 @@ _GITHUB_REPOS: Final = 3
 GITHUB_SOFT_SECONDS: Final = 6.5
 """到点就带回已有结果，并说明"只来得及看前几条"（见 :func:`github_items`）。"""
 
+_AVATAR_HOST: Final = re.compile(r"^avatars\d*\.githubusercontent\.com$")
+"""GitHub 那一路唯一认的头像主机。
+
+白名单不是洁癖：图标是**页面自己去加载**的一张图，而清单和搜索结果都是远端给的。
+不设这道闸，一份被改过的清单就能让用户的浏览器去访问 `http://127.0.0.1:任意端口` ——
+那是拿她的界面替别人扫本机端口，和本项目已经堵过的那几条内网访问是同一类。
+"""
+
+MAX_ICON_TEXT: Final = 8
+"""emoji 那一两个码点；超过这个长度就不是图标是文字了，退回首字母方块。"""
+
+
+def safe_icon(value: object) -> str:
+    """图标那一栏：emoji 直接收，URL 只认白名单主机的 https，其余一律当没给。
+
+    丢在**后端**：前端拿不到被丢掉的地址，也就没有"哪里判断松了一点"的第二处。
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if "://" not in raw:
+        return raw if len(raw) <= MAX_ICON_TEXT else ""
+    try:
+        parsed = urllib.parse.urlsplit(raw)
+    except ValueError:
+        return ""
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or not _AVATAR_HOST.match(host):
+        return ""
+    return raw[:300]
+
 
 Fetcher = Callable[[str, float], tuple[str, bytes]]
 """(url, timeout) → (最终地址, 正文)。测试注一个假的进来。"""
@@ -136,6 +167,9 @@ def _item_from_curated(row: object) -> CatalogItem | None:
         homepage=str(row.get("homepage") or ""),
         needs=tuple(str(one) for one in row.get("needs") or ()),
         pinned=str(row.get("ref") or ""),
+        icon=safe_icon(row.get("icon")),
+        description=str(row.get("description") or "")[:2000],
+        version=str(row.get("version") or ""),
     )
 
 
@@ -162,12 +196,13 @@ def npm_items(query: str, fetch: Fetcher) -> list[CatalogItem]:
             continue
         score = package.get("score") or {}
         stats = package.get("statistics") or {}
+        described = str(package.get("description") or "")
         out.append(
             CatalogItem(
                 kind=KIND_MCP,
                 id=f"npm:{name}",
                 name=name,
-                summary=str(package.get("description") or "")[:280],
+                summary=described[:280],
                 source="npm",
                 install={"transport": "stdio", "command": "npx", "args": ["-y", name]},
                 homepage=str(package.get("url") or ""),
@@ -177,6 +212,11 @@ def npm_items(query: str, fetch: Fetcher) -> list[CatalogItem]:
                 stars=int(float(score.get("final") or 0)) if isinstance(score, Mapping) else 0,
                 needs=("npx",),
                 pinned=str(package.get("version") or ""),
+                # npm 的搜索响应里没有图标这一栏（本轮实测：objects[].package 只有
+                # name / version / description / keywords / score / statistics）。
+                # 留空不是漏填 —— 界面会退成首字母方块，并在详情页写明来源没给图标。
+                description=described[:2000],
+                version=str(package.get("version") or ""),
             )
         )
     return out[:MAX_ITEMS_PER_SOURCE]
@@ -217,6 +257,7 @@ def github_items(query: str, fetch: Fetcher) -> list[CatalogItem]:
             partial = True
             break
         ref = str(repo.get("default_branch") or "main")
+        owner = repo.get("owner")
         items.extend(
             _skills_of_repo(
                 full,
@@ -224,6 +265,7 @@ def github_items(query: str, fetch: Fetcher) -> list[CatalogItem]:
                 str(repo.get("description") or ""),
                 int(repo.get("stargazers_count") or 0),
                 fetch,
+                icon=safe_icon(owner.get("avatar_url") if isinstance(owner, Mapping) else ""),
             )
         )
     if partial:
@@ -246,7 +288,13 @@ _SKILL_FOLDERS: Final = ("skills", "plugins/skills", ".claude/skills")
 
 
 def _skills_of_repo(
-    repo: str, ref: str, description: str, stars: int, fetch: Fetcher
+    repo: str,
+    ref: str,
+    description: str,
+    stars: int,
+    fetch: Fetcher,
+    *,
+    icon: str = "",
 ) -> list[CatalogItem]:
     """一个仓库 → 若干条"可直接装"的技能条目。
 
@@ -265,6 +313,8 @@ def _skills_of_repo(
         homepage=f"https://github.com/{repo}",
         stars=stars,
         pinned=ref,
+        icon=icon,
+        description=description[:2000],
     )
     for folder in _SKILL_FOLDERS:
         listing = _contents(repo, ref, folder, fetch)
@@ -445,5 +495,6 @@ __all__ = [
     "github_items",
     "guarded_fetch",
     "npm_items",
+    "safe_icon",
     "search_all",
 ]

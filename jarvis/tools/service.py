@@ -25,6 +25,7 @@ from jarvis.tools.builtins import (
     shell_tools,
     system_tools,
     update_tools,
+    video_tools,
 )
 from jarvis.tools.registry import ToolRegistry
 from jarvis.tools.types import ToolCall, ToolResult, ToolSpec
@@ -78,6 +79,7 @@ class ToolService:
         mirror: mirror_tools.MirrorSurface | None = None,
         phone: mirror_tools.PhoneScreenSurface | None = None,
         images: image_tools.ImageEngineSurface | None = None,
+        videos: video_tools.VideoSurface | None = None,
         documents: document_tools.DocumentSurface | None = None,
         release_fetch: update_tools.Fetcher | None = None,
         registry: ToolRegistry | None = None,
@@ -132,6 +134,7 @@ class ToolService:
         self._mirror = mirror
         self._phone = phone
         self._images = images
+        self._videos = videos
         self._documents = documents
         self._release_fetch = release_fetch
         self._registry = registry or ToolRegistry(settings_provider)
@@ -177,6 +180,7 @@ class ToolService:
             # registry has never heard of.
             phone=self._phone,
             images=self._images,
+            videos=self._videos,
             documents=self._documents,
             release_fetch=self._release_fetch,
             web_opener=self._web_opener,

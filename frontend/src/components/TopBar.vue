@@ -130,6 +130,7 @@
       >
         生图
       </button>
+      <button class="hud-btn bar__entry" type="button" title="任意语言描述生成本地短视频" @click="emit('videos')">视频</button>
       <!--
         带一个当前色的圆点：一排按钮里，「皮肤」是唯一一个"现在是什么"看不出来的，
         而把当前皮肤的名字写进按钮会把这一行的宽度顶歪（见 bar__entry 的说明）。
@@ -221,6 +222,7 @@ const emit = defineEmits<{
   (e: 'phone'): void
   (e: 'mirror'): void
   (e: 'images'): void
+  (e: 'videos'): void
   (e: 'assistant'): void
   (e: 'extensions'): void
   (e: 'skin'): void

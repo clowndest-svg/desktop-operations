@@ -16,15 +16,19 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import posixpath
 import shutil
+import time
 import urllib.parse
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Final
 
+from jarvis.core.constants import DEFAULT_ENCODING
 from jarvis.extensions.runtime import RuntimeState, detect, missing_for
 from jarvis.extensions.servers import ServerStoreError, load, path_for, save, upsert
 from jarvis.extensions.sources import guarded_fetch
@@ -47,6 +51,15 @@ TEXT_SUFFIXES: Final = (".md", ".txt", ".json", ".yaml", ".yml")
 MAX_FILES: Final = 20
 MAX_TOTAL_BYTES: Final = 400_000
 """一个技能最多带 20 个文本文件、400 KB —— 超了就是"这不像一份说明书，这是一整个项目"。"""
+
+SOURCE_FILENAME: Final = ".xiaoye-source.json"
+"""装技能时留在它自己目录里的那份来历记录。
+
+为什么要有：没有它，"上游有没有出新内容"这句话**无从判断**，"更新"那颗按钮就只能装样子。
+为什么放目录里而不是集中的登记文件：拷走一个技能目录 = 连来历一起拷走，删掉目录 = 记录
+跟着没；集中登记会出现"目录没了记录还在"那种对不上的账。
+`discover()` 只扫子目录，所以这个文件不会被当成技能读进提示。
+"""
 
 Fetcher = Callable[[str, float], tuple[str, bytes]]
 
@@ -135,6 +148,133 @@ def _list_dir(repo: str, ref: str, path: str, fetch: Fetcher) -> list[Mapping[st
     return [row for row in raw if isinstance(row, Mapping)] if isinstance(raw, list) else []
 
 
+def tree_digest(files: list[tuple[str, bytes]]) -> str:
+    """这一份取回的东西的合起来的指纹（文件名 + 每个文件的 sha256）。
+
+    比"更新"用的是它，**不是版本号**：技能前言里写不写 `version` 全看作者心情，
+    而"内容一模一样"这句话要成立，只能拿内容比。
+    """
+    digest = hashlib.sha256()
+    for name, body in sorted(files):
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(hashlib.sha256(body).hexdigest().encode("ascii"))
+    return digest.hexdigest()
+
+
+def read_provenance(target: Path) -> dict[str, object]:
+    """一个技能目录里的来历记录。没有 / 读不了都回空字典（调用方负责说清楚）。"""
+    path = Path(target) / SOURCE_FILENAME
+    if not path.is_file():
+        return {}
+    try:
+        parsed = json.loads(path.read_text(encoding=DEFAULT_ENCODING))
+    except (OSError, ValueError) as exc:
+        logger.info("技能来历记录读不了（%s）：%s", path, exc)
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _provenance(
+    item: CatalogItem, files: list[tuple[str, bytes]], slug: str, ref: str, digest: str
+) -> dict[str, object]:
+    spec = item.install if isinstance(item.install, Mapping) else {}
+    return {
+        "catalog_id": item.id,
+        "kind": item.kind,
+        "source": item.source,
+        "name": item.name,
+        "slug": slug,
+        "repo": str(spec.get("repo") or ""),
+        "ref": ref,
+        "path": str(spec.get("path") or ""),
+        "homepage": item.homepage,
+        "installed_at": round(time.time(), 3),
+        "digest": digest,
+        "files": sorted(name for name, _ in files),
+    }
+
+
+def _write_provenance(target: Path, row: Mapping[str, object]) -> None:
+    """写来历记录。它不是技能内容，所以**不算进"N 个文件"那句**。"""
+    temp = target / (SOURCE_FILENAME + ".partial")
+    temp.write_text(
+        json.dumps(dict(row), ensure_ascii=False, indent=2) + "\n",
+        encoding=DEFAULT_ENCODING,
+        newline="\n",
+    )
+    temp.replace(target / SOURCE_FILENAME)
+
+
+def _land(target: Path, files: list[tuple[str, bytes]]) -> list[Path]:
+    """先写 `.partial` 再 replace：中途失败不留半个文件（和打包那条规矩一样）。"""
+    written: list[Path] = []
+    for rel, body in files:
+        place = target / rel
+        place.parent.mkdir(parents=True, exist_ok=True)
+        temp = place.with_name(place.name + ".partial")
+        temp.write_bytes(body)
+        temp.replace(place)
+        written.append(place)
+    return written
+
+
+def _skill_target(
+    item: CatalogItem,
+    skills: SkillService,
+    fetch: Fetcher,
+    audit: Callable[[str], None] | None,
+    verb: str,
+    *,
+    prefetched: list[tuple[str, bytes]] | None = None,
+) -> InstallResult:
+    """取文件 → 落盘 → 读回来验一遍 → 记来历。装和更新走的是同一段，不抄两份。
+
+    `prefetched` 是给"更新"那条路用的：它已经为了比内容取过一次，不该再取第二次
+    （同一次点击打两遍网络，两遍之间上游还可能变）。
+    """
+    raw_path = item.install.get("path", "") if isinstance(item.install, Mapping) else ""
+    target = skills.install_dir(str(raw_path))
+    if not target.name:
+        return InstallResult(False, item.kind, item.name, reason="没法从这条里取出一个目录名")
+    # 顺序不能反：会失败的那几步（取文件、验 ref）必须在**动手拆盘上那一份之前**做完。
+    # 反过来写的表现是"更新失败，但旧的那一份也没了"。
+    try:
+        files = prefetched if prefetched is not None else skill_files(item, fetch)
+        spec = item.install if isinstance(item.install, Mapping) else {}
+        ref = safe_ref(str(spec.get("ref") or "") or item.pinned or "main")
+        digest = tree_digest(files)
+    except ValueError as exc:
+        return InstallResult(False, item.kind, item.name, reason=f"取文件失败：{exc}")
+    if target.exists():
+        shutil.rmtree(target, ignore_errors=True)
+    target.mkdir(parents=True, exist_ok=True)
+    try:
+        written = _land(target, files)
+        manifest = read_directory(target)
+        _write_provenance(target, _provenance(item, files, manifest.slug, ref, digest))
+    except (OSError, ValueError) as exc:
+        shutil.rmtree(target, ignore_errors=True)
+        _note(audit, f"技能{verb}失败 {item.name}：{exc}")
+        return InstallResult(
+            False, item.kind, item.name, reason=f"这份技能{verb}完读不过来，已经回滚：{exc}"
+        )
+    skills.enable(manifest.slug)
+    skills.reload()
+    _note(
+        audit,
+        f"技能已{verb} {manifest.slug} ← {item.source}:{item.homepage or item.name}"
+        f"（{len(written)} 个文件）",
+    )
+    return InstallResult(
+        True,
+        KIND_SKILL,
+        manifest.name,
+        path=str(target),
+        detail=f"{len(written)} 个文件 · 正文 {manifest.body_chars} 字",
+    )
+
+
 def install_skill(
     item: CatalogItem,
     skills: SkillService,
@@ -146,47 +286,62 @@ def install_skill(
     do_fetch = fetch or guarded_fetch
     if item.kind != KIND_SKILL:
         return InstallResult(False, item.kind, item.name, reason="这一条不是技能")
+    return _skill_target(item, skills, do_fetch, audit, "装上")
+
+
+def update_skill(
+    item: CatalogItem,
+    skills: SkillService,
+    *,
+    fetch: Fetcher | None = None,
+    audit: Callable[[str], None] | None = None,
+) -> InstallResult:
+    """按盘上那份来历记录重新取一次，**比内容**决定要不要动。
+
+    三种结果都要说清楚，不能都折成"更新完成"：
+
+    - 盘上没这一份 → 那是没装，不是更新失败；
+    - 有目录但没来历记录（更早那版装的）→ **判断不了**，只能删掉重装。给一颗点了
+      什么也不会变的按钮就是假能力，所以这里明确拒绝并说明；
+    - 取回来一模一样 → 什么都不写（mtime 不变），并说"没动"。
+    """
+    do_fetch = fetch or guarded_fetch
+    if item.kind != KIND_SKILL:
+        return InstallResult(False, item.kind, item.name, reason="这一条不是技能")
     raw_path = item.install.get("path", "") if isinstance(item.install, Mapping) else ""
     target = skills.install_dir(str(raw_path))
-    if not target.name:
-        return InstallResult(False, item.kind, item.name, reason="没法从这条里取出一个目录名")
+    if not target.is_dir():
+        return InstallResult(
+            False, KIND_SKILL, item.name, path=str(target), reason="盘上没有这一份，先装再来更新"
+        )
+    before = read_provenance(target)
+    if not before:
+        return InstallResult(
+            False,
+            KIND_SKILL,
+            item.name,
+            path=str(target),
+            reason="这一份没留下来历记录（多半是更早那版装的，那时候还没记）——"
+            "所以这里判断不了上游有没有出新内容。要换新内容：先删掉这一份，再装一次。",
+        )
     try:
         files = skill_files(item, do_fetch)
     except ValueError as exc:
         return InstallResult(False, item.kind, item.name, reason=f"取文件失败：{exc}")
-    if target.exists():
-        shutil.rmtree(target, ignore_errors=True)
-    target.mkdir(parents=True, exist_ok=True)
-    written: list[Path] = []
-    try:
-        for rel, body in files:
-            place = target / rel
-            place.parent.mkdir(parents=True, exist_ok=True)
-            temp = place.with_name(place.name + ".partial")
-            temp.write_bytes(body)
-            temp.replace(place)
-            written.append(place)
-        manifest = read_directory(target)
-    except (OSError, ValueError) as exc:
-        shutil.rmtree(target, ignore_errors=True)
-        _note(audit, f"技能安装失败 {item.name}：{exc}")
+    digest = tree_digest(files)
+    if str(before.get("digest") or "") == digest:
+        _note(audit, f"技能检查更新 {target.name}：来源和盘上这一份内容一样，没动文件")
         return InstallResult(
-            False, item.kind, item.name, reason=f"这份技能装完读不过来，已经回滚：{exc}"
+            True,
+            KIND_SKILL,
+            item.name,
+            path=str(target),
+            detail="没动：来源现在的内容和盘上这一份一模一样（比的是取回的全部文件，不是版本号）",
         )
-    skills.enable(manifest.slug)
-    skills.reload()
-    _note(
-        audit,
-        f"技能已装 {manifest.slug} ← {item.source}:{item.homepage or item.name}"
-        f"（{len(written)} 个文件）",
-    )
-    return InstallResult(
-        True,
-        KIND_SKILL,
-        manifest.name,
-        path=str(target),
-        detail=f"{len(written)} 个文件 · 正文 {manifest.body_chars} 字",
-    )
+    result = _skill_target(item, skills, do_fetch, audit, "更新", prefetched=files)
+    if result.ok:
+        return replace(result, detail=f"换成新内容了（{len(files)} 个文件）。" + result.detail)
+    return result
 
 
 def install_mcp(
@@ -279,10 +434,14 @@ def _note(audit: Callable[[str], None] | None, text: str) -> None:
 __all__ = [
     "MAX_FILES",
     "MAX_TOTAL_BYTES",
+    "SOURCE_FILENAME",
     "TEXT_SUFFIXES",
     "install_mcp",
     "install_skill",
+    "read_provenance",
     "safe_ref",
     "safe_relpath",
     "skill_files",
+    "tree_digest",
+    "update_skill",
 ]

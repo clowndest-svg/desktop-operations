@@ -86,6 +86,7 @@ def place(target: Path, source: Path, *, expect: str | None) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--round", default="auto", help="rNN，或 auto 取最新一版")
+    parser.add_argument("--build-root", type=Path, default=BUILD_ROOT)
     parser.add_argument("--src", default="", help="权重所在目录，默认仓库根的 模型/")
     parser.add_argument("--record", action="store_true", help="只打印 md5，不落位")
     args = parser.parse_args(argv)
@@ -103,7 +104,7 @@ def main(argv: list[str] | None = None) -> int:
     # 每一份都摆进去：界面上那个"选哪个离线模型"列的就是这一堆，
     # 只放最大的会让买家看到四个选项、点哪个都是"文件不在包里"。
     round_name = latest_round() if args.round == "auto" else args.round
-    target = BUILD_ROOT / round_name / "dist" / APP_DIRNAME / SOURCE_DIR.name
+    target = args.build_root / round_name / "dist" / APP_DIRNAME / SOURCE_DIR.name
     for source in weights:
         expect = MODEL_MD5.get(source.name)
         if expect is None:

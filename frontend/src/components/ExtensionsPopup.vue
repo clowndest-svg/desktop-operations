@@ -69,44 +69,162 @@
           </template>
           <p v-if="needsWords(pending) !== '没有特别要求'" class="ext__hint">这一条跑起来要本机有：{{ needsWords(pending) }}</p>
           <div class="ext__confirm-actions">
-            <button class="hud-btn hud-btn--primary" type="button" :disabled="installing || !!blockReason(pending)" @click="confirmInstall">
+            <button class="hud-btn hud-btn--primary" type="button" :disabled="installing || !!installBlock(pending)" @click="confirmInstall">
               {{ installing ? '正在装…' : '确认装上' }}
             </button>
             <button class="hud-btn" type="button" :disabled="installing" @click="pending = null">算了</button>
           </div>
         </div>
 
-        <p v-if="search.error" class="ext__error">{{ search.error }}</p>
-        <p v-else-if="searched && !search.items.length && !search.failures.length" class="ext__empty">
+        <!-- 详情卡：点图标或点名字弹出来，盖在这一格上面。**不另开一扇窗** ——
+             桌面已经有设置 40 / 助手 44 / 扩展 46 三层，再开一扇就要再付一次遮挡与关闭的账。 -->
+        <div v-if="detail" class="ext__detail" data-testid="ext-detail">
+          <div class="ext__detail-head">
+            <span class="ext__icon ext__icon--big">
+              <img v-if="pictureOf(detailOf)" :src="pictureOf(detailOf)" alt="" @error="markBroken(detailOf)" />
+              <span v-else class="ext__icon-mono">{{ monogram(detailOf.name) }}</span>
+            </span>
+            <div class="ext__detail-titles">
+              <span class="ext__name">{{ detailOf.name || detail.id }}</span>
+              <span class="hud-label">
+                {{ kindWord(detailOf.kind) }} · 来自 {{ detailOf.source || '？' }}
+                <template v-if="detailOf.version"> · 版本 {{ detailOf.version }}</template>
+              </span>
+            </div>
+            <button class="hud-btn" type="button" @click="closeDetail">收起详情</button>
+          </div>
+
+          <p class="ext__summary">{{ detailOf.description || detailOf.summary || '这条没写它是干什么的。' }}</p>
+          <p class="ext__meta">{{ iconWords(detailOf) }}</p>
+          <p v-if="detailOf.homepage" class="ext__meta">
+            出处：<a class="ext__link" :href="detailOf.homepage" target="_blank" rel="noreferrer">{{ detailOf.homepage }}</a>
+          </p>
+          <p class="ext__meta">这一条跑起来要本机有：{{ needsWords(detailOf) }}</p>
+
+          <template v-if="detailOf.kind === 'mcp'">
+            <p class="ext__hint">它由小夜<strong>以外</strong>的独立进程跑起来，用的是<strong>你当前账户的权限</strong>。要执行的完整命令行是这一条：</p>
+            <p class="ext__cmd">{{ commandLine(detailOf) }}</p>
+            <p class="ext__meta">登记落在：{{ detail.servers_file || '（这一层没报出文件）' }}</p>
+          </template>
+          <template v-else>
+            <p class="ext__hint">这是一份说明书（只有文本，不会被执行），它落在这一个目录：</p>
+            <p class="ext__cmd">{{ skillTarget(detailOf) }}</p>
+          </template>
+          <p v-if="detailOf.pinned" class="ext__meta">来源钉在 {{ detailOf.pinned }}</p>
+          <p class="ext__note">{{ detail.installed.words || '还没装' }}</p>
+          <p v-if="detail.installed.path" class="ext__meta">装在哪：{{ detail.installed.path }}</p>
+
+          <div class="ext__confirm-actions">
+            <button
+              v-if="!detail.installed.yes"
+              class="hud-btn hud-btn--primary"
+              type="button"
+              :disabled="!detail.install.can || busy"
+              @click="askInstall(detailOf)"
+            >
+              {{ installing ? '正在装…' : '装上' }}
+            </button>
+            <button
+              v-else
+              class="hud-btn"
+              type="button"
+              :disabled="!detail.update.can || busy"
+              :title="detail.update.words"
+              @click="doUpdate(detailOf)"
+            >
+              {{ updating ? '正在更新…' : '更新' }}
+            </button>
+            <button
+              v-if="detail.installed.yes && pendingRemove !== detail.id"
+              class="hud-btn"
+              type="button"
+              :disabled="busy"
+              @click="pendingRemove = detail.id"
+            >
+              删掉
+            </button>
+            <template v-else-if="detail.installed.yes">
+              <span class="ext__warn">{{ removeWords(detailOf) }}</span>
+              <button class="hud-btn danger" type="button" :disabled="busy" @click="confirmRemove(detailOf)">确认删掉</button>
+              <button class="hud-btn" type="button" :disabled="busy" @click="pendingRemove = ''">算了</button>
+            </template>
+          </div>
+          <p v-if="!detail.installed.yes && !detail.install.can" class="ext__warn">装不了：{{ detail.install.words }}</p>
+          <p v-if="detail.installed.yes && !detail.update.can" class="ext__warn">这条更新不了：{{ detail.update.words }}</p>
+          <p v-if="detail.error" class="ext__error">{{ detail.error }}</p>
+        </div>
+
+        <!-- 没搜过时这一屏摆的是<strong>推荐</strong>；搜过之后是三路结果。
+             两者走同一个 panels 渲染 —— 行模板写两份，早晚会有一份忘了改。 -->
+        <p v-if="!searched" class="ext__hint">
+          还没搜过，所以这里摆的是<strong>推荐</strong>：作者逐条验过能装的那几条，不用先想关键词。
+          上面框里打一个字再按「搜一下」就换成三路搜索的结果。
+        </p>
+        <p v-if="searched && !search.items.length && !search.failures.length" class="ext__empty">
           三路都问到了，但市场里没有对得上的条目。换个词再试一次。
         </p>
+        <p v-if="search.error" class="ext__error">{{ search.error }}</p>
 
-        <section v-for="group in groups" :key="group.source" class="ext__group">
+        <section v-for="panel in panels" :key="panel.source" class="ext__group">
           <div class="ext__group-head">
-            <span class="hud-label ext__group-name">{{ group.label }}</span>
-            <span class="hud-chip" :class="{ 'hud-chip--bad': !!group.error }">{{ group.hits }} 条 · {{ group.milliseconds }} 毫秒</span>
+            <span class="hud-label ext__group-name">{{ panel.label }}</span>
+            <span class="hud-chip" :class="{ 'hud-chip--bad': !!panel.error }">
+              {{ panel.hits }} 条<template v-if="panel.milliseconds"> · {{ panel.milliseconds }} 毫秒</template>
+            </span>
           </div>
           <!-- 失败原文照抄，不许折成「没有结果」：「市场里没有」和「我这网不通」改的是两根不同的线。 -->
-          <p v-if="group.error" class="ext__error">这一路没通：{{ group.error }}</p>
-          <ul v-if="group.items.length" class="ext__list">
-            <li v-for="item in group.items" :key="item.id" class="ext__row">
-              <span class="hud-chip">{{ kindWord(item.kind) }}</span>
+          <p v-if="panel.error" class="ext__error">这一路没通：{{ panel.error }}</p>
+          <ul v-if="panel.items.length" class="ext__list">
+            <li v-for="item in panel.items" :key="item.id" class="ext__row">
+              <button class="ext__icon" type="button" :title="'看详情：' + item.name" @click="openDetail(item)">
+                <img v-if="pictureOf(item)" :src="pictureOf(item)" alt="" @error="markBroken(item)" />
+                <span v-else class="ext__icon-mono">{{ monogram(item.name) }}</span>
+              </button>
               <div class="ext__row-main">
-                <span class="ext__name">{{ item.name }}</span>
+                <button class="ext__name ext__name--link" type="button" @click="openDetail(item)">{{ item.name }}</button>
                 <span class="ext__summary">{{ item.summary }}</span>
-                <span class="ext__meta">来源 {{ item.source }} · 要本机装：{{ needsWords(item) }}</span>
+                <span class="ext__meta">{{ kindWord(item.kind) }} · 来自 {{ item.source }} · 要本机装：{{ needsWords(item) }}</span>
                 <span v-if="item.pinned" class="ext__meta">来源钉在 {{ item.pinned }}</span>
-                <p v-if="blockReason(item)" class="ext__warn">装不了：{{ blockReason(item) }}</p>
+                <span v-if="installedWords(item)" class="ext__note">{{ installedWords(item) }}</span>
+                <p v-if="installBlock(item)" class="ext__warn">装不了：{{ installBlock(item) }}</p>
+                <p v-if="updateBlock(item)" class="ext__warn">{{ updateBlock(item) }}</p>
               </div>
               <a v-if="item.homepage" class="hud-chip ext__link" :href="item.homepage" target="_blank" rel="noreferrer">出处</a>
+              <button class="hud-btn" type="button" :disabled="busy" @click="openDetail(item)">详情</button>
               <button
-                class="hud-btn"
+                v-if="!isInstalled(item)"
+                class="hud-btn hud-btn--primary"
                 type="button"
-                :disabled="!!blockReason(item) || busy"
+                :disabled="!!installBlock(item) || busy"
                 @click="askInstall(item)"
               >
                 装上
               </button>
+              <template v-else>
+                <button
+                  class="hud-btn"
+                  type="button"
+                  :disabled="!canUpdate(item) || busy"
+                  :title="updateWhy(item)"
+                  @click="doUpdate(item)"
+                >
+                  {{ updating ? '正在更新…' : '更新' }}
+                </button>
+                <button
+                  v-if="pendingRemove !== item.id"
+                  class="hud-btn"
+                  type="button"
+                  :disabled="busy"
+                  @click="pendingRemove = item.id"
+                >
+                  删掉
+                </button>
+                <template v-else>
+                  <span class="ext__warn">{{ removeWords(item) }}</span>
+                  <button class="hud-btn danger" type="button" :disabled="busy" @click="confirmRemove(item)">确认删掉</button>
+                  <button class="hud-btn" type="button" :disabled="busy" @click="pendingRemove = ''">算了</button>
+                </template>
+              </template>
             </li>
           </ul>
         </section>
@@ -263,16 +381,21 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import {
   extensionsAddHttp,
+  extensionsDetail,
   extensionsInstall,
   extensionsLayerSet,
   extensionsReconnect,
+  extensionsRecommended,
+  extensionsRemoveItem,
   extensionsSearch,
   extensionsServerRemove,
   extensionsServerSet,
   extensionsState,
+  extensionsUpdate,
   skillRemove,
   skillSet,
   type ExtensionCatalog,
+  type ExtensionDetail,
   type ExtensionSearch,
   type ExtensionServer,
   type ExtensionSkill,
@@ -323,6 +446,7 @@ const state = ref<ExtensionState>({
   search: { query: '', items: [], sources: [], failures: [] },
   store_error: '',
   log: [],
+  verdicts: {},
   error: '',
 })
 const loaded = ref(false)
@@ -338,6 +462,16 @@ const search = ref<ExtensionSearch>({ query: '', items: [], sources: [], failure
 const pending = ref<ExtensionCatalog | null>(null)
 const installing = ref(false)
 const installResult = ref<ExtensionState['install'] | null>(null)
+
+/** 推荐那一格：没搜过的时候屏上摆的就是它。``error`` 非空 = 这份清单没读到。 */
+const recommended = ref({ items: [] as ExtensionCatalog[], error: '', at: 0, where: '' })
+/** 打开着的详情卡。null = 没开。 */
+const detail = ref<ExtensionDetail | null>(null)
+/** 哪一条正在等"确认删掉"那一下。跨页签会被清掉，和确认卡同一条规矩。 */
+const pendingRemove = ref('')
+const updating = ref(false)
+/** 加载失败的头像地址：记下来就退成首字母方块，不让屏上出现一个破图框。 */
+const brokenIcons = ref<string[]>([])
 
 const httpName = ref('')
 const httpUrl = ref('')
@@ -386,6 +520,41 @@ const groups = computed(() => {
   }
   return rows
 })
+
+type Panel = {
+  source: string
+  label: string
+  hits: number
+  milliseconds: number
+  error: string
+  items: ExtensionCatalog[]
+}
+
+/**
+ * 一屏上摆的"分组"。没搜过 = 推荐那一条；搜过 = 三路各自一组。
+ *
+ * 合成一个计算属性是为了**只有一份行模板**：两份的话，改了图标改了按钮，
+ * 另一份会安静地留在旧样子 —— 而屏上看着两处都有功能，点下去才发现不一样。
+ */
+const panels = computed<Panel[]>(() => {
+  if (searched.value) return groups.value
+  return [
+    {
+      source: 'recommended',
+      label: '推荐 · 作者逐条验过的那份',
+      hits: recommended.value.items.length,
+      milliseconds: 0,
+      error: recommended.value.error ? `这份清单没读到：${recommended.value.error}` : '',
+      items: recommended.value.items,
+    },
+  ]
+})
+
+/** 详情卡上那几块读的是 ``detail.item``；没读到就是一份全空，界面上那些句子会退成"没写"。 */
+const detailOf = computed<ExtensionCatalog>(
+  () =>
+    (detail.value?.item ?? {}) as ExtensionCatalog,
+)
 
 const mcpWords = computed(() => {
   const mcp = state.value.mcp
@@ -453,13 +622,149 @@ function say(message: string, bad = false): void {
  * 1）这一屏没搜过 —— 后端只认刚才搜出来的 id，这是它有意拒绝的形状（否则这一页就成了命令输入框）；
  * 2）这一条要的本机命令不在 —— 装上一条永远起不来的登记，就是本项目反复要求停止生产的那种假能力。
  */
-function blockReason(item: ExtensionCatalog): string {
-  if (!searched.value) {
-    return '这一屏还没搜过。后端只认刚才搜出来的那批 id，所以这一颗现在是灰的 —— 先搜一次再来。'
+/**
+ * 这颗「装上」现在能不能按，以及为什么不能。
+ *
+ * 判断**读后端随 state 一起给的那份判词**（``verdicts``），页面不再自己数 needs：
+ * 列表和详情两处各算一遍的话，同一个东西在两个位置上会说出两句话 —— 这一层为这种
+ * "看起来都正常、就是不一致"付过不止一次账。
+ */
+function installBlock(item: ExtensionCatalog): string {
+  const verdict = state.value.verdicts[item.id]
+  if (verdict) {
+    if (verdict.installed.yes) return ''
+    return verdict.install.can ? '' : verdict.install.words
   }
   const gaps = item.needs.filter((need) => !state.value.runtime.present.includes(need))
   if (gaps.length) return `这台机器上缺 ${gaps.join('、')}，装上了也起不来。`
   return ''
+}
+
+/** 这一条在盘上装了没有（判词没读到时按没装处理 —— 那时按钮是「装上」，点了会要你先刷新）。 */
+function isInstalled(item: ExtensionCatalog): boolean {
+  return Boolean(state.value.verdicts[item.id]?.installed.yes)
+}
+
+function installedWords(item: ExtensionCatalog): string {
+  return state.value.verdicts[item.id]?.installed.words ?? ''
+}
+
+function canUpdate(item: ExtensionCatalog): boolean {
+  return Boolean(state.value.verdicts[item.id]?.update.can)
+}
+
+function updateWhy(item: ExtensionCatalog): string {
+  return state.value.verdicts[item.id]?.update.words ?? '这一条的账还没读到：按上面「刷新」再看一次。'
+}
+
+/** 「更新」按不了的时候，那句话要出现在行上 —— 不是只有鼠标悬停才看得见。 */
+function updateBlock(item: ExtensionCatalog): string {
+  if (!isInstalled(item) || canUpdate(item)) return ''
+  return `这条更新不了：${updateWhy(item)}`
+}
+
+function removeWords(item: ExtensionCatalog): string {
+  const verdict = state.value.verdicts[item.id]
+  const where = verdict?.installed.path || ''
+  if (item.kind === 'mcp') {
+    return `删掉的是 ${where || 'servers.json'} 里这一条登记，不碰盘上任何别的东西；它要是正在跑，要等下一次「重连」才停。`
+  }
+  return `只删 ${where || `${item.name} 那个目录`} 这一个目录，不动你的资料、不动别的技能。`
+}
+
+/** 图标：只有 https 的头像地址才去加载（后端已经过白名单，这里只是分辨 emoji 和 URL）。 */
+function pictureOf(item: ExtensionCatalog): string {
+  const icon = String(item.icon || '')
+  if (!icon.startsWith('https://')) return ''
+  return brokenIcons.value.includes(icon) ? '' : icon
+}
+
+function markBroken(item: ExtensionCatalog): void {
+  const icon = String(item.icon || '')
+  if (icon && !brokenIcons.value.includes(icon)) brokenIcons.value = [...brokenIcons.value, icon]
+}
+
+/** 首字母方块：拿名字最后一段的第一个字。CJK 原样，拉丁字母转大写。 */
+function monogram(name: string): string {
+  const clean = String(name || '')
+    .replace(/^@/, '')
+    .split(/[\\/]+/)
+    .filter(Boolean)
+    .pop()
+  const first = clean ? Array.from(clean)[0] : ''
+  if (!first) return '？'
+  return /[a-z]/i.test(first) ? first.toUpperCase() : first
+}
+
+/** 这一格的图是哪来的，说清楚 —— 拿不到图标不装成有。 */
+function iconWords(item: ExtensionCatalog): string {
+  if (pictureOf(item)) return '这一格的图标是来源给的头地址。'
+  if (String(item.icon || '')) return '这一格的图标是清单里给的一个符号。'
+  return '来源没给图标，这一格是名字首字母生成的。'
+}
+
+async function openDetail(item: ExtensionCatalog): Promise<void> {
+  busy.value = true
+  try {
+    detail.value = await extensionsDetail(item.id)
+    pendingRemove.value = ''
+  } catch (err) {
+    say(err instanceof Error ? err.message : String(err), true)
+  } finally {
+    busy.value = false
+  }
+}
+
+function closeDetail(): void {
+  detail.value = null
+  pendingRemove.value = ''
+}
+
+async function doUpdate(item: ExtensionCatalog): Promise<void> {
+  if (updating.value || busy.value) return
+  updating.value = true
+  notice.value = ''
+  try {
+    const next = await extensionsUpdate(item.id)
+    apply(next)
+    if (next.error) say(next.error, true)
+    else say(next.update?.detail || next.update?.reason || '更新这一步没回话')
+    if (detail.value) detail.value = await extensionsDetail(item.id)
+  } catch (err) {
+    say(err instanceof Error ? err.message : String(err), true)
+  } finally {
+    updating.value = false
+  }
+}
+
+async function confirmRemove(item: ExtensionCatalog): Promise<void> {
+  if (busy.value) return
+  busy.value = true
+  pendingRemove.value = ''
+  try {
+    const next = await extensionsRemoveItem(item.id, true)
+    apply(next)
+    if (next.error) say(next.error, true)
+    else say(next.removed?.detail || `删掉了这一条：${item.name}`)
+    if (detail.value) detail.value = await extensionsDetail(item.id)
+  } catch (err) {
+    say(err instanceof Error ? err.message : String(err), true)
+  } finally {
+    busy.value = false
+  }
+}
+
+async function refreshRecommended(): Promise<void> {
+  try {
+    recommended.value = await extensionsRecommended()
+  } catch (err) {
+    recommended.value = {
+      items: [],
+      error: err instanceof Error ? err.message : String(err),
+      at: 0,
+      where: '',
+    }
+  }
 }
 
 /** MCP 那一条要在装之前摊开的完整命令行：这就是这一层唯一的危险面。 */
@@ -536,6 +841,11 @@ function select(next: TabId): void {
   pending.value = null
   pendingSkill.value = ''
   pendingServer.value = ''
+  // 详情卡和"等确认删"也不许跨页签活着：翻出去再翻回来还挂着一张摊开的命令行，
+  // 下一次随手一点就真装了一个进程。
+  detail.value = null
+  pendingRemove.value = ''
+  if (next === 'search' && !searched.value) void refreshRecommended()
 }
 
 function apply(next: ExtensionState): void {
@@ -555,6 +865,7 @@ function apply(next: ExtensionState): void {
 
 async function load(): Promise<void> {
   busy.value = true
+  if (!searched.value) void refreshRecommended()
   try {
     apply(await extensionsState())
   } catch (err) {
@@ -568,6 +879,8 @@ async function runSearch(): Promise<void> {
   if (searching.value || nothingChecked.value) return
   searching.value = true
   notice.value = ''
+  detail.value = null
+  pendingRemove.value = ''
   // 搜一次就是一次新的授权范围：上一张摊开的确认卡必须跟着作废，不能留着让人点「确认装上」
   // 装一条已经不在结果里的东西。
   pending.value = null
@@ -604,6 +917,7 @@ async function confirmInstall(): Promise<void> {
     if (next.error) say(next.error, true)
     else if (next.install && !next.install.ok) say(next.install.reason || '没装上，原因见上面那一句', true)
     else say(next.install?.detail || '装上了')
+    if (detail.value) detail.value = await extensionsDetail(item.id)
   } catch (err) {
     say(err instanceof Error ? err.message : String(err), true)
   } finally {
@@ -1004,5 +1318,81 @@ onMounted(() => {
   flex-wrap: wrap;
   gap: 6px;
   margin: 6px 0;
+}
+
+/*
+ * 图标那一格：emoji 和头像地址共用一个盒子，换来源不换布局。
+ * 它是颗按钮（不是张死图）—— 点它就是开详情，所以得看起来点得动。
+ */
+.ext__icon {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--hud-line);
+  border-radius: 9px;
+  background: rgba(77, 216, 255, 0.07);
+  color: var(--hud-cyan);
+  font-family: var(--hud-mono);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.ext__icon img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.ext__icon--big {
+  width: 44px;
+  height: 44px;
+  font-size: 19px;
+  /* 详情卡上这一格只是摆出来看，再点一次还是这张卡 */
+  cursor: default;
+}
+
+.ext__icon-mono {
+  letter-spacing: 0;
+}
+
+/* 名字也是一颗开详情的按钮：只给图标一个入口，一半人不会去点那个小方块。 */
+.ext__name--link {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--hud-cyan);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ext__detail {
+  position: relative;
+  margin: 8px 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--hud-edge);
+  border-radius: var(--hud-radius);
+  background: linear-gradient(rgba(11, 26, 44, 0.96), rgba(4, 10, 18, 0.97));
+  box-shadow: var(--hud-elev-1);
+}
+
+.ext__detail-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ext__detail-titles {
+  flex: 1 1 180px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 </style>

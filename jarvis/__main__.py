@@ -41,6 +41,7 @@ from jarvis.app.transcript_service import TranscriptService
 from jarvis.app.turns import TurnRegistry
 from jarvis.app.update_check import fetch_release
 from jarvis.app.usage_service import UsageService
+from jarvis.app.video_gen import VideoService
 from jarvis.app.voice_call import VoiceCall
 from jarvis.app.voice_graph import ChatGraph
 from jarvis.app.voice_library import VoiceLibrary
@@ -431,6 +432,7 @@ def _register_capabilities(
     alerts: AlertService | None = None,
     mirror: ScreenMirrorService | None = None,
     images: ImageService | None = None,
+    videos: VideoService | None = None,
     preferences: Preferences | None = None,
 ) -> _Capabilities:
     """Register every phase-11-to-18 service on ``app``, in dependency order.
@@ -569,6 +571,7 @@ def _register_capabilities(
         # 生图同一条规矩：没有引擎就没有工具。模型答应「我画好了」而盘上没文件，
         # 是这套代码反复被要求停掉的那一种假。
         images=images,
+        videos=videos,
     )
     app.register(tools)
     app.register(computer)
@@ -992,6 +995,8 @@ def _run_desktop(args: argparse.Namespace) -> int:
     # 同一个对象，而「起起来的引擎子进程」只能有一个地方持有 —— 和 scrcpy 那条窗口同一条理由。
     image_engine = ImageService(preferences, config_service.paths)
     app.register(image_engine)
+    video_engine = VideoService(image_engine, config_service.paths)
+    app.register(video_engine)
     # Built before the capability stack because the tool that changes her voice is
     # wired in the same place every other tool is wired, and that tool needs the
     # picker's list to refuse a name that does not exist. The picker itself is not
@@ -1043,6 +1048,7 @@ def _run_desktop(args: argparse.Namespace) -> int:
         alerts=alerts,
         mirror=screen_mirror,
         images=image_engine,
+        videos=video_engine,
         preferences=preferences,
     )
     # What each configured model turned out to be able to do, measured rather than
@@ -1199,6 +1205,7 @@ def _run_desktop(args: argparse.Namespace) -> int:
             mirror=screen_mirror,
             phone_screen=capabilities.phone_screen,
             images=image_engine,
+            videos=video_engine,
             documents=capabilities.documents,
             growth=capabilities.growth,
             skills=capabilities.skills,

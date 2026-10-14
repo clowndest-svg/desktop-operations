@@ -67,6 +67,7 @@ def _registered() -> set[str]:
         alerts=stub,
         mirror=stub,
         images=stub,
+        videos=stub,
         documents=stub,
         # 检查更新这条只在装配层真注入了取数函数时才注册 —— 不传就是没有，
         # 而"包里挂了一条产不出来的工具"正是本文件那条守卫要抓的。

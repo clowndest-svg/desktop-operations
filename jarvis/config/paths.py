@@ -176,6 +176,11 @@ class AppPaths:
         return self.data_dir / "生图"
 
     @property
+    def videos_dir(self) -> Path:
+        """Locally generated MP4 clips beside generated images."""
+        return self.data_dir / "视频"
+
+    @property
     def exports_dir(self) -> Path:
         """Documents this program generated (xlsx / docx / pptx / pdf).
 

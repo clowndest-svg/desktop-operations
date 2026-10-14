@@ -811,6 +811,24 @@ export interface MirrorAction {
 
 
 /** 生图：本机 ComfyUI 或云端 API 的一次答复（服务端 ImageAnswer 的镜像）。 */
+export interface VideoState {
+  phase: string
+  detail: string
+  error: string
+  last_path: string
+  last_seconds: number
+}
+export interface VideoAnswer {
+  ok: boolean
+  path: string
+  error: string
+  prompt_input: string
+  prompt: string
+  prompt_note: string
+  seconds: number
+  duration: number
+}
+
 export interface ImageAnswer {
   ok: boolean
   /** 第一张的路径。**不是"就这一张"** —— 一次画几张看 `ImageState.count`。 */
@@ -821,11 +839,10 @@ export interface ImageAnswer {
   engine: string
   prompt: string
   /**
-   * 用户/模型**原来说的那一句**。服务端会把中文展开成英文标签（SD1.5 的编码器只认英文），
-   * `prompt` 是展开之后的，这一格是之前的 —— 面板两样都要显示，悄悄改写就是假能力。
+   * 用户原始描述（任意语言）。服务端整句翻译为英文；prompt 为实际送入引擎的译文。
    */
   prompt_input: string
-  /** 展开时词典没覆盖到的那几个词，一句人话；空串 = 全都认出来了。 */
+  /** 自动识别的源语言与翻译服务信息。 */
   prompt_note: string
   size: string
   steps: number
@@ -2031,6 +2048,9 @@ interface PywebviewApi {
   mirror_state(): Promise<MirrorState>
   // 生图。参数名照投屏那条禁令一样避开 window/promise/arguments 这些 stub 内部标识符。
   image_state(): Promise<ImageState>
+  video_state(): Promise<VideoState>
+  video_generate(prompt: string, frames: number, steps: number): Promise<VideoAnswer>
+  artifact_video(path: string): Promise<{ ok: boolean; data_url: string; error: string }>
   image_probe(): Promise<ImageState>
   image_generate(prompt: string, size: string): Promise<ImageAnswer>
   image_tune(engine: string, size: string, steps: number, count: number): Promise<ImageState>
@@ -4456,6 +4476,16 @@ const mock: PywebviewApi = {
   async image_state() {
     return { ...mockImage }
   },
+  async video_state() {
+    return { phase: 'off', detail: '浏览器预览没有本地视频引擎', error: '', last_path: '', last_seconds: 0 }
+  },
+  async video_generate(prompt) {
+    return { ok: false, path: '', error: '浏览器预览没有本地视频引擎',
+      prompt_input: prompt, prompt: '', prompt_note: '', seconds: 0, duration: 0 }
+  },
+  async artifact_video() {
+    return { ok: false, data_url: '', error: '浏览器预览无法读取本地视频' }
+  },
   async image_probe() {
     // 浏览器里没有 8188，探测要照实说没找到 —— 面板上那句拒绝就是给用户看这个形状的。
     mockImage.local = {
@@ -6339,6 +6369,16 @@ export function fetchMirrorState(): Promise<MirrorState> {
 /** 生图那一格的快照。轮询安全：服务端那一侧一个网络请求都不发。 */
 export function fetchImageState(): Promise<ImageState> {
   return bridge().then((target) => target.image_state())
+}
+
+export function fetchVideoState(): Promise<VideoState> {
+  return bridge().then((target) => target.video_state())
+}
+export function generateVideo(prompt: string, frames: number, steps: number): Promise<VideoAnswer> {
+  return bridge().then((target) => target.video_generate(prompt, frames, steps))
+}
+export function artifactVideo(path: string): Promise<{ ok: boolean; data_url: string; error: string }> {
+  return bridge().then((target) => target.artifact_video(path))
 }
 
 /** 真去问一次本机有没有 ComfyUI 在跑。只在按键时发，不进轮询。 */

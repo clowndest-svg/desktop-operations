@@ -62,6 +62,22 @@ class CatalogItem:
     pinned: str = ""
     """技能：来源的 ref（分支或 commit）。写 commit 的那几条不会跟着上游改版漂走。"""
 
+    icon: str = ""
+    """图标：emoji 那一两个字符，或一个 https 头像地址（过 `sources.safe_icon` 的白名单）。
+
+    空串是**正常值**，不是失败：npm 的搜索响应里根本没有图标字段。界面拿它退化成
+    名字首字母方块，并在详情页写明"来源没给图标"。
+    """
+
+    description: str = ""
+    """详情页那一段长说明。`summary` 是一行，这一栏是"它到底干什么、有什么前提"。"""
+
+    version: str = ""
+    """来源自己报的版本（npm 是当前版本号、精选清单是作者写的那一栏）。
+
+    技能的"有没有新版"**不靠它** —— 那份比的是文件本身的 sha256，见 `installer.py`。
+    """
+
     def to_dict(self) -> dict[str, object]:
         return {
             "kind": self.kind,
@@ -75,6 +91,9 @@ class CatalogItem:
             "downloads": self.downloads,
             "needs": list(self.needs),
             "pinned": self.pinned,
+            "icon": self.icon,
+            "description": self.description,
+            "version": self.version,
         }
 
 

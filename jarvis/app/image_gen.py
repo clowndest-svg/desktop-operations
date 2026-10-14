@@ -28,6 +28,7 @@ import os
 import random
 import re
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -38,7 +39,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final, Protocol, TypedDict
 
-from jarvis.app.image_prompt import expand, expand_model, merge
+from jarvis.app.media_prompt import PromptTranslator, TranslationError, Translator
 from jarvis.app.preferences import (
     IMAGE_CLOUD_BASE,
     IMAGE_CLOUD_MODEL,
@@ -210,7 +211,7 @@ class ImageAnswer(TypedDict):
     面板才能说清"你写的"和"引擎听见的"是两回事 —— 悄悄改写就是假能力的一种。"""
 
     prompt_note: str
-    """展开时没覆盖到的词（``image_prompt`` 认不出来的那部分），空串 = 全都认出来了。"""
+    """Automatically detected language and whole-sentence translation provider."""
 
     size: str
     steps: int
@@ -359,6 +360,7 @@ class ImageService:
         spawn: Spawn | None = None,
         sleeper: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
+        translator: Translator | None = None,
     ) -> None:
         self._prefs = prefs
         self._paths = paths
@@ -370,6 +372,9 @@ class ImageService:
         self._spawn = spawn or _default_spawn
         self._sleep = sleeper
         self._clock = clock
+        self.translator: Translator = translator or PromptTranslator()
+        # Serialize GPU jobs shared by image and video entry points.
+        self.generation_lock = threading.Lock()
         self._lock = threading.RLock()
         self._proc: subprocess.Popen[bytes] | None = None
         self._phase = "off"
@@ -552,37 +557,25 @@ class ImageService:
         steps: object = None,
         count: object = None,
     ) -> ImageAnswer:
-        """出一张图。**中文那句在这里展开成英文标签**，两条引擎、面板和工具都走这一步。
+        """Translate the complete original description for both UI and chat.
 
-        为什么做在服务层而不是面板里：对话那条路一直是模型先把中文扩写成英文标签再调
-        ``generate_image``，面板却把用户原话一个字不改送进 ``CLIPTextEncode`` ——
-        同一句「画一个绿色瘦弱的哥布林」在那边画对了、在这边画成了动漫美女。
-        差的是同一层展开，不是同一个模型。
-
-        ``zh`` 是**用户原话**（只有对话那条路给得出来）。有它的时候词典先展开原话，
-        再按 :func:`jarvis.app.image_prompt.merge` 的规矩和模型写的那串合并 —— r112 实拍
-        「在月光下翩翩起舞的猪头人」，模型写的是 `pink pig, …`（一头粉猪），
-        词典对同一句给的是 `(pig head:1.4), anthropomorphic pig, humanoid, moonlight, dancing`。
-        把用户原话顺着递下来，这一层才有机会用上它那张调过的表。
+        ``zh`` remains a compatibility alias for the original in any language.
+        Never merge an LLM rewrite into it or discard unknown words.
         """
         raw = str(prompt or "").strip()
         native = str(zh or "").strip()
-        # `zh` 在的时候 `raw` 是模型写的那串，里面的汉字一定是它拆碎原话漏下来的残渣
-        # （工具那张表就是让它把中文放进 `zh` 的）。`expand_model` 先把残渣抹掉再展开：
-        # 不然词典会把残渣当正经词吃成标签 —— r112 实拍那串里「头 饰」「温 暖」「童 话」
-        # 就变成了 hair ornament / warm lighting / fairytale，其中一个还和 moonlight 打架。
-        plan = merge(expand(native), expand_model(raw)) if native and native != raw else expand(raw)
-        if raw and not plan.prompt:
-            # 展开完是空的：这一句里**一个词都没认出来**。r112 之前这里会把原话原样递给
-            # 引擎，于是一串汉字进了 CLIPTextEncode 画出一团噪声，还报成功。
-            # 说不出来就说不出来，别拿噪声冒充能力。
-            return self._fail(
-                "这句话我一个词都没翻成英文标签，没有东西能递给引擎"
-                f"（{plan.note or '引擎的文本编码器只认英文标签'}）。"
-                "换个说法，或者直接把英文标签写给我。"
-            )
-        answer = self._run(plan.prompt, size=size, steps=steps, count=count)
-        # 原话与"没翻出来的词"一起回：面板要把它显示出来，不许悄悄改写用户说的话。
+        if not self.generation_lock.acquire(blocking=False):
+            return self._fail("本地生成任务正在运行，请等图片或视频完成后再试。")
+        try:
+            try:
+                plan = self.translator.translate(native or raw)
+            except TranslationError as exc:
+                answer = self._fail(str(exc))
+                answer["prompt_input"] = native or raw
+                return answer
+            answer = self._run(plan.english, size=size, steps=steps, count=count)
+        finally:
+            self.generation_lock.release()
         answer["prompt_input"] = native or raw
         answer["prompt_note"] = plan.note
         return answer
@@ -850,6 +843,8 @@ class ImageService:
             return False
         port = self._engine_port()
         argv = [str(python), "main.py", "--port", str(port), "--listen", "127.0.0.1"]
+        if (root / "custom_nodes" / "ComfyUI-AnimateDiff-Evolved").is_dir():
+            argv += ["--lowvram", "--preview-method", "none"]
         with self._lock:
             self._phase = "starting"
             self._detail = f"在起引擎（{root}，端口 {port}）"
@@ -1236,6 +1231,7 @@ def vendored_engine_dir() -> Path | None:
     override = os.environ.get("JARVIS_COMFYUI_DIR", "")
     candidates = [Path(part) for part in override.split(os.pathsep) if part]
     candidates += [
+        Path(sys.executable).resolve().parent / "本地引擎" / "ComfyUI",
         root / "vendor" / ENGINE_VENDOR_DIRNAME,
         root / "_vendor" / ENGINE_VENDOR_DIRNAME,
     ]
@@ -1260,12 +1256,36 @@ def _engine_python(root: Path, environ: Mapping[str, str]) -> Path | None:
 
 
 def _default_spawn(argv: list[str], cwd: Path) -> subprocess.Popen[bytes]:
+    cache = cwd.parent / "cache"
+    temporary = cwd.parent / "tmp"
+    temporary.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    portable_python = cwd.parent / "python" / "python.exe"
+    portable_packages = cwd.parent / "venv" / "Lib" / "site-packages"
+    if portable_python.is_file() and portable_packages.is_dir():
+        argv = [str(portable_python), *argv[1:]]
+        env["PYTHONPATH"] = str(portable_packages)
+        env["PYTHONNOUSERSITE"] = "1"
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env.update(
+        TEMP=str(temporary),
+        TMP=str(temporary),
+        HF_HOME=str(cache / "huggingface"),
+        TORCH_HOME=str(cache / "torch"),
+        PIP_CACHE_DIR=str(cache / "pip"),
+        CUDA_CACHE_PATH=str(cache / "cuda"),
+        TRITON_CACHE_DIR=str(cache / "triton"),
+        XDG_CACHE_HOME=str(cache),
+        NUMBA_CACHE_DIR=str(cache / "numba"),
+        MPLCONFIGDIR=str(cache / "matplotlib"),
+    )
     return subprocess.Popen(
         argv,
         cwd=str(cwd),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         shell=False,
+        env=env,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
 

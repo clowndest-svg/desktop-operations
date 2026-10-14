@@ -22,26 +22,29 @@ from pathlib import Path
 from typing import Final, cast
 
 from jarvis.core.constants import DEFAULT_ENCODING
-from jarvis.extensions.installer import install_mcp, install_skill
+from jarvis.extensions.installer import install_mcp, install_skill, read_provenance, update_skill
 from jarvis.extensions.runtime import RuntimeState, detect
 from jarvis.extensions.servers import (
     ServerStoreError,
     entries,
     load,
+    normalise_key,
     path_for,
     remove,
     save,
     set_entry_enabled,
     set_layer_enabled,
 )
-from jarvis.extensions.sources import SearchCache, search_all
+from jarvis.extensions.sources import SearchCache, curated_items, guarded_fetch, search_all
 from jarvis.extensions.types import (
     KIND_MCP,
     KIND_SKILL,
     CatalogItem,
+    InstallResult,
     SearchResult,
     string_list,
 )
+from jarvis.skills.loader import slugify
 from jarvis.skills.service import SkillService
 from jarvis.tools import RiskLevel, ToolRegistry, ToolSpec
 from jarvis.tools.types import object_schema, string_property
@@ -52,6 +55,15 @@ EXTENSION_SOURCE: Final = "extension:market"
 LIST_TOOL: Final = "extensions_list"
 CACHE_SECONDS: Final = 900.0
 """搜索结果留 15 分钟：装的那一下要能从缓存里按 id 取回原始 spec。"""
+
+_RECOMMEND_KEY: Final = ("__recommended__", ())
+"""推荐那一格在同一个缓存里的键（它没有搜索词，所以词那一栏是空的）。"""
+
+RUN_LATEST_COMMANDS: Final = frozenset({"npx", "uvx", "pipx"})
+"""这几个启动器**每次起进程都现拉最新版**，所以那一条没有「更新」这一步。
+
+判断走命令行而不是走来源：精选清单里也有一条 `npx -y …`，对它说「可以更新」就是假话。
+"""
 
 _SPEC = ToolSpec(
     name=LIST_TOOL,
@@ -67,6 +79,33 @@ _SPEC = ToolSpec(
     permissions=frozenset(),
     source=EXTENSION_SOURCE,
 )
+
+
+class _Look:
+    """一次 `state()` / `detail()` 期间的共用查表数据。
+
+    为什么要有：判"这条装了没"要扫技能目录、读每份来历、读一次 servers.json、问一次本机命令。
+    列表上几十条每条都来一遍的话，打开页面就得几十次 `which` —— 而**更要紧的是**：列表和详情
+    各算一遍迟早会算出两句话，同一个东西在两个位置上说法不一样正是这个项目反复在补的那类 bug。
+    """
+
+    def __init__(self, service: ExtensionsService) -> None:
+        self.skills = list(service._skills.installed())
+        self.runtime = list(detect()["present"])
+        self.servers: dict[str, dict[str, object]] = {}
+        self.store_error = ""
+        try:
+            self.servers = entries(load(service._path()))
+        except ServerStoreError as exc:
+            self.store_error = str(exc)
+        self.provenance: dict[str, dict[str, object]] = {}
+
+    def prov(self, path: str) -> dict[str, object]:
+        cached = self.provenance.get(path)
+        if cached is None:
+            cached = read_provenance(Path(path))
+            self.provenance[path] = cached
+        return cached
 
 
 class ExtensionsService:
@@ -154,6 +193,8 @@ class ExtensionsService:
             "search": self._last_search_dict(),
             "store_error": store_error,
             "log": self.log_tail(12),
+            # 列表和详情读的是**同一份**判断（谁装了、谁能更新、谁要拒绝），见 `_verdicts`。
+            "verdicts": self._verdicts(_Look(self)),
             "error": "",
         }
 
@@ -225,6 +266,333 @@ class ExtensionsService:
         snapshot["install"] = row
         snapshot["error"] = result.reason
         return snapshot
+
+    # -- 推荐 / 详情 / 更新 / 按条目删 ---------------------------------------
+
+    def recommended(self) -> dict[str, object]:
+        """打开页面就看得见的那一格：读的就是**精选清单那一路**。
+
+        不掺 npm / GitHub 的"热门" —— 只有这一路是作者逐条验过能装的；而"推荐"两个字
+        一旦来自星标数，就是在替用户决定，星标不是质量（`sources.py` 里早写了这句）。
+
+        推荐条目**同样进 `_by_id`**：否则"只认给出去的 id"那条闸会把这一格变成一排
+        永远灰着的按钮，而那句"没装也不影响别的本事"就成了假话。
+        """
+        found = self._cache.get(_RECOMMEND_KEY)
+        error = ""
+        if found is None:
+            try:
+                items = tuple(curated_items(self._fetch or guarded_fetch))
+            except Exception as exc:
+                # 失败原文带回去。「这份清单没读到」和「没有推荐」是两句不同的话。
+                items, error = (), f"{type(exc).__name__}: {exc}"[:220]
+                logger.info("推荐那一格没读到：%s", error)
+            else:
+                found = SearchResult(query="", sources=(), items=items)
+                self._cache.put(_RECOMMEND_KEY, found)
+        rows = found if found is not None else SearchResult(query="", sources=(), items=())
+        for item in rows.items:
+            self._by_id[item.id] = item
+        return {
+            "items": [item.to_dict() for item in rows.items],
+            "error": error,
+            "at": rows.at,
+            "where": "作者逐条验过的那份精选清单",
+        }
+
+    def detail(self, item_id: str) -> dict[str, object]:
+        """详情页那一张卡要的全部东西。**只认我们给出去的 id**，和装同一条规矩。"""
+        wanted = str(item_id or "").strip()
+        item = self._by_id.get(wanted)
+        if item is None:
+            out = empty_detail(wanted, reason="这一格没读到")
+            out["error"] = (
+                f"这条不在我们给出去的那批里（id={wanted or '空'}）。请先搜一次，"
+                "或者从推荐那一格点进来 —— 装、更新、删除都只认这个凭据，"
+                "页面递进来的命令行一律不收。"
+            )
+            return out
+        look = _Look(self)
+        installed = self._installed_of(item, look)
+        return {
+            "found": True,
+            "id": item.id,
+            "item": item.to_dict(),
+            "installed": installed,
+            "install": self._install_verdict(item, installed, look),
+            "update": self._update_verdict(item, installed),
+            "remove": self._remove_verdict(item, installed),
+            "runtime": detect(),
+            "log": self.log_tail(5),
+            "directory": str(self._dir()),
+            "servers_file": str(path_for(self._dir())),
+            "error": "",
+        }
+
+    def update(self, item_id: str) -> dict[str, object]:
+        """按盘上那份来历重新取一次。**判断不了的就明确拒绝并说明**，不装样子。"""
+        item = self._by_id.get(str(item_id or "").strip())
+        if item is None:
+            return _refuse("这条不在我们给出去的那批里，更新不接受页面传来的形状。", self.state())
+        verdict = self._update_verdict(item, self._installed_of(item))
+        if not bool(verdict["can"]):
+            return _refuse(str(verdict["words"]), self.state())
+        if item.kind == KIND_SKILL:
+            result = update_skill(item, self._skills, fetch=self._fetch, audit=self._audit)
+        else:
+            result = self._update_server(item)
+        snapshot = self.state()
+        snapshot["update"] = result.to_dict()
+        snapshot["error"] = result.reason
+        return snapshot
+
+    def remove_item(self, item_id: str, *, confirmed: object) -> dict[str, object]:
+        """从搜索结果或详情页删掉这一条对应的东西。
+
+        **slug / server 名字由后端解析**，不让页面拼：页面拼出来的那个名字和
+        `slugify()` / `normalise_key()` 的结果迟早会不一样，而删错东西没有回滚。
+        """
+        item = self._by_id.get(str(item_id or "").strip())
+        if item is None:
+            return _refuse("这条不在我们给出去的那批里，删除不接受页面传来的形状。", self.state())
+        installed = self._installed_of(item)
+        if not bool(installed["yes"]):
+            return _refuse("这条本来就没装，什么都没动。", self.state())
+        if confirmed is not True:
+            return _refuse("删除需要明确的确认（confirmed），这一步不会替你决定", self.state())
+        if item.kind == KIND_SKILL:
+            slug = str(installed["slug"] or "")
+            outcome = self._skills.remove(slug, confirmed=True)
+            reason = str(outcome.get("error") or "")
+            row = {
+                "ok": not reason,
+                "kind": KIND_SKILL,
+                "name": str(installed["name"] or slug),
+                "path": str(installed["path"] or ""),
+                "reason": reason,
+                "detail": "" if reason else f"删掉了这一份：{slug}",
+            }
+        else:
+            name = str(installed["name"] or "")
+            try:
+                path = path_for(self._dir())
+                merged, existed = remove(load(path), name)
+                if not existed:
+                    return _refuse(f"没有这条 MCP server：{name}", self.state())
+                save(path, merged)
+                reason = ""
+            except ServerStoreError as exc:
+                reason = str(exc)
+            row = {
+                "ok": not reason,
+                "kind": KIND_MCP,
+                "name": name,
+                "path": str(path_for(self._dir())),
+                "reason": reason,
+                "detail": "" if reason else f"删掉了这条登记：{name}",
+            }
+        if not row["reason"]:
+            self._note(f"从扩展页删掉 {row['kind']} {row['name']}（按条目 id 解析出来的那一个）")
+        snapshot = self.state()
+        snapshot["removed"] = row
+        snapshot["error"] = row["reason"]
+        return snapshot
+
+    # -- 详情要用到的那几件解析 ---------------------------------------------
+
+    def _server_key(self, item: CatalogItem) -> str:
+        spec = item.install if isinstance(item.install, Mapping) else {}
+        try:
+            return normalise_key(str(spec.get("name") or item.name))
+        except ServerStoreError:
+            return ""
+
+    def _path(self) -> Path:
+        return path_for(self._dir())
+
+    def _verdicts(self, look: _Look) -> dict[str, object]:
+        """把我们给出去的每一条 id 的"装了没 / 能不能更新 / 能不能删"一次算完。
+
+        为什么在后端算：这三句话要在**搜索结果那一行**和**详情卡**上同时出现。两处各算一遍
+        迟早会算出两句话（这个项目为"同一件东西在两个位置上说法不一样"付过不止一次账）。
+        """
+        out: dict[str, object] = {}
+        for item in list(self._by_id.values()):
+            installed = self._installed_of(item, look)
+            out[item.id] = {
+                "installed": installed,
+                "install": self._install_verdict(item, installed, look),
+                "update": self._update_verdict(item, installed),
+                "remove": self._remove_verdict(item, installed),
+            }
+        return out
+
+    def _installed_of(self, item: CatalogItem, look: _Look | None = None) -> dict[str, object]:
+        """这一条在盘上是什么样子：装在哪、启没启、什么时候装的、有没有来历记录。"""
+        blank: dict[str, object] = {
+            "yes": False,
+            "kind": item.kind,
+            "name": "",
+            "slug": "",
+            "path": "",
+            "at": 0.0,
+            "files": [],
+            "digest": "",
+            "enabled": False,
+            "provenance": False,
+            "changed": False,
+            "connected": False,
+            "words": "还没装",
+        }
+        table = look if look is not None else _Look(self)
+        if item.kind == KIND_SKILL:
+            spec = item.install if isinstance(item.install, Mapping) else {}
+            wanted_dir = slugify(str(spec.get("path") or "")) if str(spec.get("path") or "") else ""
+            for row in table.skills:
+                found = table.prov(str(row.path))
+                by_id = str(found.get("catalog_id") or "") == item.id
+                by_dir = bool(wanted_dir) and Path(row.path).name == wanted_dir and not found
+                if not (by_id or by_dir):
+                    continue
+                return {
+                    "yes": True,
+                    "kind": KIND_SKILL,
+                    "name": row.slug or row.name,
+                    "slug": row.slug,
+                    "path": str(row.path),
+                    "at": _as_time(found.get("installed_at")),
+                    "files": string_list(found.get("files")),
+                    "digest": str(found.get("digest") or ""),
+                    "enabled": bool(row.enabled),
+                    "provenance": bool(found),
+                    "changed": False,
+                    "connected": False,
+                    "words": (
+                        f"已装：{row.slug}"
+                        + ("" if row.enabled else "（关着）")
+                        + ("" if found else "（没留下来历记录）")
+                    ),
+                }
+            return blank
+        name = self._server_key(item)
+        if not name:
+            return blank
+        if look is None and table.store_error:
+            return {**blank, "words": f"读不了那份登记：{table.store_error}"}
+        stored = table.servers.get(name)
+        if stored is None:
+            return blank
+        changed = _row_differs(item, stored)
+        return {
+            "yes": True,
+            "kind": KIND_MCP,
+            "name": name,
+            "slug": name,
+            "path": str(self._path()),
+            "at": 0.0,
+            "files": [],
+            "digest": "",
+            "enabled": bool(stored.get("enabled", True)),
+            "provenance": True,
+            "changed": changed,
+            "connected": self._is_connected(name),
+            "words": f"已登记：{name}" + ("" if stored.get("enabled", True) else "（停用）"),
+        }
+
+    def _is_connected(self, name: str) -> bool:
+        for row in mcp_rows(self._mcp_status()):
+            if str(row.get("name") or "") == name:
+                return bool(row.get("connected"))
+        return False
+
+    def _install_verdict(
+        self,
+        item: CatalogItem,
+        installed: Mapping[str, object],
+        look: _Look | None = None,
+    ) -> dict[str, object]:
+        if bool(installed["yes"]):
+            return {"can": False, "words": "这一条已经装了，不用重复装"}
+        present = list((look or _Look(self)).runtime)
+        gaps = [str(one) for one in item.needs if str(one) not in present]
+        if gaps:
+            return {
+                "can": False,
+                "words": "这台机器上缺 " + "、".join(gaps) + "，装上了也起不来。",
+            }
+        return {"can": True, "words": "可以装（装之前还会把要跑的那一条摊给你看）"}
+
+    def _update_verdict(
+        self, item: CatalogItem, installed: Mapping[str, object]
+    ) -> dict[str, object]:
+        """能不能更新、为什么不能。**这一句必须说实话**，不能给一颗点了什么也不会变的按钮。"""
+        if not bool(installed["yes"]):
+            return {"can": False, "words": "还没装，谈不上更新"}
+        if item.kind == KIND_SKILL:
+            if not bool(installed["provenance"]):
+                return {
+                    "can": False,
+                    "words": "这一份没留下来历记录（多半是更早那版装的，那时候还没记）—— "
+                    "所以判断不了上游有没有出新内容。要换新内容：先删掉这一份，再装一次。",
+                }
+            return {
+                "can": True,
+                "words": "按盘上那份来历重新取一次，比内容决定要不要动（比的是文件，不是版本号）",
+            }
+        if bool(installed["changed"]):
+            return {
+                "can": True,
+                "words": "清单上这一条和盘上登记的不一样了（命令行 / 地址 / 要的环境变量），"
+                "重写一次登记并当场连一次",
+            }
+        spec = item.install if isinstance(item.install, Mapping) else {}
+        launcher = str(spec.get("command") or "").strip().lower()
+        if launcher in RUN_LATEST_COMMANDS:
+            return {
+                "can": False,
+                "words": f"这一条每次起进程都是 `{launcher} -y` 现拉最新版，没有「更新」这一步。",
+            }
+        return {"can": False, "words": "清单上这一条和盘上登记的一模一样，没什么要重写的。"}
+
+    def _remove_verdict(
+        self, item: CatalogItem, installed: Mapping[str, object]
+    ) -> dict[str, object]:
+        if not bool(installed["yes"]):
+            return {"can": False, "words": "这条本来就没装，没什么可删"}
+        return {"can": True, "words": "删之前会再问一次，且只动它自己那一个目录 / 那一条登记"}
+
+    def _update_server(self, item: CatalogItem) -> InstallResult:
+        """MCP 的"更新" = 按清单重写这条登记，**保住它原来的启停**，再当场连一次。"""
+        name = self._server_key(item)
+        path = path_for(self._dir())
+        try:
+            was_enabled = bool(entries(load(path)).get(name, {}).get("enabled", True))
+        except ServerStoreError as exc:
+            return InstallResult(False, KIND_MCP, item.name, reason=f"这条读不回来：{exc}")
+        result = install_mcp(item, self._dir(), environ=self._environ, audit=self._audit)
+        if not result.ok:
+            return result
+        try:
+            after = load(path)
+            if bool(entries(after).get(result.name, {}).get("enabled", True)) != was_enabled:
+                save(path, set_entry_enabled(after, result.name, was_enabled))
+        except ServerStoreError as exc:
+            return InstallResult(
+                True,
+                KIND_MCP,
+                result.name,
+                path=str(path),
+                reason=f"登记写进去了，但启停状态没保住：{exc}",
+            )
+        connect = self._connect_right_away(result.name)
+        self._note(f"更新 MCP 登记 {result.name}（保住启停={was_enabled}）：{connect}")
+        return InstallResult(
+            True,
+            KIND_MCP,
+            result.name,
+            path=str(path),
+            detail=f"按清单重写了一次；连了一次：{connect}",
+        )
 
     def add_http_server(self, name: str, url: str) -> dict[str, object]:
         """手工加一条 **http** 的 MCP server（不起进程，风险和 fetch_url 同阶）。
@@ -468,4 +836,89 @@ def _refuse(reason: str, snapshot: dict[str, object]) -> dict[str, object]:
     return out
 
 
-__all__ = ["EXTENSION_SOURCE", "LIST_TOOL", "ExtensionsService"]
+def _row_differs(item: CatalogItem, stored: Mapping[str, object]) -> bool:
+    """清单上这一条，和盘上那条登记，还是同一份吗。
+
+    只比**会跑起来的那几样**（命令行、参数、地址、要的环境变量）：说明文字改了不算更新，
+    那会让用户以为自己的 server 被动过。
+    """
+    spec = item.install if isinstance(item.install, Mapping) else {}
+
+    def text(row: Mapping[str, object], key: str) -> str:
+        return str(row.get(key) or "")
+
+    def words(row: Mapping[str, object], key: str) -> list[str]:
+        return [str(one) for one in string_list(row.get(key))]
+
+    return (
+        text(spec, "command") != text(stored, "command")
+        or words(spec, "args") != words(stored, "args")
+        or text(spec, "url") != text(stored, "url")
+        or sorted(words(spec, "env_from")) != sorted(words(stored, "env_from"))
+    )
+
+
+def _as_time(value: object) -> float:
+    """来历记录里那个 `installed_at`：不是数字就当没记过，不拿 0 装"很久以前"。"""
+    return float(value) if isinstance(value, (int, float)) else 0.0
+
+
+def mcp_rows(status: Mapping[str, object]) -> list[Mapping[str, object]]:
+    """逐台状态。现在后端回的是 `statuses`，老形状里 `servers` 可能给成数组 —— 两种都认。"""
+    rows: list[Mapping[str, object]] = []
+    for key in ("statuses", "servers"):
+        value = status.get(key)
+        if isinstance(value, list):
+            rows.extend(row for row in value if isinstance(row, Mapping))
+    return rows
+
+
+def empty_detail(item_id: str = "", reason: str = "") -> dict[str, object]:
+    """详情页读不到时的**完整形状**。
+
+    桥面没有扩展层、id 不认识、后端抛了异常 —— 三种都要回同一份骨架 + 一句原因。
+    少一个键，界面那一块就不画，用户于是永远看不见"为什么没有"。
+    """
+    return {
+        "found": False,
+        "id": item_id,
+        "item": {},
+        "installed": {
+            "yes": False,
+            "kind": "",
+            "name": "",
+            "slug": "",
+            "path": "",
+            "at": 0.0,
+            "files": [],
+            "digest": "",
+            "enabled": False,
+            "provenance": False,
+            # 和真卡同一份骨架：少一格的表现是界面那一块不画（这条被本轮新加的判据抓到过）
+            "changed": False,
+            "connected": False,
+            "words": "",
+        },
+        "install": {"can": False, "words": reason},
+        "update": {"can": False, "words": reason},
+        "remove": {"can": False, "words": reason},
+        "runtime": {"present": [], "paths": {}, "labels": {}, "missing": [], "error": ""},
+        "log": [],
+        "directory": "",
+        "servers_file": "",
+        "error": reason,
+    }
+
+
+def empty_recommended(reason: str) -> dict[str, object]:
+    """推荐那一格读不到时的形状。**空列表必须带着一句原因回去**，否则界面只能说"没有推荐"。"""
+    return {"items": [], "error": reason, "at": 0.0, "where": ""}
+
+
+__all__ = [
+    "EXTENSION_SOURCE",
+    "LIST_TOOL",
+    "ExtensionsService",
+    "empty_detail",
+    "empty_recommended",
+]
