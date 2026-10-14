@@ -29,7 +29,7 @@
           <div class="im__section">
             <label class="im__row">
               <span class="hud-label">画什么</span>
-              <textarea v-model="prompt" class="hud-field im__prompt" rows="3" placeholder="一只在月光下的橘猫，插画风，柔光"></textarea>
+              <textarea v-model="prompt" class="hud-field im__prompt" rows="5" placeholder="一只在月光下的橘猫，插画风，柔光"></textarea>
             </label>
             <p class="im__why">支持任意语言描述，先整句联网翻译为英文，再送给生图模型。颜色、动作、数量和位置关系按原文保留。</p>
             <div class="im__row im__row--inline">

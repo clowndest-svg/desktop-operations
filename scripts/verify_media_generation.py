@@ -36,7 +36,7 @@ def main() -> int:
     prefs.set(IMAGE_COUNT, 1)
     paths = AppPaths.resolve({"JARVIS_HOME": str(args.output)})
     images = ImageService(prefs, paths)
-    videos = VideoService(images, paths)
+    videos = VideoService(images, prefs, paths)
     images.start()
     videos.start()
     bridge = HudBridge.__new__(HudBridge)

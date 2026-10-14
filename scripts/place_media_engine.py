@@ -64,7 +64,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--engine-root", type=Path, default=Path("D:/AI/XiaoYe/engine"))
     parser.add_argument("--build-root", type=Path, default=Path("D:/AI/XiaoYe/build"))
-    parser.add_argument("--round", default="r113")
+    parser.add_argument("--round", default="r114")
     args = parser.parse_args()
     if not args.round.startswith("r") or not args.round[1:].isdigit():
         raise ValueError("轮次必须为 r 加数字")

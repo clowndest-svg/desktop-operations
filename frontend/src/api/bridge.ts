@@ -811,12 +811,56 @@ export interface MirrorAction {
 
 
 /** 生图：本机 ComfyUI 或云端 API 的一次答复（服务端 ImageAnswer 的镜像）。 */
+export interface VideoPlan {
+  size: string
+  width: number
+  height: number
+  fps: number
+  seconds: number
+  frames: number
+  steps: number
+  explicit: boolean
+  vram_total_mb: number
+  max_frames: number
+  capped: boolean
+  note: string
+}
+
+export interface VideoCloudConfig {
+  submit_url: string
+  key_env: string
+  model: string
+  body: string
+  headers: string
+  task_path: string
+  poll_url: string
+  video_path: string
+  status_path: string
+  succeeded: string
+  running: string
+  failed: string
+  key_set?: boolean
+}
+
 export interface VideoState {
   phase: string
   detail: string
   error: string
   last_path: string
   last_seconds: number
+  model?: string
+  plan?: VideoPlan
+  choice?: { size: string; fps: number; seconds: number; steps: number }
+  options?: {
+    sizes: string[]
+    fpss: number[]
+    seconds: number[]
+    engines?: string[]
+    auto_profile: { size: string; fps: number; seconds: number; vram_total_mb: number }
+  }
+  engine?: string
+  cloud?: VideoCloudConfig
+  cloud_defaults?: VideoCloudConfig
 }
 export interface VideoAnswer {
   ok: boolean
@@ -827,6 +871,13 @@ export interface VideoAnswer {
   prompt_note: string
   seconds: number
   duration: number
+  engine?: string
+  frames?: number
+  fps?: number
+  size?: string
+  steps?: number
+  capped?: boolean
+  note?: string
 }
 
 export interface ImageAnswer {
@@ -879,6 +930,8 @@ export interface ImageProbe {
   version: string
   checkpoints: string[]
   probed_at: number
+  vram_total_mb: number
+  vram_free_mb: number
 }
 
 export interface ImageState {
@@ -2049,7 +2102,25 @@ interface PywebviewApi {
   // 生图。参数名照投屏那条禁令一样避开 window/promise/arguments 这些 stub 内部标识符。
   image_state(): Promise<ImageState>
   video_state(): Promise<VideoState>
-  video_generate(prompt: string, frames: number, steps: number): Promise<VideoAnswer>
+  video_generate(
+    prompt: string,
+    frames: number | null,
+    steps: number | null,
+    size: string | null,
+    fps: number | null,
+    seconds: number | null,
+  ): Promise<VideoAnswer>
+  video_tune(
+    size: string | null,
+    fps: number | null,
+    seconds: number | null,
+    steps: number | null,
+  ): Promise<VideoState>
+  video_probe(): Promise<VideoState>
+  // 视频引擎三档 + 云端多家可自填配置。参数名同样避开 stub 内部标识符。
+  video_set_engine(engine: string): Promise<VideoState>
+  video_cloud_save(fields: Record<string, string>): Promise<VideoState>
+  video_cloud_reset(): Promise<VideoState>
   artifact_video(path: string): Promise<{ ok: boolean; data_url: string; error: string }>
   image_probe(): Promise<ImageState>
   image_generate(prompt: string, size: string): Promise<ImageAnswer>
@@ -2519,6 +2590,49 @@ function mockFigure(
  * 老实说"这里没有"；云端那一档假装画了一张（存一张真 PNG 的 base64，让预览那条路
  * 在开发模式下也真的被走一遍），并像后端一样记账：last_path、秒数、上一次的种子。 */
 const MOCK_IMAGE_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAGAAAABgCAIAAABt+uBvAAABRElEQVR4nO3ZMUpEURBE0dvDLMHYdbp80c4UXyCILziFaMfFFOfPd15e3x71+TOOx7cSnh+/PjL7x/GljS1IO/1UwrOHdjp8REys84BMbA7tmNic2zGxjYn1e4gotjGxfvkhoticazKxjYllYv3JdyYT25hYJpaJ9Q9vZrzuyINiFMvE+q8X576LzbkmD4obimVieVDMg2LX/ReTYnOuiWIbimViUSyKdd1BsTnXRLENxTKxKBbFuu6g2JxrotiGYplYFItiXXdQbM41UWxDsUwsikWxrjsoNueaKLahWCYWxaJY1x0Um3NNFNtQLBOLYlGs6w6Kzbkmim0ololFsSjWdQfF5lwTxTYUy8SiWBTruoNic66JYhuKZWJRLIp13UGxOddEsQ3FMrEoFsW67qDYnGui2IZimVgUi2Jdd1BszjW9A3WGD6M/xSE4AAAAAElFTkSuQmCC'
+
+const MOCK_VIDEO_CLOUD: VideoCloudConfig = {
+  submit_url:
+    'https://dashscope.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis',
+  key_env: 'DASHSCOPE_API_KEY',
+  model: 'wanx2.1-t2v-turbo',
+  body: '{"model": {{model}}, "input": {"prompt": {{prompt}}}, "parameters": {"size": "{{width}}*{{height}}", "duration": {{seconds}}, "fps": {{fps}}}}',
+  headers: '{"X-DashScope-Async": "enable"}',
+  task_path: 'output.task_id',
+  poll_url: 'https://dashscope.aliyuncs.com/api/v1/tasks/{{task_id}}',
+  video_path: 'output.video_url',
+  status_path: 'output.task_status',
+  succeeded: 'SUCCEEDED',
+  running: 'PENDING,RUNNING',
+  failed: 'FAILED,UNKNOWN',
+  key_set: false,
+}
+
+function mockVideoState(): VideoState {
+  return {
+    phase: 'off',
+    detail: '浏览器预览没有本地视频引擎',
+    error: '',
+    last_path: '',
+    last_seconds: 0,
+    plan: {
+      size: '256x256', width: 256, height: 256, fps: 8, seconds: 2, frames: 16, steps: 16,
+      explicit: false, vram_total_mb: 0, max_frames: 32, capped: false,
+      note: '还没检测过本机引擎，按 4 GB 保守处理。',
+    },
+    choice: { size: '', fps: 0, seconds: 0, steps: 0 },
+    options: {
+      sizes: ['256x256', '384x384', '512x512'],
+      fpss: [8, 12, 16, 24],
+      seconds: [2, 3, 4, 8, 16, 32],
+      engines: ['auto', 'local', 'cloud'],
+      auto_profile: { size: '256x256', fps: 8, seconds: 2, vram_total_mb: 0 },
+    },
+    engine: 'local',
+    cloud: { ...MOCK_VIDEO_CLOUD },
+    cloud_defaults: { ...MOCK_VIDEO_CLOUD },
+  }
+}
 
 const mockImage: ImageState = {
   engine: 'auto',
@@ -4477,7 +4591,22 @@ const mock: PywebviewApi = {
     return { ...mockImage }
   },
   async video_state() {
-    return { phase: 'off', detail: '浏览器预览没有本地视频引擎', error: '', last_path: '', last_seconds: 0 }
+    return mockVideoState()
+  },
+  async video_tune() {
+    return mockVideoState()
+  },
+  async video_probe() {
+    return mockVideoState()
+  },
+  async video_set_engine(engine) {
+    return { ...mockVideoState(), engine }
+  },
+  async video_cloud_save() {
+    return mockVideoState()
+  },
+  async video_cloud_reset() {
+    return mockVideoState()
   },
   async video_generate(prompt) {
     return { ok: false, path: '', error: '浏览器预览没有本地视频引擎',
@@ -4496,6 +4625,8 @@ const mock: PywebviewApi = {
       version: '',
       checkpoints: [],
       probed_at: 0,
+      vram_total_mb: 0,
+      vram_free_mb: 0,
     }
     mockImage.error = ''
     return { ...mockImage }
@@ -6374,8 +6505,40 @@ export function fetchImageState(): Promise<ImageState> {
 export function fetchVideoState(): Promise<VideoState> {
   return bridge().then((target) => target.video_state())
 }
-export function generateVideo(prompt: string, frames: number, steps: number): Promise<VideoAnswer> {
-  return bridge().then((target) => target.video_generate(prompt, frames, steps))
+export function generateVideo(
+  prompt: string,
+  opts: { size?: string | null; fps?: number | null; seconds?: number | null; steps?: number | null } = {},
+): Promise<VideoAnswer> {
+  return bridge().then((target) =>
+    target.video_generate(
+      prompt,
+      null,
+      opts.steps ?? null,
+      opts.size ?? null,
+      opts.fps ?? null,
+      opts.seconds ?? null,
+    ),
+  )
+}
+export function tuneVideo(
+  size: string | null,
+  fps: number | null,
+  seconds: number | null,
+  steps: number | null,
+): Promise<VideoState> {
+  return bridge().then((target) => target.video_tune(size, fps, seconds, steps))
+}
+export function probeVideoEngine(): Promise<VideoState> {
+  return bridge().then((target) => target.video_probe())
+}
+export function setVideoEngine(engine: string): Promise<VideoState> {
+  return bridge().then((target) => target.video_set_engine(engine))
+}
+export function saveVideoCloud(fields: Record<string, string>): Promise<VideoState> {
+  return bridge().then((target) => target.video_cloud_save(fields))
+}
+export function resetVideoCloud(): Promise<VideoState> {
+  return bridge().then((target) => target.video_cloud_reset())
 }
 export function artifactVideo(path: string): Promise<{ ok: boolean; data_url: string; error: string }> {
   return bridge().then((target) => target.artifact_video(path))

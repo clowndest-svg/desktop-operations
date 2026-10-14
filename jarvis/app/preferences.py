@@ -329,6 +329,71 @@ that path sends ``n: 1``."""
 
 IMAGE_KEEP_OUTPUT = "image.keep"
 
+VIDEO_ENGINE = "video.engine"
+"""视频用哪条引擎：``local``（默认，只用本机 AnimateDiff）、``cloud``（只用云端 API）、
+``auto``（本机引擎能连上就走本地，连不上且云端配好才走云端）。
+
+默认落在本地，和生图同一个理由：本机那条不需要任何钥匙就能出片，买家第一次问就有画面；
+把它翻成云端要他自己在下面那一格填端点，填错还会是他能看懂的一句话，不是静默失败。
+"""
+
+VIDEO_SIZE = "video.size"
+"""本地视频的分辨率。空串＝**自动（按本机显存）**；手动档只有 256x256/384x384/512x512。"""
+
+VIDEO_FPS = "video.fps"
+"""帧率。0＝自动；手动档 8/12/16/24。帧率只改播放快慢，不改生成成本（成本看帧数）。"""
+
+VIDEO_SECONDS = "video.seconds"
+"""时长（秒）。0＝自动（短视频档）；手动档 2/4/8/16/32，实际能到多少由显存上限截。"""
+
+VIDEO_STEPS = "video.steps"
+"""采样步数。0＝自动（16 步）；范围 12~30，和旧版一致。"""
+
+# --- 云端视频：多家可插拔，配置全部由用户自己填 --------------------------------
+# 视频没有像生图 ``/images/generations`` 那样的通用协议：可灵 / 即梦 / 通义万相 / Vidu /
+# MiniMax 各家都是「提交一个异步任务 → 轮询状态 → 拿回视频 URL」，字段名各不相同。所以这里
+# 不给某一家写死契约，而是把这条异步链路的每个"接口形状"摊开成人能填的格子；默认值按
+# 阿里通义万相（项目里已有 DASHSCOPE_API_KEY，能直接跑通）预置，换别家就把对应格子改掉。
+# 钥匙的值**永远不落这个文件**（见本模块顶部说明）——这里只存"钥匙住在哪个环境变量"的名字。
+
+VIDEO_CLOUD_SUBMIT = "video.cloud.submit_url"
+"""提交任务的完整 POST 地址（不是 /v1 那种 base，是这一家真正的建任务端点）。"""
+
+VIDEO_CLOUD_KEY_ENV = "video.cloud.key_env"
+"""保存 API 钥匙的环境变量名（默认 DASHSCOPE_API_KEY）。这里只存名字，值只进环境变量。"""
+
+VIDEO_CLOUD_MODEL = "video.cloud.model"
+"""模型 id，填进请求体模板里的 {{model}}（如 wanx2.1-t2v-turbo）。"""
+
+VIDEO_CLOUD_BODY = "video.cloud.body"
+"""请求体 JSON 模板。占位符按 JSON 值原样插入、不要加引号：
+{{prompt}} {{model}} {{width}} {{height}} {{seconds}} {{fps}} {{frames}}。"""
+
+VIDEO_CLOUD_HEADERS = "video.cloud.headers"
+"""额外的请求头，一段 JSON 对象。通义万相要 {"X-DashScope-Async": "enable"}；
+鉴权头 Bearer 由软件按钥匙自动加，不用写在这里。"""
+
+VIDEO_CLOUD_TASK_PATH = "video.cloud.task_path"
+"""提交响应里"任务 id"的取法，点号路径（可带下标）：如 output.task_id。"""
+
+VIDEO_CLOUD_POLL_URL = "video.cloud.poll_url"
+"""查进度的 GET 地址模板，{{task_id}} 会被替换。留空＝这一家一次性返回、不轮询。"""
+
+VIDEO_CLOUD_VIDEO_PATH = "video.cloud.video_path"
+"""最终响应里"视频下载地址"的取法：如 output.video_url、或 data[0].url。"""
+
+VIDEO_CLOUD_STATUS_PATH = "video.cloud.status_path"
+"""轮询响应里"状态"的取法：如 output.task_status。留空＝按有没有拿到视频地址判断完成。"""
+
+VIDEO_CLOUD_SUCCEEDED = "video.cloud.succeeded"
+"""视为成功的状态值，逗号分隔（默认 SUCCEEDED）。"""
+
+VIDEO_CLOUD_RUNNING = "video.cloud.running"
+"""视为进行中（继续等）的状态值，逗号分隔（默认 PENDING,RUNNING）。"""
+
+VIDEO_CLOUD_FAILED = "video.cloud.failed"
+"""视为失败并中止的状态值，逗号分隔（默认 FAILED,UNKNOWN）。"""
+
 KNOWLEDGE_AUTO_LEARN = "knowledge.auto_learn"
 """她自己把"这轮真从网上查过的东西"存进知识库，这一档开不开。
 
@@ -453,6 +518,23 @@ PREFERENCE_TYPES: dict[str, type] = {
     IMAGE_STEPS: int,
     IMAGE_COUNT: int,
     IMAGE_KEEP_OUTPUT: bool,
+    VIDEO_ENGINE: str,
+    VIDEO_SIZE: str,
+    VIDEO_FPS: int,
+    VIDEO_SECONDS: int,
+    VIDEO_STEPS: int,
+    VIDEO_CLOUD_SUBMIT: str,
+    VIDEO_CLOUD_KEY_ENV: str,
+    VIDEO_CLOUD_MODEL: str,
+    VIDEO_CLOUD_BODY: str,
+    VIDEO_CLOUD_HEADERS: str,
+    VIDEO_CLOUD_TASK_PATH: str,
+    VIDEO_CLOUD_POLL_URL: str,
+    VIDEO_CLOUD_VIDEO_PATH: str,
+    VIDEO_CLOUD_STATUS_PATH: str,
+    VIDEO_CLOUD_SUCCEEDED: str,
+    VIDEO_CLOUD_RUNNING: str,
+    VIDEO_CLOUD_FAILED: str,
     KNOWLEDGE_AUTO_LEARN: bool,
     KNOWLEDGE_AUTO_SEEN: list,
     KNOWLEDGE_AUTO_COUNT: dict,

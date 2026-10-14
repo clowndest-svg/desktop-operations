@@ -3379,15 +3379,109 @@ class HudBridge:
 
     def video_state(self) -> dict[str, Any]:
         if self._videos is None:
-            return {"phase": "off", "error": "没有接本地视频服务", "last_path": ""}
+            return {
+                "phase": "off",
+                "error": "没有接本地视频服务",
+                "last_path": "",
+                "plan": {},
+                "choice": {},
+                "options": {},
+            }
         return self._videos.status()
 
     def video_generate(
-        self, prompt: object, frames: object = 16, steps: object = 16
+        self,
+        prompt: object,
+        frames: object = None,
+        steps: object = None,
+        size: object = None,
+        fps: object = None,
+        seconds: object = None,
     ) -> dict[str, Any]:
         if self._videos is None:
             return {"ok": False, "error": "没有接本地视频服务", "path": ""}
-        return self._videos.generate(str(prompt or ""), frames=frames, steps=steps)
+        return self._videos.generate(
+            str(prompt or ""),
+            frames=frames,
+            steps=steps,
+            size=size,
+            fps=fps,
+            seconds=seconds,
+        )
+
+    def video_tune(
+        self,
+        size: object = None,
+        fps: object = None,
+        seconds: object = None,
+        steps: object = None,
+    ) -> dict[str, Any]:
+        """面板下拉一次发齐四格（同生图那一格的道理：分开四扇门会互相盖掉刚选的值）。"""
+        if self._videos is None:
+            return {"phase": "off", "error": "没有接本地视频服务", "last_path": ""}
+        verdicts = [
+            text
+            for text in (
+                self._videos.set_size(size),
+                self._videos.set_fps(fps),
+                self._videos.set_seconds(seconds),
+                self._videos.set_steps(steps),
+            )
+            if text
+        ]
+        status = self._videos.status()
+        if verdicts:
+            status["error"] = "；".join(verdicts)
+        return status
+
+    def video_probe(self) -> dict[str, Any]:
+        """真去问一次本机引擎的显存，把自动档和上限刷新。面板按键才发，不进轮询。"""
+        if self._videos is None:
+            return {"phase": "off", "error": "没有接本地视频服务", "last_path": ""}
+        self._videos.probe()
+        return self._videos.status()
+
+    def video_set_engine(self, engine: object) -> dict[str, Any]:
+        """切本地/云端/自动三档。返回最新状态（含 engine/cloud/cloud_ready）。"""
+        if self._videos is None:
+            return {"phase": "off", "error": "没有接本地视频服务", "last_path": ""}
+        verdict = self._videos.set_engine(engine)
+        status = self._videos.status()
+        if verdict:
+            status["error"] = verdict
+        return status
+
+    def video_cloud_save(self, fields: object) -> dict[str, Any]:
+        """存云端各格（用户自填、支持多家）。只认白名单键，坏 JSON 模板当场拒并说明。"""
+        if self._videos is None:
+            return {"phase": "off", "error": "没有接本地视频服务", "last_path": ""}
+        payload = fields if isinstance(fields, Mapping) else {}
+        verdict = self._videos.set_cloud(payload)
+        status = self._videos.status()
+        if verdict:
+            status["error"] = verdict
+        return status
+
+    def video_cloud_reset(self) -> dict[str, Any]:
+        """把云端各格清空＝退回出厂默认（通义万相那套）。清的是存值，不是钥匙值。"""
+        if self._videos is None:
+            return {"phase": "off", "error": "没有接本地视频服务", "last_path": ""}
+        for field in (
+            "submit_url",
+            "key_env",
+            "model",
+            "body",
+            "headers",
+            "task_path",
+            "poll_url",
+            "video_path",
+            "status_path",
+            "succeeded",
+            "running",
+            "failed",
+        ):
+            self._videos.set_cloud({field: ""})
+        return self._videos.status()
 
     def artifact_video(self, path: object) -> dict[str, object]:
         """Small locally generated clips only; never expose arbitrary disk paths."""

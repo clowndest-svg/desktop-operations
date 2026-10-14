@@ -995,7 +995,7 @@ def _run_desktop(args: argparse.Namespace) -> int:
     # 同一个对象，而「起起来的引擎子进程」只能有一个地方持有 —— 和 scrcpy 那条窗口同一条理由。
     image_engine = ImageService(preferences, config_service.paths)
     app.register(image_engine)
-    video_engine = VideoService(image_engine, config_service.paths)
+    video_engine = VideoService(image_engine, preferences, config_service.paths)
     app.register(video_engine)
     # Built before the capability stack because the tool that changes her voice is
     # wired in the same place every other tool is wired, and that tool needs the

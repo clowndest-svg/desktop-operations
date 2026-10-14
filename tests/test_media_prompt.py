@@ -1,91 +1,151 @@
-"""Translation must retain the full sentence, not guess from known keywords."""
+"""国内服务商链：英文跳过、按序兜底、失败说真话、绝不泄露提示词。"""
 
 from __future__ import annotations
 
 import io
 import json
+import urllib.error
+import urllib.request
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from jarvis.app.media_prompt import PromptTranslator, TranslationError
-
-
-@pytest.mark.parametrize(
-    ("source", "language", "english"),
-    [
-        (
-            "两只红鸟在蓝猫左边，没有帽子",
-            "zh-CN",
-            "Two red birds to the left of a blue cat, no hats",
-        ),
-        ("Un chat orange court dans la neige", "fr", "An orange cat runs in the snow"),
-        ("Dos gatos negros sin sombrero", "es", "Two black cats without hats"),
-        ("赤い鳥が飛んでいる", "ja", "A red bird is flying"),
-        ("Синяя птица летит", "ru", "A blue bird is flying"),
-        ("طائر أزرق يطير", "ar", "A blue bird is flying"),
-    ],
+from jarvis.app.media_prompt import (
+    BAIDU_APPID_ENV,
+    BAIDU_KEY_ENV,
+    DASHSCOPE_KEY_ENV,
+    PromptTranslator,
+    TranslationError,
+    _dig_message_content,
+    _looks_english,
 )
-def test_automatic_detection_also_translates_ascii_languages(
-    source: str,
-    language: str,
-    english: str,
-) -> None:
-    requests = []
 
-    def opener(request: Any, timeout: float) -> io.BytesIO:
-        requests.append(request)
-        assert timeout <= 15
+
+def _resp(payload: object) -> io.BytesIO:
+    return io.BytesIO(json.dumps(payload).encode())
+
+
+def _qwen_ok(english: str) -> dict[str, Any]:
+    return {"choices": [{"message": {"content": english}}]}
+
+
+def _baidu_ok(dst: str) -> dict[str, Any]:
+    return {"from": "zh", "to": "en", "trans_result": [{"src": "x", "dst": dst}]}
+
+
+def test_english_input_never_touches_the_network() -> None:
+    def opener(request: Any, timeout: float) -> io.BytesIO:  # pragma: no cover
+        raise AssertionError("英文输入不该发网络请求")
+
+    result = PromptTranslator(opener, {DASHSCOPE_KEY_ENV: "sk"}).translate(
+        "an orange cat running in the snow"
+    )
+    assert result.english == "an orange cat running in the snow"
+    assert "未联网" in result.note
+
+
+def test_unaccented_foreign_is_not_skipped() -> None:
+    assert not _looks_english("Dos gatos negros")
+    assert not _looks_english("Un chat orange court dans la neige")
+    assert _looks_english("a cat with a hat behind the tree")
+
+
+def test_qwen_mt_is_tried_first_and_parses_openai_shape() -> None:
+    seen: list[str] = []
+
+    def opener(request: urllib.request.Request, timeout: float) -> io.BytesIO:
+        seen.append(request.full_url)
+        raw = request.data if isinstance(request.data, (bytes, bytearray)) else b"{}"
+        body = json.loads(raw)
+        assert body["translation_options"]["target_lang"] == "English"
+        assert body["messages"][0]["content"] == "一只橘猫在跑步"
+        return _resp(_qwen_ok("An orange cat runs"))
+
+    result = PromptTranslator(
+        opener, {DASHSCOPE_KEY_ENV: "sk", BAIDU_APPID_ENV: "a", BAIDU_KEY_ENV: "b"}
+    ).translate("一只橘猫在跑步")
+    assert result.english == "An orange cat runs"
+    assert result.provider == "阿里云通义千问"
+    assert "dashscope" in seen[0] and "baidu" not in "".join(seen)  # 第一家成功就不再试第二家
+
+
+def test_falls_back_to_baidu_when_qwen_fails() -> None:
+    order: list[str] = []
+
+    def opener(request: urllib.request.Request, timeout: float) -> io.BytesIO:
+        order.append("qwen" if "dashscope" in request.full_url else "baidu")
+        if "dashscope" in request.full_url:
+            raise urllib.error.HTTPError(request.full_url, 429, "Too Many", {}, None)  # type: ignore[arg-type]
         query = parse_qs(urlparse(request.full_url).query)
-        assert query["sl"] == ["auto"] and query["tl"] == ["en"]
-        assert query["q"] == [source]
-        return io.BytesIO(json.dumps([[[english, source]], None, language]).encode())
+        assert query["appid"] == ["id1"] and "sign" in query
+        return _resp(_baidu_ok("Two black cats without hats"))
 
-    translator = PromptTranslator(opener)
-    result = translator.translate(source)
-    assert result.original == source and result.english == english
-    assert translator.translate(source) == result
-    assert len(requests) == 1
-
-
-def test_english_weights_and_punctuation_remain_exact() -> None:
-    source = "(blue cat:1.3), two birds, no hats"
-
-    def opener(request: Any, timeout: float) -> io.BytesIO:
-        return io.BytesIO(json.dumps([[["rewritten", source]], None, "en"]).encode())
-
-    assert PromptTranslator(opener).translate(source).english == source
+    env = {DASHSCOPE_KEY_ENV: "sk", BAIDU_APPID_ENV: "id1", BAIDU_KEY_ENV: "secret"}
+    result = PromptTranslator(opener, env).translate("两只黑猫没有帽子")
+    assert result.english == "Two black cats without hats"
+    assert result.provider == "百度翻译"
+    assert order == ["qwen", "baidu"]
 
 
-@pytest.mark.parametrize(
-    "payload",
-    [
-        {},
-        [],
-        [[["cat", "only part"]], None, "zh-CN"],
-        [[["cat 猫", "猫"]], None, "zh-CN"],
-        [[["", "猫"]], None, "zh-CN"],
-    ],
-)
-def test_bad_or_incomplete_translations_stop_generation(payload: object) -> None:
-    def opener(request: Any, timeout: float) -> io.BytesIO:
-        return io.BytesIO(json.dumps(payload).encode())
+def test_no_key_configured_names_the_env_vars() -> None:
+    def opener(request: Any, timeout: float) -> io.BytesIO:  # pragma: no cover
+        raise AssertionError("没配钥匙就不该发请求")
 
-    with pytest.raises(TranslationError):
-        PromptTranslator(opener).translate("猫")
+    with pytest.raises(TranslationError) as error:
+        PromptTranslator(opener, {}).translate("一只猫")
+    message = str(error.value)
+    assert DASHSCOPE_KEY_ENV in message and BAIDU_APPID_ENV in message
 
 
-def test_network_failure_has_no_prompt_or_html_in_the_error() -> None:
-    def opener(request: Any, timeout: float) -> io.BytesIO:
-        raise OSError("private description and proxy credentials")
+def test_all_providers_failing_surfaces_reason_without_the_prompt() -> None:
+    secret = "一只戴着蓝色围巾的橘猫"
 
-    with pytest.raises(TranslationError, match="尚未提交") as error:
-        PromptTranslator(opener).translate("private description")
-    assert "private description" not in str(error.value)
+    def opener(request: urllib.request.Request, timeout: float) -> io.BytesIO:
+        raise urllib.error.HTTPError(request.full_url, 500, "boom", {}, None)  # type: ignore[arg-type]
+
+    env = {DASHSCOPE_KEY_ENV: "sk", BAIDU_APPID_ENV: "id", BAIDU_KEY_ENV: "key"}
+    with pytest.raises(TranslationError) as error:
+        PromptTranslator(opener, env).translate(secret)
+    message = str(error.value)
+    assert "尚未提交" in message and "500" in message
+    assert "通义千问" in message and "百度翻译" in message
+    assert secret not in message  # 提示词绝不进错误
 
 
-def test_multiple_segments_preserve_all_clauses() -> None:
-    payload = [[["A blue cat. ", "蓝猫。"], ["No hat.", "没有帽子。"]], None, "zh-CN"]
-    result = PromptTranslator._parse("蓝猫。没有帽子。", payload)
-    assert result.english == "A blue cat. No hat."
+def test_baidu_error_code_is_not_treated_as_success() -> None:
+    def opener(request: urllib.request.Request, timeout: float) -> io.BytesIO:
+        return _resp({"error_code": "54001", "msg": "Invalid Sign"})
+
+    env = {BAIDU_APPID_ENV: "id", BAIDU_KEY_ENV: "key"}  # 只有百度配了钥匙
+    with pytest.raises(TranslationError, match="百度"):
+        PromptTranslator(opener, env).translate("猫")
+
+
+def test_untranslated_output_stops_generation() -> None:
+    def opener(request: urllib.request.Request, timeout: float) -> io.BytesIO:
+        return _resp(_qwen_ok("还是中文没有翻"))
+
+    with pytest.raises(TranslationError, match="未翻译"):
+        PromptTranslator(opener, {DASHSCOPE_KEY_ENV: "sk"}).translate("一只猫")
+
+
+def test_result_is_cached_and_second_call_skips_network() -> None:
+    calls: list[str] = []
+
+    def opener(request: urllib.request.Request, timeout: float) -> io.BytesIO:
+        calls.append(request.full_url)
+        return _resp(_qwen_ok("A cat"))
+
+    translator = PromptTranslator(opener, {DASHSCOPE_KEY_ENV: "sk"})
+    first = translator.translate("一只猫")
+    second = translator.translate("一只猫")
+    assert first.english == second.english == "A cat"
+    assert len(calls) == 1
+
+
+def test_dig_message_content_is_defensive() -> None:
+    assert _dig_message_content(_qwen_ok("hi")) == "hi"
+    assert _dig_message_content({}) == ""
+    assert _dig_message_content({"choices": []}) == ""
+    assert _dig_message_content({"choices": [{"message": {}}]}) == ""

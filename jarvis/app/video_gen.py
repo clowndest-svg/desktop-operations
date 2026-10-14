@@ -1,33 +1,306 @@
-"""Local AnimateDiff short videos on the same ComfyUI/GPU as image generation."""
+"""Local AnimateDiff videos on the same ComfyUI/GPU as image generation.
+
+分辨率/帧率/时长从 r114 起可调，但**上限不是拍脑袋给的**：
+
+* 默认档是「自动」—— 按 ``/system_stats`` 报回来的显存总量选（4 GB 档给
+  256×256·8fps·2 秒，这一组合是 r113 实测过的）；没检测过时按 4 GB 保守处理并写明。
+* 手动档超出的部分按显存外推的帧数上限截断，截断这件事写在返回的 ``note`` 里 ——
+  悄悄把用户选的 32 秒变成 2 秒就是骗。
+* 外推公式只有一个实测锚点（4 GB 空闲 1979 MB 装得下 32 帧@256×256），
+  界面上必须写明"上限是外推的，崩了往小调"。
+"""
 
 from __future__ import annotations
 
+import json
+import logging
 import random
 import threading
 import time
 import urllib.parse
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 from jarvis.app.image_gen import ImageService, _EngineError, _status_words
 from jarvis.app.media_prompt import TranslationError
+from jarvis.app.preferences import (
+    VIDEO_CLOUD_BODY,
+    VIDEO_CLOUD_FAILED,
+    VIDEO_CLOUD_HEADERS,
+    VIDEO_CLOUD_KEY_ENV,
+    VIDEO_CLOUD_MODEL,
+    VIDEO_CLOUD_POLL_URL,
+    VIDEO_CLOUD_RUNNING,
+    VIDEO_CLOUD_STATUS_PATH,
+    VIDEO_CLOUD_SUBMIT,
+    VIDEO_CLOUD_SUCCEEDED,
+    VIDEO_CLOUD_TASK_PATH,
+    VIDEO_CLOUD_VIDEO_PATH,
+    VIDEO_ENGINE,
+    VIDEO_FPS,
+    VIDEO_SECONDS,
+    VIDEO_SIZE,
+    VIDEO_STEPS,
+    Preferences,
+)
+from jarvis.app.video_cloud import (
+    DEFAULT_BODY,
+    DEFAULT_FAILED,
+    DEFAULT_HEADERS,
+    DEFAULT_KEY_ENV,
+    DEFAULT_MODEL,
+    DEFAULT_POLL_URL,
+    DEFAULT_RUNNING,
+    DEFAULT_STATUS_PATH,
+    DEFAULT_SUBMIT_URL,
+    DEFAULT_SUCCEEDED,
+    DEFAULT_TASK_PATH,
+    DEFAULT_VIDEO_PATH,
+    CloudVideoClient,
+    CloudVideoConfig,
+    render_json_body,
+)
 from jarvis.config.paths import AppPaths
+
+logger = logging.getLogger("jarvis.app.video_gen")
 
 MOTION_MODEL = "mm_sd15_v3.safetensors"
 VIDEO_DEADLINE = 1800.0
 
+ENGINE_CHOICES: tuple[str, ...] = ("auto", "local", "cloud")
+"""三档引擎。默认落 local（见 :data:`jarvis.app.preferences.VIDEO_ENGINE`）。"""
+
+# 云端各格子的出厂默认（通义万相一家，能直接跑通）。用户改了就覆盖，没改沿用。
+_CLOUD_DEFAULTS: dict[str, str] = {
+    VIDEO_CLOUD_SUBMIT: DEFAULT_SUBMIT_URL,
+    VIDEO_CLOUD_KEY_ENV: DEFAULT_KEY_ENV,
+    VIDEO_CLOUD_MODEL: DEFAULT_MODEL,
+    VIDEO_CLOUD_BODY: DEFAULT_BODY,
+    VIDEO_CLOUD_HEADERS: DEFAULT_HEADERS,
+    VIDEO_CLOUD_TASK_PATH: DEFAULT_TASK_PATH,
+    VIDEO_CLOUD_POLL_URL: DEFAULT_POLL_URL,
+    VIDEO_CLOUD_VIDEO_PATH: DEFAULT_VIDEO_PATH,
+    VIDEO_CLOUD_STATUS_PATH: DEFAULT_STATUS_PATH,
+    VIDEO_CLOUD_SUCCEEDED: DEFAULT_SUCCEEDED,
+    VIDEO_CLOUD_RUNNING: DEFAULT_RUNNING,
+    VIDEO_CLOUD_FAILED: DEFAULT_FAILED,
+}
+
+SIZE_CHOICES: tuple[str, ...] = ("256x256", "384x384", "512x512")
+FPS_CHOICES: tuple[int, ...] = (8, 12, 16, 24)
+SECOND_CHOICES: tuple[int, ...] = (2, 3, 4, 8, 16, 32)
+MIN_STEPS, MAX_STEPS = 12, 30
+MAX_FRAMES = 256
+"""绝对帧数上限：32 秒@8fps。再长 SD1.5 AnimateDiff 会开始漂脸，且一次采样装不下。"""
+
+FALLBACK_VRAM_MB = 4096.0
+"""没探测过引擎时按 4 GB 保守处理 —— 宁可少给，不要让用户按一次崩一次。"""
+
+
+class VideoPlan(TypedDict):
+    """一次生成实际会用到的参数。``capped`` 为真时 ``note`` 必须解释截了什么。"""
+
+    size: str
+    width: int
+    height: int
+    fps: int
+    seconds: int
+    frames: int
+    steps: int
+    explicit: bool
+    """True＝这一档是用户/模型点过名的（偏好或传参）；False＝纯按本机自动。"""
+    vram_total_mb: float
+    max_frames: int
+    capped: bool
+    note: str
+
+
+class CloudPlan(TypedDict):
+    """云端那一侧的档位：同样的分层选择，但**不按本机显存截帧**。"""
+
+    size: str
+    width: int
+    height: int
+    fps: int
+    seconds: int
+    frames: int
+    steps: int
+
+
+def _parse_size(text: object) -> tuple[int, int]:
+    raw = str(text or "").strip().lower().replace("×", "x").replace(" ", "")
+    width, _, height = raw.partition("x")
+    try:
+        return int(width), int(height)
+    except ValueError:
+        return 256, 256
+
+
+def auto_profile(vram_mb: float) -> tuple[str, int, int]:
+    """自动档：显存 → (尺寸, 帧率, 秒数)。都是"短视频"，大卡只是给得宽一点。"""
+    if vram_mb >= 10000:
+        return "512x512", 16, 8
+    if vram_mb >= 6000:
+        return "384x384", 12, 4
+    return "256x256", 8, 2
+
+
+def max_frames_for(vram_mb: float, width: int, height: int) -> int:
+    """显存能装下几帧。
+
+    锚点是 r113 实测：4 GB 卡（预算按总显存一半 ≈ 2048 MB）32 帧@256×256 能过。
+    反推每「百万像素·帧」吃 950 MB —— 这个数把采样注意力和 VAE 解码的账都摊进去了，
+    **只有一根锚点，所以界面上要写明这是外推**，并按 4 帧对齐
+    （AnimateDiff 的 8 帧上下文窗口按 4 整除最稳）。
+    """
+    budget = max(512.0, vram_mb * 0.5)
+    per_frame_mb = (width * height) / 1_000_000 * 950.0
+    frames = int(budget / per_frame_mb)
+    frames -= frames % 4
+    return max(8, min(MAX_FRAMES, frames))
+
+
+def _pick_str(
+    name: str,
+    key: str,
+    allowed: tuple[str, ...],
+    auto: str,
+    given: Mapping[str, object],
+    prefs: Preferences,
+) -> str:
+    raw = given.get(name)
+    if raw is not None and str(raw).strip() not in ("", "0", "auto"):
+        text = str(raw).strip().lower().replace("×", "x").replace(" ", "")
+    else:
+        text = prefs.text(key) or auto
+    return text if text in allowed else auto
+
+
+def _pick_int(
+    name: str,
+    key: str,
+    allowed: tuple[int, ...],
+    auto: int,
+    given: Mapping[str, object],
+    prefs: Preferences,
+) -> int:
+    raw = given.get(name)
+    try:
+        number = int(str(raw)) if raw not in (None, "", "auto") else 0
+    except ValueError:
+        number = 0
+    if not number:
+        number = int(prefs.number(key) or 0)
+    return number if number in allowed else auto
+
+
+def resolve_plan(
+    prefs: Preferences,
+    vram_mb: float,
+    explicit: Mapping[str, object] | None = None,
+) -> VideoPlan:
+    """把 传入 > 偏好 > 自动 三层合成一份实际计划，并按显存截帧数。
+
+    ``explicit`` 的键是 size/fps/seconds/steps；None 或空串/0 都算「这一格没说话」，
+    退回偏好档。数值键存的是 int，必须走 ``number()`` —— 用 ``text()`` 读回来永远是空串。
+    """
+    given = dict(explicit or {})
+    auto_size, auto_fps, auto_seconds = auto_profile(vram_mb)
+    chosen_size = _pick_str("size", VIDEO_SIZE, SIZE_CHOICES, auto_size, given, prefs)
+    chosen_fps = _pick_int("fps", VIDEO_FPS, FPS_CHOICES, auto_fps, given, prefs)
+    chosen_seconds = _pick_int("seconds", VIDEO_SECONDS, SECOND_CHOICES, auto_seconds, given, prefs)
+    chosen_steps = _pick_int(
+        "steps", VIDEO_STEPS, tuple(range(MIN_STEPS, MAX_STEPS + 1)), 16, given, prefs
+    )
+    width, height = _parse_size(chosen_size)
+    cap = max_frames_for(vram_mb or FALLBACK_VRAM_MB, width, height)
+    frames = chosen_seconds * chosen_fps
+    capped = frames > cap
+    if capped:
+        frames = cap
+    actual_seconds = round(frames / chosen_fps)
+    explicit_used = any(
+        given.get(name) not in (None, "", 0, "auto") for name in ("size", "fps", "seconds", "steps")
+    ) or bool(
+        prefs.text(VIDEO_SIZE)
+        or prefs.number(VIDEO_FPS)
+        or prefs.number(VIDEO_SECONDS)
+        or prefs.number(VIDEO_STEPS)
+    )
+    note = ""
+    if capped:
+        note = (
+            f"这台机器（显存 {int(vram_mb or FALLBACK_VRAM_MB)} MB，上限约 {cap} 帧）装不下 "
+            f"{chosen_seconds} 秒 × {chosen_fps} 帧/秒 = {chosen_seconds * chosen_fps} 帧，"
+            f"已截到 {frames} 帧（约 {actual_seconds} 秒）。"
+        )
+    if not vram_mb:
+        note += "还没检测过本机引擎，按 4 GB 保守处理；按「检测本机引擎」可拿到真实显存。"
+    return {
+        "size": chosen_size,
+        "width": width,
+        "height": height,
+        "fps": chosen_fps,
+        "seconds": chosen_seconds,
+        "frames": frames,
+        "steps": chosen_steps,
+        "explicit": explicit_used,
+        "vram_total_mb": vram_mb,
+        "max_frames": cap,
+        "capped": capped,
+        "note": note,
+    }
+
+
+def resolve_cloud_plan(
+    prefs: Preferences, explicit: Mapping[str, object] | None = None
+) -> CloudPlan:
+    """云端那侧的时长/尺寸档：同样的 传入>偏好 分层，但**不按本机显存截**。
+
+    云端跑不跑得起、上限多少是服务商的事，拿买家这块 4 GB 卡去截它的参数没道理。
+    这里只把用户点过的档原样算成 size/fps/seconds/frames/steps，喂进请求体模板。
+    """
+    given = dict(explicit or {})
+    chosen_size = _pick_str("size", VIDEO_SIZE, SIZE_CHOICES, SIZE_CHOICES[0], given, prefs)
+    chosen_fps = _pick_int("fps", VIDEO_FPS, FPS_CHOICES, FPS_CHOICES[0], given, prefs)
+    chosen_seconds = _pick_int(
+        "seconds", VIDEO_SECONDS, SECOND_CHOICES, SECOND_CHOICES[0], given, prefs
+    )
+    chosen_steps = _pick_int(
+        "steps", VIDEO_STEPS, tuple(range(MIN_STEPS, MAX_STEPS + 1)), 16, given, prefs
+    )
+    width, height = _parse_size(chosen_size)
+    return {
+        "size": chosen_size,
+        "width": width,
+        "height": height,
+        "fps": chosen_fps,
+        "seconds": chosen_seconds,
+        "frames": chosen_seconds * chosen_fps,
+        "steps": chosen_steps,
+    }
+
 
 def build_video_workflow(
-    checkpoint: str, prompt: str, seed: int, frames: int = 16, steps: int = 16
+    checkpoint: str,
+    prompt: str,
+    seed: int,
+    frames: int = 16,
+    steps: int = 16,
+    *,
+    width: int = 256,
+    height: int = 256,
+    fps: int = 8,
 ) -> dict[str, Any]:
-    """256px + eight-frame contexts verified on the author's 4GB GPU."""
+    """256px + 八帧上下文是 4 GB 卡上实测过的形状；更大的组合按显存上限截过才进来。"""
     return {
         "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": checkpoint}},
         "2": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["1", 1]}},
         "3": {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["1", 1]}},
         "4": {
             "class_type": "EmptyLatentImage",
-            "inputs": {"width": 256, "height": 256, "batch_size": frames},
+            "inputs": {"width": width, "height": height, "batch_size": frames},
         },
         "9": {
             "class_type": "ADE_StandardUniformContextOptions",
@@ -73,7 +346,7 @@ def build_video_workflow(
             "class_type": "VHS_VideoCombine",
             "inputs": {
                 "images": ["6", 0],
-                "frame_rate": 8,
+                "frame_rate": fps,
                 "loop_count": 0,
                 "filename_prefix": f"xiaoye_video_{seed}",
                 "format": "video/h264-mp4",
@@ -91,18 +364,17 @@ def build_video_workflow(
 class VideoService:
     name = "video_gen"
 
-    def __init__(self, images: ImageService, paths: AppPaths) -> None:
+    def __init__(self, images: ImageService, prefs: Preferences, paths: AppPaths) -> None:
         self._images = images
+        self._prefs = prefs
         self._paths = paths
         self._lock = threading.RLock()
         self._state: dict[str, Any] = {
             "phase": "idle",
-            "detail": "本地 AnimateDiff · 256×256 · 8 帧/秒",
+            "detail": "本地 AnimateDiff · 默认档按本机显存自动选",
             "last_path": "",
             "last_seconds": 0.0,
             "error": "",
-            "frames": 16,
-            "steps": 16,
             "model": MOTION_MODEL,
         }
 
@@ -115,16 +387,244 @@ class VideoService:
     def available(self) -> bool:
         return True
 
+    def probe(self) -> dict[str, Any]:
+        """借生图那条路真问一次引擎（含显存），然后把新的视频状态还给面板。"""
+        self._images.probe()
+        return self.status()
+
+    def _vram_mb(self) -> float:
+        """最近一次探测读到的显存总量。没探测过＝0.0，调用方按保守档走。"""
+        probe = self._images.status().get("local")
+        if isinstance(probe, dict) and probe.get("ok"):
+            return float(probe.get("vram_total_mb") or 0.0)
+        return 0.0
+
     def status(self) -> dict[str, Any]:
+        vram = self._vram_mb()
+        plan = resolve_plan(self._prefs, vram)
+        auto_size, auto_fps, auto_seconds = auto_profile(vram)
         with self._lock:
-            return dict(self._state)
+            snapshot = dict(self._state)
+        snapshot.update(
+            {
+                "plan": plan,
+                "choice": {
+                    "size": self._prefs.text(VIDEO_SIZE),
+                    "fps": int(self._prefs.number(VIDEO_FPS) or 0),
+                    "seconds": int(self._prefs.number(VIDEO_SECONDS) or 0),
+                    "steps": int(self._prefs.number(VIDEO_STEPS) or 0),
+                },
+                "options": {
+                    "sizes": list(SIZE_CHOICES),
+                    "fpss": list(FPS_CHOICES),
+                    "seconds": list(SECOND_CHOICES),
+                    "engines": list(ENGINE_CHOICES),
+                    "auto_profile": {
+                        "size": auto_size,
+                        "fps": auto_fps,
+                        "seconds": auto_seconds,
+                        "vram_total_mb": vram,
+                    },
+                },
+                "engine": self._engine_choice(),
+                "cloud": self._cloud_view(),
+                "cloud_defaults": self._cloud_defaults_view(),
+            }
+        )
+        return snapshot
 
     def capabilities(self) -> str:
-        return (
-            "本地视频：AnimateDiff，256×256，8 帧/秒，16/24/32 帧（2/3/4 秒），"
-            "使用与生图相同的 ComfyUI。任意语言描述先整句联网翻成英文。"
-            "4GB 显卡使用小尺寸短片，生成耗时以实际结果为准。"
+        vram = self._vram_mb()
+        plan = resolve_plan(self._prefs, vram)
+        engine = self._engine_choice()
+        cloud_words = (
+            "云端已配置" if self.cloud_ready() else "云端没配齐（缺建任务地址或视频地址取法）"
         )
+        return (
+            f"视频引擎档位：{engine}（默认本地）。本地：AnimateDiff，和生图共用 ComfyUI，"
+            "分辨率 256/384/512 方图，帧率 8/12/16/24，时长 2~32 秒，默认按本机显存自动选短视频档；"
+            f"当前本地计划：{plan['size']} · {plan['fps']}帧/秒 · {plan['frames']}帧"
+            f"（约 {round(plan['frames'] / plan['fps'])} 秒）· {plan['steps']} 步。"
+            + (plan["note"] or "")
+            + " 本地描述先整句联网翻成英文；本地帧数上限按 4 GB 实测锚点外推，崩了往小调。"
+            + " 云端：多家可自填端点与请求体（默认通义万相，复用 DASHSCOPE_API_KEY），"
+            f"{cloud_words}；云端按原话直接发给服务商、不按本机显存截帧。"
+        )
+
+    # -- 设置（面板下拉走这四个 setter，返回错误话术，空串＝收下了） ----------
+
+    def set_size(self, value: object) -> str:
+        text = str(value or "").strip().lower().replace("×", "x").replace(" ", "")
+        if text in ("", "auto", "0"):
+            self._prefs.set(VIDEO_SIZE, "")
+            return ""
+        if text not in SIZE_CHOICES:
+            return f"视频分辨率只能是：{'、'.join(SIZE_CHOICES)}（或自动）"
+        self._prefs.set(VIDEO_SIZE, text)
+        return ""
+
+    def set_fps(self, value: object) -> str:
+        return self._set_number(VIDEO_FPS, value, FPS_CHOICES, "帧率只能是 8/12/16/24（或自动）")
+
+    def set_seconds(self, value: object) -> str:
+        return self._set_number(
+            VIDEO_SECONDS, value, SECOND_CHOICES, "时长只能是 2/3/4/8/16/32 秒（或自动）"
+        )
+
+    def set_steps(self, value: object) -> str:
+        return self._set_number(
+            VIDEO_STEPS,
+            value,
+            tuple(range(MIN_STEPS, MAX_STEPS + 1)),
+            f"步数只能在 {MIN_STEPS}~{MAX_STEPS}",
+        )
+
+    def _set_number(self, key: str, value: object, allowed: tuple[int, ...], words: str) -> str:
+        text = str(value if value is not None else "").strip()
+        if text in ("", "0", "auto"):
+            self._prefs.set(key, 0)
+            return ""
+        try:
+            number = int(text)
+        except ValueError:
+            return words
+        if number not in allowed:
+            return words
+        self._prefs.set(key, number)
+        return ""
+
+    # -- 引擎档位与云端配置 --------------------------------------------------
+
+    def _engine_choice(self) -> str:
+        raw = (self._prefs.text(VIDEO_ENGINE) or "local").strip().lower()
+        return raw if raw in ENGINE_CHOICES else "local"
+
+    def set_engine(self, value: object) -> str:
+        """切本地/云端/自动。默认本地；只有这一档真存在才收下，别的退回并说明。"""
+        raw = str(value if value is not None else "").strip().lower()
+        if raw in ("", "0"):
+            self._prefs.set(VIDEO_ENGINE, "local")
+            return ""
+        if raw not in ENGINE_CHOICES:
+            return f"视频引擎只能是：{'、'.join(ENGINE_CHOICES)}"
+        self._prefs.set(VIDEO_ENGINE, raw)
+        return ""
+
+    def _cloud_config(self) -> CloudVideoConfig:
+        """把偏好里的云端各格拼成一份契约。空＝用出厂默认（通义万相那套）。"""
+
+        def value(key: str) -> str:
+            stored = self._prefs.text(key).strip()
+            return stored if stored else _CLOUD_DEFAULTS[key]
+
+        return CloudVideoConfig(
+            submit_url=value(VIDEO_CLOUD_SUBMIT),
+            key_env=value(VIDEO_CLOUD_KEY_ENV),
+            model=value(VIDEO_CLOUD_MODEL),
+            body=value(VIDEO_CLOUD_BODY),
+            headers=value(VIDEO_CLOUD_HEADERS),
+            task_path=value(VIDEO_CLOUD_TASK_PATH),
+            poll_url=value(VIDEO_CLOUD_POLL_URL),
+            video_path=value(VIDEO_CLOUD_VIDEO_PATH),
+            status_path=value(VIDEO_CLOUD_STATUS_PATH),
+            succeeded=value(VIDEO_CLOUD_SUCCEEDED),
+            running=value(VIDEO_CLOUD_RUNNING),
+            failed=value(VIDEO_CLOUD_FAILED),
+        )
+
+    def _cloud_view(self) -> dict[str, object]:
+        """UI 读的那份：回显用户真正存下的值（没存过的格子回出厂默认）。"""
+        config = self._cloud_config()
+        return {
+            "submit_url": config.submit_url,
+            "key_env": config.key_env,
+            "model": config.model,
+            "body": config.body,
+            "headers": config.headers,
+            "task_path": config.task_path,
+            "poll_url": config.poll_url,
+            "video_path": config.video_path,
+            "status_path": config.status_path,
+            "succeeded": config.succeeded,
+            "running": config.running,
+            "failed": config.failed,
+            "key_set": bool(str(self._images._environ.get(config.key_env, "")).strip()),
+        }
+
+    @staticmethod
+    def _cloud_defaults_view() -> dict[str, str]:
+        """出厂默认，用 UI 认得的字段名（不是偏好键名）给出去，当各格的占位提示。"""
+        return {
+            "submit_url": DEFAULT_SUBMIT_URL,
+            "key_env": DEFAULT_KEY_ENV,
+            "model": DEFAULT_MODEL,
+            "body": DEFAULT_BODY,
+            "headers": DEFAULT_HEADERS,
+            "task_path": DEFAULT_TASK_PATH,
+            "poll_url": DEFAULT_POLL_URL,
+            "video_path": DEFAULT_VIDEO_PATH,
+            "status_path": DEFAULT_STATUS_PATH,
+            "succeeded": DEFAULT_SUCCEEDED,
+            "running": DEFAULT_RUNNING,
+            "failed": DEFAULT_FAILED,
+        }
+
+    def cloud_ready(self) -> bool:
+        """够不够开工：端点与取视频路径齐、且钥匙环境变量真的设了。缺一都不算配好。"""
+        config = self._cloud_config()
+        return config.ready() and bool(str(self._images._environ.get(config.key_env, "")).strip())
+
+    def set_cloud(self, fields: Mapping[str, object]) -> str:
+        """存云端配置。只认白名单里的键；值一律按字符串存（钥匙值不落这里，只落它的环境变量名）。
+
+        返回错误话术，空串＝收下了。请求体/额外头这两格先试解析，坏 JSON 当场拒，
+        免得存进去、下次生成时才在云端报一句看不懂的话。
+        """
+        allowed = {
+            "submit_url": VIDEO_CLOUD_SUBMIT,
+            "key_env": VIDEO_CLOUD_KEY_ENV,
+            "model": VIDEO_CLOUD_MODEL,
+            "body": VIDEO_CLOUD_BODY,
+            "headers": VIDEO_CLOUD_HEADERS,
+            "task_path": VIDEO_CLOUD_TASK_PATH,
+            "poll_url": VIDEO_CLOUD_POLL_URL,
+            "video_path": VIDEO_CLOUD_VIDEO_PATH,
+            "status_path": VIDEO_CLOUD_STATUS_PATH,
+            "succeeded": VIDEO_CLOUD_SUCCEEDED,
+            "running": VIDEO_CLOUD_RUNNING,
+            "failed": VIDEO_CLOUD_FAILED,
+        }
+        errors: list[str] = []
+        for raw_key, value in fields.items():
+            key = allowed.get(str(raw_key))
+            if key is None:
+                continue
+            text = str(value if value is not None else "").strip()
+            if key in (VIDEO_CLOUD_BODY, VIDEO_CLOUD_HEADERS) and text:
+                probe = (
+                    render_json_body(
+                        text,
+                        {
+                            "prompt": "x",
+                            "model": "m",
+                            "width": 1,
+                            "height": 1,
+                            "seconds": 1,
+                            "fps": 1,
+                            "frames": 1,
+                        },
+                    )
+                    if key == VIDEO_CLOUD_BODY
+                    else text
+                )
+                try:
+                    json.loads(probe)
+                except json.JSONDecodeError as exc:
+                    errors.append("请求体/额外头不是合法 JSON（注意占位符外不要加引号）")
+                    logger.warning("云端模板解析失败 %s: %s", key, exc)
+                    continue
+            self._prefs.set(key, text)
+        return "；".join(errors)
 
     def _fail(self, error: str, source: str = "") -> dict[str, Any]:
         with self._lock:
@@ -141,11 +641,43 @@ class VideoService:
         }
 
     def generate(
-        self, prompt: str, *, frames: object = None, steps: object = None
+        self,
+        prompt: str,
+        *,
+        size: object = None,
+        fps: object = None,
+        seconds: object = None,
+        steps: object = None,
+        frames: object = None,
     ) -> dict[str, Any]:
+        """按引擎档位把一次生成派给本地或云端。frames 是老调用方的兼容口。"""
         source = str(prompt or "").strip()
-        count = frames if type(frames) is int and frames in (16, 24, 32) else 16
-        iterations = steps if type(steps) is int and 12 <= steps <= 30 else 16
+        given: dict[str, object] = {"size": size, "fps": fps, "seconds": seconds, "steps": steps}
+        if frames is not None and seconds in (None, "", 0):
+            # 老口径（r113 及以前：frames 16/24/32 @8fps）换算成最近的时长档，帧率同时钉 8。
+            try:
+                legacy = int(str(frames))
+            except (TypeError, ValueError):
+                legacy = 0
+            if legacy:
+                given["seconds"] = min(SECOND_CHOICES, key=lambda row: abs(row * 8 - legacy))
+                if given.get("fps") in (None, "", 0):
+                    given["fps"] = 8
+        engine = self._engine_choice()
+        if engine == "cloud":
+            return self._generate_cloud(source, given)
+        if engine == "auto":
+            probe = self._images._find_engine()
+            if probe.get("ok") and probe.get("checkpoints"):
+                return self._generate_local(source, given)
+            if self.cloud_ready():
+                return self._generate_cloud(source, given)
+            # 两边都不成：走本地，让本地那句"引擎没起来"的真话落在屏上，而不是含糊。
+        return self._generate_local(source, given)
+
+    def _generate_local(self, source: str, given: Mapping[str, object]) -> dict[str, Any]:
+        vram = self._vram_mb()
+        plan = resolve_plan(self._prefs, vram, given)
         if not self._images.generation_lock.acquire(blocking=False):
             return {"ok": False, "error": "图片或视频正在生成，请完成后再试。", "path": ""}
         started = time.monotonic()
@@ -153,9 +685,19 @@ class VideoService:
             with self._lock:
                 self._state.update(phase="translating", detail="正在整句翻译为英文…", error="")
             translated = self._images.translator.translate(source)
-            with self._lock:
-                self._state.update(phase="generating", detail="正在本地生成短视频…")
             probe = self._images._find_engine()
+            if probe.get("ok"):
+                fresh_vram = float(probe.get("vram_total_mb") or 0.0)
+                if fresh_vram != vram:
+                    plan = resolve_plan(self._prefs, fresh_vram, given)
+            with self._lock:
+                self._state.update(
+                    phase="generating",
+                    detail=(
+                        f"正在本地生成视频：{plan['size']} · {plan['frames']} 帧 · "
+                        f"{plan['steps']} 步…"
+                    ),
+                )
             if not probe["ok"]:
                 raise _EngineError(probe["detail"])
             base = probe["url"]
@@ -178,8 +720,11 @@ class VideoService:
                 probe["checkpoints"][0],
                 translated.english,
                 random.randrange(1, 2**62),
-                count,
-                iterations,
+                plan["frames"],
+                plan["steps"],
+                width=plan["width"],
+                height=plan["height"],
+                fps=plan["fps"],
             )
             pid = self._images._submit(base, graph)
             filename, blob = self._wait(base, pid)
@@ -189,30 +734,100 @@ class VideoService:
             if destination.suffix.lower() != ".mp4" or len(blob) < 32 or blob[4:8] != b"ftyp":
                 raise _EngineError("引擎没有返回有效的 MP4 视频。")
             destination.write_bytes(blob)
-            seconds = round(time.monotonic() - started, 1)
+            elapsed = round(time.monotonic() - started, 1)
             with self._lock:
                 self._state.update(
                     phase="ready",
-                    detail=f"视频已生成，用了 {seconds} 秒。",
+                    detail=f"视频已生成，用了 {elapsed} 秒。",
                     last_path=str(destination),
-                    last_seconds=seconds,
+                    last_seconds=elapsed,
                     error="",
                 )
             return {
                 "ok": True,
+                "engine": "local",
                 "path": str(destination),
                 "error": "",
                 "prompt_input": source,
                 "prompt": translated.english,
                 "prompt_note": translated.note,
-                "seconds": seconds,
-                "frames": count,
-                "fps": 8,
-                "size": "256x256",
-                "steps": iterations,
-                "duration": count / 8,
+                "seconds": elapsed,
+                "frames": plan["frames"],
+                "fps": plan["fps"],
+                "size": plan["size"],
+                "steps": plan["steps"],
+                "duration": round(plan["frames"] / plan["fps"], 2),
+                "capped": plan["capped"],
+                "note": plan["note"],
             }
         except (TranslationError, _EngineError, OSError) as exc:
+            return self._fail(str(exc), source)
+        finally:
+            self._images.generation_lock.release()
+
+    def _generate_cloud(self, source: str, given: Mapping[str, object]) -> dict[str, Any]:
+        """云端那条：不翻译（服务商多为中文原生），不发本机显存上限，只按用户档位拼请求。"""
+        config = self._cloud_config()
+        if not config.ready():
+            return self._fail(
+                "云端视频还没配齐：至少要有「建任务地址」和「视频地址取法」两格。", source
+            )
+        if not str(self._images._environ.get(config.key_env, "")).strip():
+            return self._fail(f"云端视频差钥匙：环境变量 {config.key_env} 没设。", source)
+        plan = resolve_cloud_plan(self._prefs, given)
+        if not self._images.generation_lock.acquire(blocking=False):
+            return {"ok": False, "error": "图片或视频正在生成，请完成后再试。", "path": ""}
+        started = time.monotonic()
+        try:
+            with self._lock:
+                self._state.update(
+                    phase="generating",
+                    detail=(
+                        f"正在云端生成视频（{config.model or '默认模型'}）："
+                        f"{plan['size']} · {plan['seconds']} 秒…"
+                    ),
+                    error="",
+                )
+            client = CloudVideoClient(config, self._images._environ)
+            blob, _trace = client.generate(
+                source,
+                width=plan["width"],
+                height=plan["height"],
+                seconds=plan["seconds"],
+                fps=plan["fps"],
+                frames=plan["frames"],
+            )
+            directory = self._paths.videos_dir
+            directory.mkdir(parents=True, exist_ok=True)
+            destination = directory / f"xiaoye_cloud_video_{time.strftime('%Y%m%d-%H%M%S')}.mp4"
+            destination.write_bytes(blob)
+            elapsed = round(time.monotonic() - started, 1)
+            with self._lock:
+                self._state.update(
+                    phase="ready",
+                    detail=f"云端视频已生成，用了 {elapsed} 秒。",
+                    last_path=str(destination),
+                    last_seconds=elapsed,
+                    error="",
+                )
+            return {
+                "ok": True,
+                "engine": "cloud",
+                "path": str(destination),
+                "error": "",
+                "prompt_input": source,
+                "prompt": source,
+                "prompt_note": f"云端（{config.model or '默认模型'}）按原话直发，未翻成英文。",
+                "seconds": elapsed,
+                "frames": plan["frames"],
+                "fps": plan["fps"],
+                "size": plan["size"],
+                "steps": plan["steps"],
+                "duration": round(plan["frames"] / plan["fps"], 2),
+                "capped": False,
+                "note": "",
+            }
+        except (_EngineError, OSError) as exc:
             return self._fail(str(exc), source)
         finally:
             self._images.generation_lock.release()

@@ -48,6 +48,17 @@
   --hud-edge: color-mix(in srgb, var(--hud-cyan) 42%, transparent);
   --hud-surface: color-mix(in srgb, var(--hud-cyan) 6%, var(--hud-bg-deep));
   --hud-surface-2: color-mix(in srgb, var(--hud-cyan) 11%, var(--hud-bg-deep));
+
+  /*
+   * Three tokens the popups referenced but nobody ever defined:
+   * `--hud-panel` and `--hud-muted` silently fell back to hardcoded hexes in every
+   * dialog (so a skin change left the modals on the old palette), and `--hud-ink`
+   * in PetForgePopup had no fallback at all — it resolved to nothing. Define them
+   * from the live palette so the whole window moves together.
+   */
+  --hud-panel: color-mix(in srgb, var(--hud-cyan) 7%, #0b0f16);
+  --hud-muted: color-mix(in srgb, var(--hud-text) 62%, var(--hud-dim));
+  --hud-ink: color-mix(in srgb, var(--hud-cyan) 12%, #eaf6ff);
 }
 
 /*
@@ -374,6 +385,11 @@ code {
   transform: translateY(1px);
 }
 
+.hud-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(77, 216, 255, 0.28);
+}
+
 .hud-btn:disabled {
   opacity: 0.32;
   cursor: not-allowed;
@@ -427,10 +443,58 @@ code {
   font-size: 12px;
   font-family: inherit;
   outline: none;
+  transition: border-color 0.16s, box-shadow 0.16s, background 0.16s;
+}
+
+.hud-field::placeholder {
+  color: color-mix(in srgb, var(--hud-dim) 82%, transparent);
+}
+
+.hud-field:hover:not(:disabled) {
+  border-color: rgba(77, 216, 255, 0.34);
 }
 
 .hud-field:focus {
   border-color: rgba(77, 216, 255, 0.55);
+  box-shadow: 0 0 0 3px rgba(77, 216, 255, 0.14);
+}
+
+.hud-field:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/*
+ * The height:26px above is right for a one-line box but it silently crushed every
+ * multi-line prompt: a `textarea.hud-field` (the 生图 / 视频 "画什么" boxes) was
+ * pinned to 26px no matter its rows=, which is the "输入框太小、打字很憋" complaint.
+ * Textareas opt back into auto height, roomier padding, a top-left radius (a pill on
+ * a tall box reads wrong), and vertical-only resize so a user can drag them bigger.
+ */
+textarea.hud-field {
+  height: auto;
+  min-height: 108px;
+  padding: 9px 11px;
+  border-radius: var(--hud-radius);
+  line-height: 1.6;
+  resize: vertical;
+}
+
+/*
+ * Native <select> drops a light OS arrow on our dark pill and left-aligns text with
+ * no room for the arrow. Give it a chevron we control and pad the right edge so the
+ * label never runs under it.
+ */
+select.hud-field {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 26px;
+  background-image: linear-gradient(45deg, transparent 50%, var(--hud-cyan) 50%),
+    linear-gradient(135deg, var(--hud-cyan) 50%, transparent 50%);
+  background-position: calc(100% - 14px) calc(50% - 1px), calc(100% - 9px) calc(50% - 1px);
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  cursor: pointer;
 }
 
 .hud-field option {
@@ -564,12 +628,20 @@ code {
 }
 
 ::-webkit-scrollbar {
-  width: 6px;
+  width: 8px;
+  height: 8px;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(77, 216, 255, 0.3);
-  border-radius: 3px;
+  background: rgba(77, 216, 255, 0.22);
+  border-radius: 4px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(77, 216, 255, 0.42);
+  background-clip: padding-box;
 }
 
 ::-webkit-scrollbar-track {

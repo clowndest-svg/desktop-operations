@@ -148,6 +148,11 @@ class ImageProbe(TypedDict):
     version: str
     checkpoints: list[str]
     probed_at: float
+    vram_total_mb: float
+    """GPU 显存总量（MB）。0.0＝设备没报（CPU 引擎、或旧版 ComfyUI 没这个字段）。"""
+
+    vram_free_mb: float
+    """当前空闲显存（MB）。视频默认档据此选：4 GB 卡只能给 256×256 短片。"""
 
 
 class ImageRow(TypedDict):
@@ -372,7 +377,7 @@ class ImageService:
         self._spawn = spawn or _default_spawn
         self._sleep = sleeper
         self._clock = clock
-        self.translator: Translator = translator or PromptTranslator()
+        self.translator: Translator = translator or PromptTranslator(environ=self._environ)
         # Serialize GPU jobs shared by image and video entry points.
         self.generation_lock = threading.Lock()
         self._lock = threading.RLock()
@@ -739,6 +744,8 @@ class ImageService:
             return _failed_probe(base, str(exc))
         version = ""
         kind = ""
+        vram_total = 0.0
+        vram_free = 0.0
         if isinstance(stats, Mapping):
             system = stats.get("system")
             if isinstance(system, Mapping):
@@ -746,6 +753,9 @@ class ImageService:
             devices = stats.get("devices")
             if isinstance(devices, list) and devices and isinstance(devices[0], Mapping):
                 kind = str(devices[0].get("type", ""))
+                # 显存字节数：视频默认档要按它选（4 GB 卡只给 256×256 短片）。
+                vram_total = _as_mb(devices[0].get("vram_total"))
+                vram_free = _as_mb(devices[0].get("vram_free"))
         try:
             info = self._get_json(
                 base + "/object_info/CheckpointLoaderSimple", PROBE_TIMEOUT_SECONDS
@@ -761,11 +771,15 @@ class ImageService:
             "ok": True,
             "detail": (
                 f"{base}（ComfyUI {version or '版本未报'}，"
-                f"{'GPU ' + kind if kind else '设备未报'}，权重 {len(names)} 个）"
+                f"{'GPU ' + kind if kind else '设备未报'}"
+                f"{'，显存 ' + str(int(vram_total)) + ' MB' if vram_total else ''}，"
+                f"权重 {len(names)} 个）"
             ),
             "version": version,
             "checkpoints": names,
             "probed_at": self._clock(),
+            "vram_total_mb": vram_total,
+            "vram_free_mb": vram_free,
         }
 
     def _submit(self, base: str, graph: dict[str, object]) -> str:
@@ -1377,6 +1391,13 @@ def _count_note(count: int) -> str:
     return notes.get(count, "")
 
 
+def _as_mb(value: object) -> float:
+    """``/system_stats`` 的显存字段按字节给；CPU 引擎那格根本没有。"""
+    if isinstance(value, (int, float)) and value > 0:
+        return round(float(value) / (1024 * 1024), 1)
+    return 0.0
+
+
 def _failed_probe(url: str, detail: str) -> ImageProbe:
     return {
         "kind": "comfyui",
@@ -1386,6 +1407,8 @@ def _failed_probe(url: str, detail: str) -> ImageProbe:
         "version": "",
         "checkpoints": [],
         "probed_at": 0.0,
+        "vram_total_mb": 0.0,
+        "vram_free_mb": 0.0,
     }
 
 
