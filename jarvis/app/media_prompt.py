@@ -36,6 +36,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Final, Protocol
 
+from jarvis.llm import ChatMessage, GenerationOptions
 from jarvis.llm.transport import open_request
 
 DASHSCOPE_TRANSLATE_URL: Final = (
@@ -121,6 +122,47 @@ class Translator(Protocol):
     def translate(self, text: str) -> Translation: ...
 
 
+_TRANSLATE_SYSTEM: Final = (
+    "你是翻译引擎。把用户给的画面描述翻译成自然、地道的英文，"
+    "只输出译文本身：不要解释、不要加引号、不要前后缀、不要思考过程。"
+    "数量、动作、否定、颜色、位置关系必须原样保留。"
+)
+
+
+class LocalLlmTranslator:
+    """用 App 当前配的那个模型（随包就是本地 Qwen）翻一句，关掉思考求快。
+
+    这是"零额外 key"的那条路：买家要用小夜本来就得配一个聊天模型，翻译直接借它，
+    不再单独要 DASHSCOPE/百度钥匙。思考通过 ``chat_template_kwargs.enable_thinking=False``
+    关掉（llama.cpp 只认这一处，顶层 enable_thinking 会被无视）。
+    """
+
+    def __init__(self, client_provider: Callable[[], Any] | None) -> None:
+        self._provider = client_provider
+
+    def available(self) -> bool:
+        return self._provider is not None and self._provider() is not None
+
+    def translate(self, text: str) -> Translation:
+        client = self._provider() if self._provider is not None else None
+        if client is None:
+            raise TranslationError("当前没有可用的对话模型来做本地翻译（先在设置里配一个模型）")
+        messages = [ChatMessage.system(_TRANSLATE_SYSTEM), ChatMessage.user(text)]
+        options = GenerationOptions(
+            temperature=0.0, max_tokens=600, template_kwargs={"enable_thinking": False}
+        )
+        try:
+            response = client.complete(messages, options=options)
+        except Exception as exc:  # 模型没起、超时、返回结构不对——都收成一句能照着查的话
+            raise TranslationError(f"本地模型翻译失败（{type(exc).__name__}）") from exc
+        english = str(getattr(response, "content", "") or "").strip()
+        if not english:
+            raise TranslationError("本地模型没给出译文")
+        if _has_untranslated_text(english):
+            raise TranslationError("本地模型的译文仍含未翻译文字")
+        return Translation(text, english, "auto", provider="本地模型")
+
+
 class PromptTranslator:
     """国内服务商链 + 有界内存缓存；不写凭据、不记提示词日志、不落盘缓存。"""
 
@@ -128,9 +170,11 @@ class PromptTranslator:
         self,
         opener: Callable[..., Any] = open_request,
         environ: Mapping[str, str] | None = None,
+        client_provider: Callable[[], Any] | None = None,
     ) -> None:
         self._open = opener
         self._environ = environ if environ is not None else os.environ
+        self._local = LocalLlmTranslator(client_provider)
         self._cache: OrderedDict[str, Translation] = OrderedDict()
         self._lock = threading.Lock()
 
@@ -149,7 +193,23 @@ class PromptTranslator:
             if cached is not None:
                 self._cache.move_to_end(source)
                 return cached
-        tried: list[str] = []
+        # 先试本地/当前聊天模型（零额外 key、离线可用），失败再退到云端服务商。
+        local_tried = False
+        if self._local.available():
+            local_tried = True
+            try:
+                translated = self._local.translate(source)
+            except TranslationError as exc:
+                tried_local = str(exc)
+            else:
+                with self._lock:
+                    self._cache[source] = translated
+                    while len(self._cache) > 128:
+                        self._cache.popitem(last=False)
+                return translated
+        else:
+            tried_local = "没有可用的对话模型"
+        tried: list[str] = [f"本地模型（{tried_local}）"] if local_tried else []
         for name, available, run in PROVIDERS:
             if not available(self._environ):
                 continue
@@ -166,12 +226,14 @@ class PromptTranslator:
             return translated
         if not tried:
             raise TranslationError(
-                "没配任何联网翻译钥匙，尚未提交给生成模型。设其一："
-                f"{DASHSCOPE_KEY_ENV}（阿里云通义千问）或 "
-                f"{BAIDU_APPID_ENV}+{BAIDU_KEY_ENV}（百度翻译）。"
+                "中文描述需要翻译，但既没有可用的对话模型、也没配联网翻译钥匙，尚未提交给生成模型。"
+                "任选其一：在设置里配一个聊天模型（随包本地模型即可，无需额外钥匙）、"
+                f"或设 {DASHSCOPE_KEY_ENV}（阿里云通义千问）、"
+                f"或 {BAIDU_APPID_ENV}+{BAIDU_KEY_ENV}（百度）。"
+                "英文描述不需要翻译，可直接用。"
             )
         raise TranslationError(
-            f"联网翻译暂时不可用（{'；'.join(tried)}），尚未提交给生成模型。"
+            f"翻译暂时不可用（{'；'.join(tried)}），尚未提交给生成模型。"
             "请重试；不支持的语言或未完整翻译的文字也会在这里停止。"
         )
 

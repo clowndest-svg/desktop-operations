@@ -149,3 +149,66 @@ def test_dig_message_content_is_defensive() -> None:
     assert _dig_message_content({}) == ""
     assert _dig_message_content({"choices": []}) == ""
     assert _dig_message_content({"choices": [{"message": {}}]}) == ""
+
+
+# -- r116：本地/当前聊天模型翻译（零额外 key、关思考），失败退云端 --------------
+
+
+class _Resp2:
+    def __init__(self, content: str) -> None:
+        self.content = content
+
+
+class _FakeClient:
+    def __init__(self, content: str, capture: dict[str, Any] | None = None) -> None:
+        self._content = content
+        self.capture = capture
+
+    def complete(self, messages: Any, options: Any = None) -> _Resp2:
+        if self.capture is not None:
+            self.capture["messages"] = messages
+            self.capture["options"] = options
+        return _Resp2(self._content)
+
+
+def _boom(request: Any, timeout: float) -> io.BytesIO:  # 一旦被调用就说明走错了路
+    raise AssertionError("本地模型能翻时不该发网络请求")
+
+
+def test_local_model_translates_without_any_key() -> None:
+    cap: dict[str, Any] = {}
+    client = _FakeClient("An orange cat runs", cap)
+    translator = PromptTranslator(_boom, {}, client_provider=lambda: client)
+    result = translator.translate("一只橘猫在跑步")
+    assert result.english == "An orange cat runs"
+    assert result.provider == "本地模型"
+    # 思考必须关：llama.cpp 只认 chat_template_kwargs.enable_thinking
+    assert cap["options"].template_kwargs == {"enable_thinking": False}
+
+
+def test_local_unavailable_falls_back_to_cloud() -> None:
+    def opener(request: Any, timeout: float) -> io.BytesIO:
+        return _resp(_qwen_ok("Two cats"))
+
+    translator = PromptTranslator(opener, {DASHSCOPE_KEY_ENV: "sk"}, client_provider=lambda: None)
+    result = translator.translate("两只猫")
+    assert result.provider == "阿里云通义千问"
+
+
+def test_local_model_returning_chinese_falls_through_to_cloud() -> None:
+    client = _FakeClient("还是中文没翻")  # 含 CJK，应判为没翻干净
+
+    def opener(request: Any, timeout: float) -> io.BytesIO:
+        return _resp(_qwen_ok("A cat"))
+
+    translator = PromptTranslator(opener, {DASHSCOPE_KEY_ENV: "sk"}, client_provider=lambda: client)
+    result = translator.translate("一只猫")
+    assert result.provider == "阿里云通义千问"
+
+
+def test_no_model_and_no_key_names_both_paths() -> None:
+    translator = PromptTranslator(_boom, {}, client_provider=lambda: None)
+    with pytest.raises(TranslationError) as error:
+        translator.translate("猫")
+    message = str(error.value)
+    assert "聊天模型" in message and DASHSCOPE_KEY_ENV in message

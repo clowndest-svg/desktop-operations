@@ -366,6 +366,7 @@ class ImageService:
         sleeper: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
         translator: Translator | None = None,
+        client_provider: Callable[[], Any] | None = None,
     ) -> None:
         self._prefs = prefs
         self._paths = paths
@@ -377,7 +378,9 @@ class ImageService:
         self._spawn = spawn or _default_spawn
         self._sleep = sleeper
         self._clock = clock
-        self.translator: Translator = translator or PromptTranslator(environ=self._environ)
+        self.translator: Translator = translator or PromptTranslator(
+            environ=self._environ, client_provider=client_provider
+        )
         # Serialize GPU jobs shared by image and video entry points.
         self.generation_lock = threading.Lock()
         self._lock = threading.RLock()
