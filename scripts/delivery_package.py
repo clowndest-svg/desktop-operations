@@ -622,7 +622,7 @@ def read_back(
                     and name.startswith(f"{PC_DIR}/_internal/hydra/test_utils/configs/")
                 )
             )
-            or (Path(name).suffix in FORBIDDEN_SUFFIXES)
+            or (Path(name).suffix in FORBIDDEN_SUFFIXES and not _scipy_test_audio(name))
         ]
         if leaked:
             bad.append(f"包里出现隐私形状的文件（{len(leaked)} 条）：" + "、".join(leaked[:8]))
@@ -631,6 +631,17 @@ def read_back(
             + (f" + 手机/文档（{len(docs)} 份）" if docs else "")
         )
     return bad
+
+
+def _scipy_test_audio(name: str) -> bool:
+    """Only synthetic WAV fixtures shipped inside the portable SciPy dependency.
+
+    Do not exempt the engine's input/output/user folders or all site-packages.
+    """
+    prefix = f"{PC_DIR}/本地引擎/venv/Lib/site-packages/scipy/io/tests/data/"
+    return name.startswith(prefix) and bool(
+        re.fullmatch(r"test-\d+Hz[-A-Za-z0-9.]*\.wav", name[len(prefix) :])
+    )
 
 
 def stamp_docs(facts03: str, facts_readme: str) -> list[str]:
