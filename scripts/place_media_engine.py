@@ -37,11 +37,18 @@ def place(source: Path, destination: Path) -> None:
         if not (source / relative).is_file():
             raise ValueError(f"本地引擎缺少 {relative}")
     destination.mkdir(parents=True, exist_ok=True)
-    excluded = {".git", "__pycache__", "input", "output", "temp", "tmp", "cache", "user"}
+    excluded = {".git", "__pycache__"}
+    runtime_dirs = {"input", "output", "temp", "tmp", "cache", "user"}
     for component in ("python", "venv", "ComfyUI"):
         for path in (source / component).rglob("*"):
             relative = path.relative_to(source)
             if any(part in excluded for part in relative.parts) or not path.is_file():
+                continue
+            if (
+                relative.parts[0] == "ComfyUI"
+                and len(relative.parts) > 1
+                and relative.parts[1] in runtime_dirs
+            ):
                 continue
             target = destination / relative
             target.parent.mkdir(parents=True, exist_ok=True)
