@@ -53,7 +53,8 @@ try {
   report.localSettings=await api('settings_apply',{local_model:'Qwen3-0.6B-Q8_0.gguf'})
   check('bundled light model configured',Object.keys(report.localSettings.problems||{}).length===0)
   report.models=await api('chat_pick','local','qwen3-0.6b')
-  report.tuning=await api('chat_tuning',false,5,true)
+  report.tuning=await api('chat_tuning','off',5,true)
+  check('chat tuning was accepted',report.tuning.ok===true && !report.tuning.error)
   check('local model selected',!report.models.error)
   if(process.argv.includes('--offline-only')) {
     const fresh=await api('chat_new')
@@ -87,6 +88,10 @@ try {
     check('branch retains the earlier exchange',branched[0].content===before[0].content && branched[1].content===before[1].content)
     check('old question and old future answer are excluded',branched.length===4 && branched[2].content===edit && !branched.some(r=>r.content===question))
   }
+  await delay(2000)
+  const expectedText=process.argv.includes('--offline-only')?'知识库检索原文':'修改提问已生效'
+  const view=await ev(`return {composer:document.querySelectorAll('.chat__input').length,text:document.querySelector('.chat')?.innerText.includes(${JSON.stringify(expectedText)})}`)
+  check('history reload leaves the composer and completed conversation visible',view.composer===1 && view.text)
   const shot=await send('Page.captureScreenshot',{format:'png'})
   fs.writeFileSync(out.replace(/\.json$/,'.png'),Buffer.from(shot.data,'base64'))
   report.ok=report.checks.every(c=>c.pass)
