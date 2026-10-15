@@ -49,7 +49,7 @@ try {
   while(!await ev('return Boolean(window.pywebview?.api)')) { if(Date.now()>until)throw Error('bridge missing');await delay(400) }
   const initialSettings=await api('settings_get')
   report.credentialFlags=initialSettings.models.map(m=>({name:m.name,key_set:m.key_set}))
-  check('buyer did not inherit injected author API credentials',report.credentialFlags.every(m=>!m.key_set))
+  check('buyer starts without configured cloud credentials',report.credentialFlags.every(m=>!m.key_set))
   report.localSettings=await api('settings_apply',{local_model:'Qwen3-0.6B-Q8_0.gguf'})
   check('bundled light model configured',Object.keys(report.localSettings.problems||{}).length===0)
   report.models=await api('chat_pick','local','qwen3-0.6b')

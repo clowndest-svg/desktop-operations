@@ -70,7 +70,7 @@ if ($DryRun) {
 }
 
 # ---- 交给已验证流水线：前端构建 → PyInstaller → 落模型/引擎 → 新 exe 自检 → 压合并包 → 独立全 CRC 校验 ----
-Step '开始构建并打包（约 15~20 分钟，期间不要改源码、不要开着交付包里的 exe）'
+Step '开始构建、压包与完整回读（本机完整流程约 40 分钟；期间请保持源码不变，并关闭交付目录里的程序）'
 $python=Join-Path $Repo '.venv\Scripts\python.exe'
 $pending=@(& git -C $Repo diff --name-only HEAD -- jarvis frontend packaging scripts pyproject.toml)
 $newFiles=@(& git -C $Repo ls-files --others --exclude-standard -- jarvis frontend/src packaging scripts)
