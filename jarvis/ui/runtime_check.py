@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import os
+import sys
 from collections.abc import Callable
+from pathlib import Path
 from typing import Final
 
 CLIENT_GUIDS: Final[tuple[tuple[str, str], ...]] = (
@@ -62,6 +65,11 @@ def webview2_version(read: Reader = _read_value) -> str:
     三个位置挨个问，第一个非零的算数。读注册表失败（权限、精简系统上键根本不存在）
     一律按"没装"处理 —— 宁可多提示一次，也不要因为读不动就放过去开一扇白窗。
     """
+    if getattr(sys, "frozen", False):
+        runtime = Path(sys.executable).resolve().parent / "运行库" / "WebView2"
+        if (runtime / "msedgewebview2.exe").is_file():
+            os.environ["WEBVIEW2_BROWSER_EXECUTABLE_FOLDER"] = str(runtime)
+            return "bundled-fixed"
     for _, guid in CLIENT_GUIDS:
         for key in _key_paths(guid):
             for hive in _HIVES:

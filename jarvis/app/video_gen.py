@@ -19,6 +19,7 @@ import threading
 import time
 import urllib.parse
 from collections.abc import Mapping
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -62,6 +63,7 @@ from jarvis.app.video_cloud import (
     render_json_body,
 )
 from jarvis.config.paths import AppPaths
+from jarvis.llm import local_server
 
 logger = logging.getLogger("jarvis.app.video_gen")
 
@@ -661,7 +663,6 @@ class VideoService:
     ) -> dict[str, Any]:
         """按引擎档位把一次生成派给本地或云端。frames 是老调用方的兼容口。"""
         source = str(prompt or "").strip()
-        self._images._cancel.clear()
         given: dict[str, object] = {"size": size, "fps": fps, "seconds": seconds, "steps": steps}
         if frames is not None and seconds in (None, "", 0):
             # 老口径（r113 及以前：frames 16/24/32 @8fps）换算成最近的时长档，帧率同时钉 8。
@@ -690,12 +691,23 @@ class VideoService:
         plan = resolve_plan(self._prefs, vram, given)
         if not self._images.generation_lock.acquire(blocking=False):
             return {"ok": False, "error": "图片或视频正在生成，请完成后再试。", "path": ""}
+        self._images._cancel.clear()
+        self._images._generation_owner = threading.get_ident()
         started = time.monotonic()
+        resources = ExitStack()
         try:
             with self._lock:
                 self._state.update(phase="translating", detail="正在整句翻译为英文…", error="")
             translated = self._images.translator.translate(source)
+            if self._images._cancel.is_set():
+                raise _EngineError("已停止生成")
+            resources.enter_context(local_server.media_session())
+            if self._images._cancel.is_set():
+                raise _EngineError("已停止生成")
             probe = self._images._find_engine()
+            problem = self._images.gpu_budget_error(probe)
+            if problem:
+                raise _EngineError(problem)
             if probe.get("ok"):
                 fresh_vram = float(probe.get("vram_total_mb") or 0.0)
                 if fresh_vram != vram:
@@ -774,7 +786,12 @@ class VideoService:
         except (TranslationError, _EngineError, OSError) as exc:
             return self._fail(str(exc), source)
         finally:
+            self._images.release_engine_models()
+            resources.close()
+            self._images._interrupt_done.wait(12.0)
             self._images._active_base = ""
+            self._images._active_prompt = ""
+            self._images._generation_owner = 0
             self._images.generation_lock.release()
 
     def _generate_cloud(self, source: str, given: Mapping[str, object]) -> dict[str, Any]:
@@ -789,6 +806,8 @@ class VideoService:
         plan = resolve_cloud_plan(self._prefs, given)
         if not self._images.generation_lock.acquire(blocking=False):
             return {"ok": False, "error": "图片或视频正在生成，请完成后再试。", "path": ""}
+        self._images._cancel.clear()
+        self._images._generation_owner = threading.get_ident()
         started = time.monotonic()
         try:
             with self._lock:
@@ -808,6 +827,7 @@ class VideoService:
                 seconds=plan["seconds"],
                 fps=plan["fps"],
                 frames=plan["frames"],
+                should_stop=self._images._cancel.is_set,
             )
             directory = self._paths.videos_dir
             directory.mkdir(parents=True, exist_ok=True)
@@ -842,6 +862,8 @@ class VideoService:
         except (_EngineError, OSError) as exc:
             return self._fail(str(exc), source)
         finally:
+            self._images._interrupt_done.wait(12.0)
+            self._images._generation_owner = 0
             self._images.generation_lock.release()
 
     def _wait(self, base: str, pid: str) -> tuple[str, bytes]:

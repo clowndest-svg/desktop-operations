@@ -207,6 +207,7 @@ class LlmService:
             cost_output_per_1m=provider.cost_output_per_1m,
             key_optional=provider.key_optional,
             bundled=provider.name == LOCAL_PROVIDER,
+            managed_resources=provider.name == LOCAL_PROVIDER and self._transport is None,
         )
         if self._transport is not None:
             return OpenAiCompatClient(

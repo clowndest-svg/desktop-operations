@@ -27,6 +27,7 @@ import logging
 import os
 import random
 import re
+import socket
 import subprocess
 import sys
 import threading
@@ -39,6 +40,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final, Protocol, TypedDict
 
+from jarvis import is_buyer
 from jarvis.app.media_prompt import PromptTranslator, TranslationError, Translator
 from jarvis.app.preferences import (
     IMAGE_CLOUD_BASE,
@@ -53,6 +55,7 @@ from jarvis.app.preferences import (
     Preferences,
 )
 from jarvis.config.paths import AppPaths
+from jarvis.llm import local_server
 from jarvis.llm.transport import open_request
 
 logger = logging.getLogger("jarvis.app.image_gen")
@@ -379,7 +382,9 @@ class ImageService:
         self._sleep = sleeper
         self._clock = clock
         self.translator: Translator = translator or PromptTranslator(
-            environ=self._environ, client_provider=client_provider
+            environ=self._environ,
+            client_provider=client_provider,
+            cache_identity=lambda: local_server.selected_card().alias,
         )
         # Serialize GPU jobs shared by image and video entry points.
         self.generation_lock = threading.Lock()
@@ -398,6 +403,11 @@ class ImageService:
         # 所以这一个 Event 同时服务两条路；轮询循环每轮查它，被置位就 /interrupt 中止）。
         self._cancel = threading.Event()
         self._active_base = ""
+        self._buyer_port = 0
+        self._generation_owner = 0
+        self._interrupt_done = threading.Event()
+        self._interrupt_done.set()
+        self._active_prompt = ""
 
     # -- 生命周期 ----------------------------------------------------------
 
@@ -419,17 +429,38 @@ class ImageService:
 
     # -- 停止 / 重启引擎 ---------------------------------------------------
 
-    def cancel(self) -> str:
+    def cancel(self, *, expected_owner: int = 0) -> str:
         """叫停在跑的这一张图/这一段视频：置取消位 + 让引擎中断当前任务。
 
         返回一句给界面显示的话。取消位被生图/生视频的轮询循环下一轮读到就中止；
         /interrupt 让 ComfyUI 真的停下算，不再白烧显卡。没有任务在跑时置位也无害
         （下一次 generate 开头会 clear）。
         """
-        running = self.generation_lock.locked()
-        self._cancel.set()
-        base = self._active_base
-        if base:
+        with self._lock:
+            if expected_owner and self._generation_owner != expected_owner:
+                return "这个任务已结束或不属于当前对话"
+            if not self._interrupt_done.is_set():
+                return "已请求停止"
+            running = self.generation_lock.locked()
+            self._cancel.set()
+            self._interrupt_done.clear()
+            base = self._active_base
+        try:
+            if not base:
+                return "已请求停止" if running else "当前没有正在生成的任务"
+            try:
+                if self._active_prompt:
+                    queue = self._get_json(base + "/queue", 3.0)
+                    active = queue.get("queue_running", []) if isinstance(queue, dict) else []
+                    if not any(
+                        isinstance(row, list) and len(row) > 1 and row[1] == self._active_prompt
+                        for row in active
+                    ):
+                        self._post_json(base + "/queue", {"delete": [self._active_prompt]}, 3.0)
+                        return "已请求停止"
+            except _EngineError:
+                if self._proc is None:
+                    return "已停止等待；外部引擎未确认中止，请查看它的任务队列"
             try:
                 request = urllib.request.Request(
                     base + "/interrupt",
@@ -440,7 +471,9 @@ class ImageService:
                 self._opener(request, 5.0).close()
             except Exception as exc:  # 中断失败也要中止本地等待，别把"停不下来"再抛给用户
                 logger.warning("向 %s 发 /interrupt 失败：%s", base, exc)
-        return "已请求停止" if running else "当前没有正在生成的任务"
+            return "已请求停止" if running else "当前没有正在生成的任务"
+        finally:
+            self._interrupt_done.set()
 
     def restart_engine(self) -> ImageStatus:
         """重启本软件起的本地引擎：先收掉自己起的那个（绝不动用户自己开的 ComfyUI），
@@ -615,9 +648,24 @@ class ImageService:
         """
         raw = str(prompt or "").strip()
         native = str(zh or "").strip()
-        self._cancel.clear()
         if not self.generation_lock.acquire(blocking=False):
-            return self._fail("本地生成任务正在运行，请等图片或视频完成后再试。")
+            return {
+                "ok": False,
+                "error": "本地生成任务正在运行，请等图片或视频完成后再试。",
+                "path": "",
+                "paths": [],
+                "engine": "",
+                "prompt": "",
+                "prompt_input": "",
+                "prompt_note": "",
+                "size": "",
+                "steps": 0,
+                "seed": 0,
+                "seconds": 0.0,
+                "preview": "",
+            }
+        self._cancel.clear()
+        self._generation_owner = threading.get_ident()
         try:
             try:
                 plan = self.translator.translate(native or raw)
@@ -625,14 +673,46 @@ class ImageService:
                 answer = self._fail(str(exc))
                 answer["prompt_input"] = native or raw
                 return answer
+            if self._cancel.is_set():
+                return self._fail("已停止生成")
             answer = self._run(plan.english, size=size, steps=steps, count=count)
         finally:
+            self._interrupt_done.wait(12.0)
             with self._lock:
                 self._active_base = ""
+                self._active_prompt = ""
+                self._generation_owner = 0
             self.generation_lock.release()
         answer["prompt_input"] = native or raw
         answer["prompt_note"] = plan.note
         return answer
+
+    def release_engine_models(self) -> None:
+        """Unload our engine cache before giving the GPU back to local chat."""
+        if self._proc is None or self._proc.poll() is not None or not self._active_base:
+            return
+        self._interrupt_done.wait(12.0)
+        try:
+            request = urllib.request.Request(
+                self._active_base + "/free",
+                data=b'{"unload_models":true,"free_memory":true}',
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            self._opener(request, 5.0).close()
+        except Exception:
+            logger.warning("自有引擎资源释放请求未成功")
+
+    @staticmethod
+    def gpu_budget_error(probe: ImageProbe) -> str:
+        total = float(probe.get("vram_total_mb") or 0.0)
+        free = float(probe.get("vram_free_mb") or 0.0)
+        if total > 0 and free < min(1024.0, total * 0.3):
+            return (
+                f"当前空闲显存只有 {int(free)} MB，暂不足以稳定生成。"
+                "请释放其他程序占用后重试；小夜不会结束外部模型或其他程序。"
+            )
+        return ""
 
     def _run(
         self,
@@ -644,6 +724,8 @@ class ImageService:
     ) -> ImageAnswer:
         """出一张图。两条引擎都从这里出去，失败一定带一句能照着做的话。"""
         text = str(prompt or "").strip()
+        if self._cancel.is_set():
+            return self._fail("已停止生成")
         if not text:
             return self._fail("要一句画什么的描述，不能空着。")
         width, height = parse_size(size if size is not None else self._size())
@@ -657,9 +739,13 @@ class ImageService:
         started = self._clock()
         if chosen in (Engine.AUTO.value, Engine.LOCAL.value):
             try:
-                answer = self._generate_local(
-                    text, edge_size, width, height, step_count, draw_count, started
-                )
+                with local_server.media_session():
+                    try:
+                        answer = self._generate_local(
+                            text, edge_size, width, height, step_count, draw_count, started
+                        )
+                    finally:
+                        self.release_engine_models()
             except _EngineError as exc:
                 # 逃出来的一句人话也要变成"没画成 + 那句话"，不是把栈抛给面板：
                 # 落盘失败（盘满、目录被删、路径过长）走的正是这条路，而那次的图是真的画好了。
@@ -699,11 +785,16 @@ class ImageService:
         count: int,
         started: float,
     ) -> ImageAnswer:
+        if self._cancel.is_set():
+            return self._fail("已停止生成")
         probe = self._find_engine()
         with self._lock:
             self._probe = probe
         if not probe["ok"]:
             return self._fail(probe["detail"] or "本机没有答话的 ComfyUI。")
+        problem = self.gpu_budget_error(probe)
+        if problem:
+            return self._fail(problem)
         checkpoint = probe["checkpoints"][0] if probe["checkpoints"] else self._checkpoint
         if not checkpoint:
             return self._fail(f"{probe['url']} 答了话，但没报出任何一个权重文件名。")
@@ -735,6 +826,10 @@ class ImageService:
 
     def _find_engine(self) -> ImageProbe:
         """找一个在答话的 ComfyUI。指了地址就只问那个，没指就按端口扫一遍。"""
+        if is_buyer():
+            if self._proc is not None and self._proc.poll() is None:
+                return self._ask_engine(f"http://127.0.0.1:{self._engine_port()}")
+            return self._try_start_engine(None)
         explicit = self._comfy_url()
         candidates = (
             [explicit] if explicit else [f"http://127.0.0.1:{port}" for port in COMFY_PORTS]
@@ -842,6 +937,7 @@ class ImageService:
         pid = answer.get("prompt_id") if isinstance(answer, Mapping) else None
         if not isinstance(pid, str) or not pid:
             raise _EngineError(f"{base} 收了图但没给 prompt_id：{str(answer)[:200]}")
+        self._active_prompt = pid
         return pid
 
     def _wait_for_images(self, base: str, pid: str) -> list[tuple[str, bytes]]:
@@ -946,6 +1042,12 @@ class ImageService:
         proc.wait()
 
     def _engine_port(self) -> int:
+        if is_buyer():
+            if not self._buyer_port:
+                with socket.socket() as reservation:
+                    reservation.bind(("127.0.0.1", 0))
+                    self._buyer_port = int(reservation.getsockname()[1])
+            return self._buyer_port
         url = self._comfy_url()
         match = re.search(r":(\d{2,5})\b", url) if url else None
         return int(match.group(1)) if match else COMFY_PORTS[0]

@@ -148,12 +148,18 @@ class TestTheTableOnTheWire:
 
         service.ask("你好啊")
 
-        assert set(client.carried[-1]) <= {
+        sent = client.carried[-1]
+        # 正向那两条才是判据。只写「带出去的必须是这几名的子集」，某条从注册表掉下去
+        # 也照样绿 —— 兜底包丢 chat_search 那一版就是靠这个形状混过门禁的。
+        assert "search_web" in sent, "兜底里没有它，没命中关键词的问句就永远不联网"
+        assert "chat_search" in sent, "兜底里没有它，「我们聊过的那个方案」只能编一个答案"
+        assert set(sent) <= {
             "current_time",
             "calculate",
             "memory_search",
             "remember",
             "knowledge_search",
+            "search_web",
             "chat_search",
         }
 

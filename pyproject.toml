@@ -21,6 +21,7 @@ classifiers = [
 # headless install cannot be ambushed by it. ``tests/test_packaging_declared_deps.py``
 # fails the build if a first-party module ever imports an undeclared package.
 dependencies = [
+    "langid==1.1.6",  # offline language validation; no service/key/model download
     "PyYAML>=6.0.1",  # phase 3: configuration system
     "langgraph>=0.2.0",  # phase 10: multi-agent orchestration graph
     "qq-botpy>=1.2.1",  # QQ official bot gateway and message APIs

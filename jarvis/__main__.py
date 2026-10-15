@@ -994,7 +994,9 @@ def _run_desktop(args: argparse.Namespace) -> int:
     # 生图：本地 ComfyUI 和云端 API 两条引擎共用这一个服务实例。她问的和面板点的是
     # 同一个对象，而「起起来的引擎子进程」只能有一个地方持有 —— 和 scrcpy 那条窗口同一条理由。
     image_engine = ImageService(
-        preferences, config_service.paths, client_provider=lambda: llm_service.client
+        preferences,
+        config_service.paths,
+        client_provider=lambda: llm_service.client_for("local"),
     )
     app.register(image_engine)
     video_engine = VideoService(image_engine, preferences, config_service.paths)

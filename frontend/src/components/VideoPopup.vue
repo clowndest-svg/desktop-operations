@@ -77,7 +77,7 @@
           </template>
           <div class="vp__actions">
             <button class="hud-btn hud-btn--primary" type="button" :disabled="busy || !prompt.trim()" @click="generate">{{ busy ? `正在生成 · ${elapsed} 秒` : (engine === 'cloud' ? '云端生成视频' : '生成视频') }}</button>
-            <button v-if="busy && engine !== 'cloud'" class="hud-btn hud-btn--warn" type="button" @click="stop">停止</button>
+            <button v-if="busy" class="hud-btn hud-btn--warn" type="button" @click="stop">{{ engine === 'cloud' ? '停止等待' : '停止' }}</button>
             <button v-if="engine !== 'cloud'" class="hud-btn" type="button" :disabled="busy" @click="reprobe">检测本机引擎</button>
             <button v-if="engine !== 'cloud'" class="hud-btn" type="button" :disabled="busy" @click="restartEngine">重启引擎</button>
           </div>

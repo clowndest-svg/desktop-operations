@@ -20,11 +20,13 @@ import html as htmlmod
 import ipaddress
 import logging
 import re
+import socket
 import urllib.error
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from collections.abc import Mapping
-from typing import Final
+from typing import Any, Final
 
 from jarvis.core.constants import DEFAULT_ENCODING
 from jarvis.core.exceptions import ToolExecutionError
@@ -161,6 +163,8 @@ def validate_url(raw: str) -> str:
         raise ToolExecutionError(f"不支持的协议：{parsed.scheme}（只允许 http/https）")
     if not parsed.hostname:
         raise ToolExecutionError(f"网址缺少主机名：{raw}")
+    if parsed.username or parsed.password:
+        raise ToolExecutionError("不支持包含账号密码的网址")
     _reject_private_host(parsed.hostname)
     return urllib.parse.urlunsplit(parsed)
 
@@ -174,8 +178,28 @@ def _reject_private_host(host: str) -> None:
         address = ipaddress.ip_address(lowered)
     except ValueError:
         return  # a hostname; DNS resolution is the network's problem, not ours
-    if address.is_private or address.is_loopback or address.is_link_local:
+    if not address.is_global:
         raise ToolExecutionError(f"拒绝访问内网地址：{host}")
+
+
+def _check_public_dns(url: str) -> None:
+    parsed = urllib.parse.urlsplit(validate_url(url))
+    assert parsed.hostname is not None
+    for address in socket.getaddrinfo(
+        parsed.hostname,
+        parsed.port or (443 if parsed.scheme == "https" else 80),
+        type=socket.SOCK_STREAM,
+    ):
+        if not ipaddress.ip_address(address[4][0]).is_global:
+            raise ToolExecutionError("网页域名解析到非公网地址，已停止访问")
+
+
+class _PublicRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(
+        self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str
+    ) -> Any:
+        _check_public_dns(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def _get(url: str, *, timeout_seconds: float, opener: object | None) -> tuple[str, bytes, str]:
@@ -198,7 +222,10 @@ def _get(url: str, *, timeout_seconds: float, opener: object | None) -> tuple[st
         if opener is not None:
             response = opener.open(request, timeout=timeout_seconds)  # type: ignore[attr-defined]
         else:
-            response = urllib.request.urlopen(request, timeout=timeout_seconds)
+            _check_public_dns(url)
+            response = urllib.request.build_opener(_PublicRedirect()).open(
+                request, timeout=timeout_seconds
+            )
         with response:
             final_url = response.geturl()
             validate_url(final_url)
@@ -286,24 +313,110 @@ def _search_web(
         raw_max = arguments.get("max_results")
         wanted = raw_max if isinstance(raw_max, int) and 0 < raw_max <= MAX_RESULTS else MAX_RESULTS
         params = urllib.parse.urlencode({"q": query, "count": wanted, "setlang": "zh-hans"})
-        _, body, content_type = _get(
-            f"{SEARCH_ENDPOINT}?{params}", timeout_seconds=timeout_seconds, opener=opener
-        )
-        page = body.decode(DEFAULT_ENCODING, errors="replace")
-        rows = _parse_results(page, wanted)
+        rows: list[tuple[str, str, str]] = []
+        failures: list[str] = []
+        engine = "bing"
+        received = False
+        for endpoint, provider in (
+            (f"{SEARCH_ENDPOINT}?{params}&format=rss", "bing"),
+            (f"{SEARCH_ENDPOINT}?{params}", "bing"),
+            ("https://www.sogou.com/web?" + urllib.parse.urlencode({"query": query}), "sogou"),
+            (
+                "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query}),
+                "duckduckgo",
+            ),
+        ):
+            try:
+                _, body, _ = _get(endpoint, timeout_seconds=timeout_seconds, opener=opener)
+                received = True
+            except ToolExecutionError as exc:
+                failures.append(str(exc))
+                continue
+            page = body.decode(DEFAULT_ENCODING, errors="replace")
+            rows = _parse_rss(page, wanted) or _parse_results(page, wanted)
+            if not rows and provider == "duckduckgo":
+                rows = _parse_duckduckgo(page, wanted)
+            if not rows and provider == "sogou":
+                rows = _parse_sogou(page, wanted)
+            # A search engine sometimes ignores the rest of a Chinese query. Do not
+            # call a generic country page evidence about university rankings/weather.
+            subject = " ".join(title + " " + snippet for title, _, snippet in rows).lower()
+            if "大学" in query and not re.search(r"大学|university|universities|college", subject):
+                rows = []
+            if "天气" in query and not re.search(r"天气|weather|forecast", subject):
+                rows = []
+            if rows:
+                engine = provider
+                break
         if not rows:
+            if not received and failures:
+                raise ToolExecutionError("免Key搜索暂不可用：" + "；".join(failures))
             return (
-                f"「{query}」没有搜到结果（{content_type}，{len(body)} 字节）。"
+                f"「{query}」没有搜到结果（已尝试免Key搜索备用入口）。"
                 "可能是搜索页改版，也可能这个词确实没命中——换个说法再试，"
                 "或者用 fetch_url 直接打开你已经知道的网址。"
             )
-        lines = [f"联网搜索「{query}」，{len(rows)} 条结果（搜索引擎：bing）："]
+        lines = [f"联网搜索「{query}」，{len(rows)} 条结果（搜索引擎：{engine}）："]
         for index, (title, source, snippet) in enumerate(rows, start=1):
             where = f"（{source}）" if source else ""
             lines.append(f"[{index}] {title}{where}\n{snippet}")
         return "\n".join(lines)[:MAX_RESULT_CHARS]
 
     return handler
+
+
+def _parse_rss(page: str, limit: int) -> list[tuple[str, str, str]]:
+    if "<!DOCTYPE" in page.upper() or "<rss" not in page[:500].lower():
+        return []
+    try:
+        root = ET.fromstring(page)
+    except ET.ParseError:
+        return []
+    rows = []
+    for item in root.findall("./channel/item"):
+        title = html_to_text(item.findtext("title", ""))
+        link = item.findtext("link", "").strip()
+        if title and link.startswith(("https://", "http://")):
+            rows.append(
+                (title[:120], link[:700], html_to_text(item.findtext("description", ""))[:300])
+            )
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def _parse_duckduckgo(page: str, limit: int) -> list[tuple[str, str, str]]:
+    rows = []
+    pattern = r'<a\b[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>'
+    for match in re.finditer(pattern, page, re.DOTALL):
+        link, title = htmlmod.unescape(match[1]), html_to_text(match[2])
+        if link.startswith("//"):
+            link = "https:" + link
+        wrapped = urllib.parse.parse_qs(urllib.parse.urlsplit(link).query).get("uddg")
+        if wrapped:
+            link = wrapped[0]
+        if title and link.startswith(("https://", "http://")):
+            rows.append((title[:120], link[:700], ""))
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def _parse_sogou(page: str, limit: int) -> list[tuple[str, str, str]]:
+    """Read organic result headings, excluding generated answers and ad scripts."""
+    rows = []
+    for match in re.finditer(r"<h3\b[^>]*>(.*?)</h3>(.{0,1800})", page, re.DOTALL):
+        anchor = re.search(r'<a\b[^>]*href="([^"]+)"[^>]*>(.*?)</a>', match[1], re.DOTALL)
+        if not anchor:
+            continue
+        title, link = html_to_text(anchor[2]), htmlmod.unescape(anchor[1])
+        link = urllib.parse.urljoin("https://www.sogou.com", link)
+        if title and link.startswith(("https://", "http://")):
+            fragment = match[2].rsplit("<", 1)[0]
+            rows.append((title[:120], link[:700], html_to_text(fragment)[:300]))
+        if len(rows) >= limit:
+            break
+    return rows
 
 
 def build(

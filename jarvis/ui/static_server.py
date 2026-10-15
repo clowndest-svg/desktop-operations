@@ -35,6 +35,9 @@ import http.server
 import logging
 import threading
 from pathlib import Path
+from typing import Any
+
+from jarvis.ui.media_stream import MediaFiles
 
 logger = logging.getLogger("jarvis.ui.static_server")
 
@@ -44,6 +47,22 @@ HOST: str = "127.0.0.1"
 
 class _BundleRequestHandler(http.server.SimpleHTTPRequestHandler):
     """Serves one directory, quietly, with no listing and no caching."""
+
+    def __init__(self, *args: Any, media: MediaFiles, **kwargs: Any) -> None:
+        self._media = media
+        super().__init__(*args, **kwargs)
+
+    def do_GET(self) -> None:
+        if self.path.startswith("/media/"):
+            self._media.serve(self)
+        else:
+            super().do_GET()
+
+    def do_HEAD(self) -> None:
+        if self.path.startswith("/media/"):
+            self._media.serve(self, head=True)
+        else:
+            super().do_HEAD()
 
     def list_directory(self, path: str) -> None:  # type: ignore[override]
         """Refuse directory listings.
@@ -76,6 +95,7 @@ class BundleServer:
         self._directory = directory
         self._server: http.server.ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
+        self.media = MediaFiles()
 
     def start(self) -> str:
         """Bind and serve in a background thread; returns the base URL.
@@ -86,7 +106,9 @@ class BundleServer:
         """
         if self._server is not None:
             return self.url
-        handler = functools.partial(_BundleRequestHandler, directory=str(self._directory))
+        handler = functools.partial(
+            _BundleRequestHandler, directory=str(self._directory), media=self.media
+        )
         server = http.server.ThreadingHTTPServer((HOST, 0), handler)
         server.daemon_threads = True
         thread = threading.Thread(

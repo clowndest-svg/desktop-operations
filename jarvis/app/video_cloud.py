@@ -12,8 +12,8 @@
 照着它自己的文档改这几格即可，代码一行不用动。
 
 诚实边界：这条链路能"照着契约拼请求、按路径取值、把下载地址取回成 MP4"是通用的，
-但**能不能在你的账号上跑通，取决于你填的那家是不是真是这个形状**。通义万相是默认档里
-唯一被端到端验过的一家；别家没有各自的钥匙和文档，软件无法替他验证，界面会如实这么写。
+但**能不能在你的账号上跑通，取决于你填的那家是不是真是这个形状**。默认预置通义万相契约；
+真实账号出片需另行实测，离线假端点通过不代表已验证真实服务商，界面按此说明。
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Final, Protocol, cast
 
@@ -193,32 +193,40 @@ class CloudVideoClient:
         return key
 
     def _request(self, request: urllib.request.Request, timeout: float) -> object:
-        url = request.full_url
         try:
             with self._opener(request, timeout) as reply:
                 raw = bytes(reply.read(20 * 1024 * 1024))
         except urllib.error.HTTPError as exc:
-            detail = b""
-            if hasattr(exc, "read"):
-                detail = exc.read(4000)
-            text = detail.decode("utf-8", errors="replace")[:400]
-            raise _EngineError(f"云端（{url[:80]}）回了 HTTP {exc.code}：{text}") from exc
+            exc.close()
+            raise _EngineError(f"云端返回 HTTP {exc.code}，请检查账号、额度和接口配置") from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            reason = getattr(exc, "reason", exc)
-            raise _EngineError(f"连不上云端（{url[:80]}）：{reason}") from exc
+            raise _EngineError("连不上云端，请检查网络或稍后重试") from exc
         try:
             return json.loads(raw.decode("utf-8", errors="replace"))
         except json.JSONDecodeError as exc:
-            raise _EngineError(f"云端（{url[:80]}）回的不是 JSON：{raw[:160]!r}") from exc
+            raise _EngineError("云端响应不是有效 JSON，请检查接口配置") from exc
 
-    def _download(self, url: str) -> bytes:
+    def _download(self, url: str, should_stop: Callable[[], bool] | None = None) -> bytes:
         parsed = urllib.parse.urlsplit(url)
         if parsed.scheme not in ("http", "https"):
             raise _EngineError(f"云端给的视频地址不是 http(s)：{url[:80]}")
         request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
         try:
             with self._opener(request, 120.0) as reply:
-                blob = bytes(reply.read(400 * 1024 * 1024))
+                chunks: list[bytes] = []
+                total = 0
+                while True:
+                    if should_stop and should_stop():
+                        raise _EngineError("已停止等待云端视频；服务商任务可能仍在执行")
+                    chunk = bytes(reply.read(512 * 1024))
+                    total += len(chunk)
+                    if total > 400 * 1024 * 1024:
+                        raise _EngineError("云端视频超过400MB限制，未保存残缺文件")
+                    if chunk:
+                        chunks.append(chunk)
+                    if len(chunk) < 512 * 1024:
+                        break
+                blob = b"".join(chunks)
         except urllib.error.HTTPError as exc:
             raise _EngineError(f"取云端视频回了 HTTP {exc.code}") from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
@@ -237,6 +245,7 @@ class CloudVideoClient:
         seconds: int,
         fps: int,
         frames: int,
+        should_stop: Callable[[], bool] | None = None,
     ) -> tuple[bytes, dict[str, Any]]:
         """跑完整程，返回 (MP4 字节, 过程线索)。线索里带 task_id，出错时能照着查日志。"""
         config = self._config
@@ -267,13 +276,12 @@ class CloudVideoClient:
                 raise _EngineError(
                     f"按「视频地址取法」（{config.video_path}）在云端返回里没找到下载地址。"
                 )
-            return self._download(str(video_url)), trace
+            return self._download(str(video_url), should_stop), trace
 
         task_id = dig(submit_answer, config.task_path)
         if not task_id:
             raise _EngineError(
-                f"提交没拿到任务 id（取法 {config.task_path}）；"
-                f"云端原样回的是：{json.dumps(submit_answer, ensure_ascii=False)[:300]}"
+                f"提交没拿到任务 id（取法 {config.task_path}）；" "请检查任务ID字段与接口配置。"
             )
         trace["task_id"] = str(task_id)
         poll = render_url(poll_url, {"task_id": task_id})
@@ -283,6 +291,8 @@ class CloudVideoClient:
         stop_after = time.monotonic() + self._deadline
         last_payload: object = submit_answer
         while True:
+            if should_stop and should_stop():
+                raise _EngineError("已停止等待云端视频；服务商任务可能仍在执行")
             last_payload = self._request(
                 urllib.request.Request(poll, headers=headers, method="GET"), 60.0
             )
@@ -292,10 +302,9 @@ class CloudVideoClient:
             status_word = str(status or "").strip().upper()
             if video_url:
                 break
-            dump = json.dumps(last_payload, ensure_ascii=False)[:300]
             if config.status_path.strip() and status_word:
                 if status_word in failed:
-                    raise _EngineError(f"云端把任务判成 {status_word}：{dump}")
+                    raise _EngineError("云端任务失败，请在服务商控制台核对任务状态")
                 if status_word in running:
                     pass  # 明确在跑：什么都不做，落到底部继续等下一次轮询
                 elif not succeeded or status_word in succeeded:
@@ -307,7 +316,7 @@ class CloudVideoClient:
             self._sleep(POLL_INTERVAL_SECONDS)
         if not video_url:
             raise _EngineError(f"云端任务结束却没给视频地址（取法 {config.video_path}）。")
-        return self._download(str(video_url)), trace
+        return self._download(str(video_url), should_stop), trace
 
 
 __all__ = [

@@ -66,7 +66,7 @@ from jarvis.config.paths import BUNDLE_DATA_DIRNAME  # noqa: E402
 from jarvis.llm.local_server import MODEL_DIRNAME  # noqa: E402
 
 # exe 旁边那一层出现这些名字，说明这台机器上真跑过它。
-FORBIDDEN_FILES = {"config.yaml", "preferences.json", ".env"}
+FORBIDDEN_FILES = {"config.yaml", "preferences.json", ".env", "credentials.dpapi.json"}
 FORBIDDEN_SUFFIXES = {".db", ".db-wal", ".db-shm", ".jsonl", ".wav", ".mp3", ".key"}
 
 # 随合并包发给买家的说明。01 是给你自己粘闲鱼用的，03 是"怎么发"的内部流程，都不进包。
@@ -143,10 +143,10 @@ def scan(source: Path) -> list[str]:
     for path in source.rglob("*"):
         if path.is_symlink() or path.is_junction():
             hits.append(f"不打包链接/联接：{path.relative_to(source)}")
-    data = source / BUNDLE_DATA_DIRNAME
-    if data.is_dir():
-        count = sum(1 for entry in data.rglob("*") if entry.is_file())
-        hits.append(f"数据根 {data.name}/ 存在，里面有 {count} 个文件（这台机器上运行过它）")
+    for data in (source / BUNDLE_DATA_DIRNAME, source / "用户数据"):
+        if data.is_dir():
+            count = sum(1 for entry in data.rglob("*") if entry.is_file())
+            hits.append(f"数据根 {data.name}/ 存在，里面有 {count} 个文件（这台机器上运行过它）")
     for entry in sorted(source.iterdir()):
         if entry.is_file() and (
             entry.name in FORBIDDEN_FILES or entry.suffix in FORBIDDEN_SUFFIXES
@@ -231,6 +231,10 @@ def freshness_warnings(source: Path, exe: Path) -> list[str]:
         info = read_json(metadata)
         if info.get("source_sha256") != source_fingerprint(REPO_ROOT):
             notes.append("PC 包的源码内容指纹与当前工作区不一致；必须重新构建")
+        if info.get("edition") == "buyer":
+            for relative in ("运行库/WebView2/msedgewebview2.exe",):
+                if not (source / relative).is_file():
+                    notes.append(f"买家包缺少离线必备资源：{relative}")
     except (OSError, ValueError):
         notes.append("PC 包缺少可核对的源码指纹，不能作为本轮交付")
     built = source / WEB_ASSETS
@@ -460,18 +464,18 @@ def buyer_first_page(round_name: str, apk: Path | None, weights: list[Path], zip
             f"小夜 · 桌面 AI 语音助手 · 构建 {round_name}",
             "",
             "三步：",
-            "1) 把这一整个压缩包【解压一层】（不是解压两遍）。解压完应该直接看到 小夜\\ 这个文件夹，",
+            "1) 把整个压缩包完整解压到可写的非系统盘。解压一层应直接看到 小夜\\ 文件夹，",
             "   里面有小夜.exe 和 模型\\ 目录。",
             "   Windows 自带的右键「全部解压」也可以用（实测解出来的模型大小和 md5 都跟包里一致）。",
             display_note,
-            "2) 双击 小夜\\小夜.exe。第一次弹「Windows 已保护你的电脑」→ 点「更多信息」→「仍要运行」，",
-            "   这是因为没买代码签名证书，不是病毒。别把 小夜.exe 单独拷出来运行（旁边必须有 _internal）。",
+            "2) 双击 小夜\\小夜.exe。未签名程序可能出现安全提示，请核对来源及校验信息。",
+            "   别把 小夜.exe 单独拷出来运行；旁边必须有 _internal、模型及随包运行库。",
             f"3) 设置里自带模型显示可用后即可打字提问；包里带了 {len(weights)} 个离线大模型，"
-            "   无需 API Key；内存不足时，用「建议」或在「选哪个离线模型」手动换小模型。",
+            "   无需 API Key；买家版自动按空闲内存选模型，也可在设置里调整。",
             f"   {weight_line}小了或者没这个文件 = 解压没解全，重来一遍（自带解压和 7-Zip 都行）。",
             "",
-            "数据全在 小夜\\数据\\ 里，不占 C 盘；想清干净就是退出后删掉那个目录。",
-            "想更快、想让她动手（打开程序、读文件、管进程这些）：右上角 设置 → AI 模型，配一个你自己的 API Key。",
+            "买家版数据在 小夜\\用户数据\\（旧版为 数据\\），设置中可查看实际目录。升级请保留用户数据。",
+            "本地模型无需Key即可聊天、调用允许的工具与免Key联网检索。云端服务可选，需买家自己的账号。",
             "详细的（语音、宠物、告警、手机遥控、边界说明）在 文档\\04-买家安装与使用说明.md，那份才是完整的。",
             "",
             f"校验你拿到的是原包：certutil -hashfile {zip_name} SHA256   （值在压缩包外的清单与发货记录里）",
@@ -615,6 +619,7 @@ def read_back(
             name
             for name in infos
             if f"{PC_DIR}/{BUNDLE_DATA_DIRNAME}/" in name
+            or f"{PC_DIR}/用户数据/" in name
             or (
                 Path(name).name in FORBIDDEN_FILES
                 and not (

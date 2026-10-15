@@ -21,7 +21,7 @@ from typing import Final
 
 from jarvis.core.exceptions import JarvisError
 from jarvis.llm.client import LlmClient
-from jarvis.llm.types import ChatMessage
+from jarvis.llm.types import ChatMessage, GenerationOptions
 from jarvis.memory.types import ExtractedMemory, MemoryKind
 from jarvis.prompt import render_prompt
 
@@ -86,7 +86,16 @@ class MemoryExtractor:
                 [
                     ChatMessage.system(render_prompt("memory_extraction")),
                     ChatMessage.user(transcript),
-                ]
+                ],
+                options=GenerationOptions(
+                    temperature=0.0,
+                    max_tokens=400,
+                    template_kwargs=(
+                        {"enable_thinking": False}
+                        if getattr(self._llm, "provider_name", "") == "local"
+                        else None
+                    ),
+                ),
             ).content
         except JarvisError as exc:
             logger.warning("memory extraction skipped: %s", exc)

@@ -36,7 +36,10 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from _thread import RLock as ResourceLock
 from collections import deque
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -326,6 +329,23 @@ class Tuning:
 
 
 _TUNING = Tuning()
+_RESOURCE_LOCK = ResourceLock()
+
+
+def resource_lock() -> ResourceLock:
+    return _RESOURCE_LOCK
+
+
+@contextmanager
+def media_session() -> Iterator[None]:
+    """Release only our idle model and serialize local inference with media work."""
+    with _RESOURCE_LOCK:
+        server = shared_server()
+        with server._lock:
+            idle = server._busy == 0
+        if idle:
+            server.stop(reason="为本地图片/视频释放自有聊天模型资源")
+        yield
 
 
 def configure(next_tuning: Tuning) -> None:
@@ -449,6 +469,22 @@ def selected_model(wanted: str) -> Path | None:
         return None
     if wanted:
         return next((path for path in options if path.name == wanted), None)
+    from jarvis import is_buyer
+
+    if is_buyer():
+        current = globals().get("_SERVER")
+        if isinstance(current, LocalServer) and current.phase in (
+            ModelPhase.RUNNING,
+            ModelPhase.LOADING,
+        ):
+            loaded = next((path for path in options if path.name == current._model), None)
+            if loaded is not None:
+                return loaded
+        available = free_memory_mb()
+        for path in options:
+            if gate_mb(card_for(path), DEFAULT_CONTEXT) + 1024 <= available:
+                return path
+        return options[-1]
     return options[0]
 
 
@@ -782,6 +818,10 @@ class LocalServer:
     # -- writes ------------------------------------------------------------
 
     def ensure_running(self, wait_seconds: float = LOAD_TIMEOUT) -> tuple[bool, str]:
+        with _RESOURCE_LOCK:
+            return self._ensure_running(wait_seconds)
+
+    def _ensure_running(self, wait_seconds: float = LOAD_TIMEOUT) -> tuple[bool, str]:
         """Bring the server up, blocking at most ``wait_seconds``.
 
         Returns ``(True, "")`` or ``(False, reason)`` -- the caller puts that reason on

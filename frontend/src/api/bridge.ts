@@ -1969,6 +1969,7 @@ export interface SessionList {
 }
 
 export interface StoredTurn {
+  id?: number
   role: string
   content: string
   at: string
@@ -2175,6 +2176,7 @@ interface PywebviewApi {
     model?: string,
   ): Promise<ChatSendResult>
   chat_cancel(taskId: string): Promise<{ ok: boolean; error: string }>
+  chat_edit_question(conversation: string, messageId: number, text: string, attachments: Attachment[]): Promise<ChatSendResult>
   chat_collaborate(
     text: string,
     seats: SeatChoice[],
@@ -3534,6 +3536,9 @@ const mock: PywebviewApi = {
       reasoning: '',
       artifacts: made,
     }
+  },
+  async chat_edit_question() {
+    return { ok: false, task_id: '', conversation: '', question: '', answer: '', error: '修改历史提问需要桌面版的真实对话数据库' }
   },
   async chat_send(text, attachments = [], conversation = '', provider = '', model = '') {
     // The preview browser has no Python behind it, so the mock answers on a timer: the
@@ -6220,6 +6225,10 @@ export function chatSend(
 
 export function chatCancel(taskId: string): Promise<{ ok: boolean; error: string }> {
   return bridge().then((target) => target.chat_cancel(taskId))
+}
+
+export function chatEditQuestion(conversation: string, messageId: number, text: string, attachments: Attachment[]): Promise<ChatSendResult> {
+  return bridge().then(target => target.chat_edit_question(conversation, messageId, text, attachments))
 }
 
 /**

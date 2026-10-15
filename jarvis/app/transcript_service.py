@@ -131,6 +131,7 @@ def _turn(row: sqlite3.Row) -> dict[str, Any]:
     if not isinstance(attachments, list):
         attachments = []
     return {
+        "id": int(row["id"]),
         "role": row["role"],
         "content": row["content"],
         "at": row["at"],
@@ -165,6 +166,36 @@ class TranscriptService:
         self._started = False
 
     # -- sessions ----------------------------------------------------------
+
+    def fork_before(self, session_id: str, message_id: int, title: str) -> str:
+        """Copy the prefix before a user question atomically; retain the original."""
+        if not self._started:
+            return ""
+        key = uuid.uuid4().hex
+        stamp = format_timestamp(utc_now())
+        try:
+            with self._store.transaction() as conn:
+                target = conn.execute(
+                    "SELECT role FROM chat_messages WHERE session_id=? AND id=?",
+                    (session_id, message_id),
+                ).fetchone()
+                if target is None or target["role"] != "user":
+                    return ""
+                conn.execute(
+                    "INSERT INTO chat_sessions(id,title,created_at,updated_at) VALUES(?,?,?,?)",
+                    (key, title[:TITLE_CHARS], stamp, stamp),
+                )
+                conn.execute(
+                    "INSERT INTO chat_messages"
+                    "(session_id,role,content,at,attachments,model,task_id) "
+                    "SELECT ?,role,content,at,attachments,model,'' FROM chat_messages "
+                    "WHERE session_id=? AND id<? ORDER BY id",
+                    (key, session_id, message_id),
+                )
+            return key
+        except sqlite3.Error:
+            logger.exception("could not branch a question")
+            return ""
 
     def new_session(self, title: str = "", session_id: str = "") -> str:
         """Open a conversation row. Returns its id, or ``""`` when nothing was created.
@@ -290,7 +321,7 @@ class TranscriptService:
             with self._store.connection() as conn:
                 rows = conn.execute(
                     """
-                    SELECT role, content, at, attachments, model, task_id FROM (
+                    SELECT id, role, content, at, attachments, model, task_id FROM (
                         SELECT id, role, content, at, attachments, model, task_id
                           FROM chat_messages
                          WHERE session_id = ?
@@ -350,7 +381,7 @@ class TranscriptService:
             with self._store.connection() as conn:
                 rows = conn.execute(
                     """
-                    SELECT role, content, at, attachments, model, task_id FROM (
+                    SELECT id, role, content, at, attachments, model, task_id FROM (
                         SELECT id, role, content, at, attachments, model, task_id
                           FROM chat_messages
                          WHERE session_id = ?

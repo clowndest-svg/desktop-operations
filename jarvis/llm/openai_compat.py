@@ -64,6 +64,8 @@ logger = logging.getLogger("jarvis.llm.client")
 _CHAT_COMPLETIONS_PATH = "/chat/completions"
 _STREAM_DONE_SENTINEL = "[DONE]"
 _RETRYABLE_ERRORS = (LlmRateLimitError, LlmServerError, LlmTimeoutError, LlmConnectionError)
+_MEDIA_HANDOFF_SECONDS = 20.0
+"""How long a bundled chat request waits for the media engine before saying why it can't."""
 
 """What each vendor says when the prompt does not fit (all measured or quoted from their
 own error bodies): llama.cpp's server, Ollama, vLLM, OpenAI and Anthropic all phrase it
@@ -159,6 +161,7 @@ class OpenAiCompatSettings:
     key_optional: bool = False
     """Send the request without an ``Authorization`` header when no key is configured."""
     bundled: bool = False
+    managed_resources: bool = False
     """这一发是发给"她自己带的那个离线模型"的：请求在飞时不许被空闲看门狗关掉。"""
 
 
@@ -248,6 +251,10 @@ class OpenAiCompatClient:
         """
         started = time.perf_counter()
         with self._held_for_request():
+            if self._settings.managed_resources:
+                from jarvis.llm import local_server
+
+                payload = dict(payload, model=local_server.selected_card().alias)
             yield from self._iter_chunks(payload, task_id, started)
 
     def _iter_chunks(
@@ -516,6 +523,28 @@ class OpenAiCompatClient:
         from jarvis.llm import local_server
 
         server = local_server.shared_server()
+        if self._settings.managed_resources:
+            # 生图/生视频那一段整件持有资源锁（media_session）。无等待地排队会让
+            # 「思考中」挂到那件做完为止，而停止按钮掐不动一次锁等待 —— 所以这里
+            # 等一小会儿就明说原因，别把一次可解释的拒绝换成一次看不见的等待。
+            if not local_server.resource_lock().acquire(timeout=_MEDIA_HANDOFF_SECONDS):
+                raise LlmConnectionError(
+                    "本地图片或视频正在用这张显卡，聊天模型暂时让给了它。"
+                    "等那一件完成再问，或先在弹窗里点停止。"
+                )
+            try:
+                ready, reason = server.ensure_running()
+                if not ready:
+                    raise LlmConnectionError(reason or "本地模型未能启动")
+                self._endpoint = local_server.endpoint().rstrip("/") + _CHAT_COMPLETIONS_PATH
+                server.begin_request()
+                try:
+                    yield
+                finally:
+                    server.end_request()
+            finally:
+                local_server.resource_lock().release()
+            return
         server.begin_request()
         try:
             yield
@@ -524,6 +553,10 @@ class OpenAiCompatClient:
 
     def _post_with_retry(self, payload: Mapping[str, object]) -> Mapping[str, object]:
         with self._held_for_request():
+            if self._settings.managed_resources:
+                from jarvis.llm import local_server
+
+                payload = dict(payload, model=local_server.selected_card().alias)
             return self._post_once(payload)
 
     def _post_once(self, payload: Mapping[str, object]) -> Mapping[str, object]:

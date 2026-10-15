@@ -39,6 +39,7 @@ PYPROJECT = REPO_ROOT / "pyproject.toml"
 # Anything imported but absent from the inverse of this map fails check 1, which is
 # the point: the map is what has to be kept in step with pyproject.
 DIST_TO_IMPORTS: dict[str, tuple[str, ...]] = {
+    "langid": ("langid",),
     "pyyaml": ("yaml",),
     "langgraph": ("langgraph",),
     "qq-botpy": ("botpy",),

@@ -5,17 +5,21 @@ param(
     [string]$Root='E:\BianChengGongJu\JarvisBuild',
     [string]$Out='',
     [string]$MediaEngineRoot='',
+    [string]$MobileRoot='',
+    [ValidateSet('author','buyer')][string]$Edition='author',
     [switch]$CleanOld,
     [switch]$UpdateShortcut,
     [switch]$Build,
     [switch]$DryRun
 )
 $ErrorActionPreference = 'Stop'
+if ($Edition -eq 'buyer' -and $UpdateShortcut) { throw '买家构建不修改作者桌面快捷方式，请使用独立作者运行目录' }
 $repo = Split-Path -Parent $PSScriptRoot
 $python = Join-Path $repo '.venv\Scripts\python.exe'
 if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw '缺少项目虚拟环境' }
 $Root = (Resolve-Path -LiteralPath $Root).ProviderPath
 if (-not $Out) { $Out = Join-Path $repo '闲鱼展示内容\交付包' }
+if (-not $MobileRoot) { $MobileRoot = Join-Path $Root 'mobile' }
 if ($Build -and $Round -eq 'auto') {
     throw '-Build 要配一个明确的轮次（-Round rNN）：auto 的意思是「拿盘上最新的 exe」，'+
           '而 -Build 的意思是「重新做一个」，两者同时给会静默打出上一轮的代码。'
@@ -38,8 +42,12 @@ if ($Build) {
     if ($LASTEXITCODE -ne 0) { throw '前端构建失败，没有开始打包' }
     Write-Output "② PyInstaller -> $release\dist"
     New-Item -ItemType Directory -Path $release -Force | Out-Null
-    & $python -m PyInstaller --noconfirm --distpath (Join-Path $release 'dist') `
-        --workpath (Join-Path $release 'build') (Join-Path $repo 'packaging\jarvis.spec')
+    $previousEdition = $env:XIAOYE_BUILD_EDITION
+    try {
+        $env:XIAOYE_BUILD_EDITION = $Edition
+        & $python -m PyInstaller --noconfirm --distpath (Join-Path $release 'dist') `
+            --workpath (Join-Path $release 'build') (Join-Path $repo 'packaging\jarvis.spec')
+    } finally { $env:XIAOYE_BUILD_EDITION = $previousEdition }
     if ($LASTEXITCODE -ne 0) { throw 'PyInstaller 失败，交付包未生成' }
     Write-Output '③ 落位随包权重'
     & $python (Join-Path $PSScriptRoot 'place_bundled_model.py') --round $Round --build-root $Root
@@ -47,6 +55,15 @@ if ($Build) {
     if ($MediaEngineRoot) {
         & $python (Join-Path $PSScriptRoot 'place_media_engine.py') --round $Round --build-root $Root --engine-root $MediaEngineRoot
         if ($LASTEXITCODE -ne 0) { throw '本地图片/视频引擎没有完整落位' }
+    }
+    if ($Edition -eq 'buyer') {
+        $runtimeManifest='D:\AI\XiaoYe\resources\webview2\runtime.json'
+        if (-not (Test-Path -LiteralPath $runtimeManifest)) { throw 'Missing fixed WebView2; run setup_webview_runtime.ps1' }
+        $runtime=Get-Content -LiteralPath $runtimeManifest -Raw -Encoding UTF8 | ConvertFrom-Json
+        $runtimeTarget=Join-Path (Split-Path -Parent $exe) '运行库\WebView2'
+        New-Item -ItemType Directory -Path $runtimeTarget -Force | Out-Null
+        Copy-Item -Path (Join-Path $runtime.path '*') -Destination $runtimeTarget -Recurse -Force
+        if (-not (Test-Path -LiteralPath (Join-Path $runtimeTarget 'msedgewebview2.exe'))) { throw 'Fixed WebView2 did not land in buyer bundle' }
     }
     # ④ 随包运行时按「文件在不在产物里」核对，不按打包日志判：spec 少一条 datas 时的
     # 表现代码是「PyInstaller 退出码 0、产物里没那个目录、界面上一按就说没带」—— 那是把
@@ -65,7 +82,7 @@ if ($Build) {
 if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
     throw "不存在：$exe（要现做一轮就加 -Build -Round rNN）"
 }
-$mobileDir = Get-ChildItem -LiteralPath (Join-Path $Root 'mobile') -Directory | Where-Object {
+$mobileDir = Get-ChildItem -LiteralPath $MobileRoot -Directory | Where-Object {
     $_.Name -match '^r[0-9]+$' -and (Get-ChildItem -LiteralPath $_.FullName -Filter '小夜-*.apk' -File)
 } | Sort-Object @{Expression={[int]$_.Name.Substring(1)};Descending=$true} | Select-Object -First 1
 if (-not $mobileDir) { throw '没有手机构建' }

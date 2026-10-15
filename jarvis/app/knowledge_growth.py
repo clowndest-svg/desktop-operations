@@ -17,6 +17,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import logging
+import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -29,6 +30,7 @@ from jarvis.app.preferences import (
     KNOWLEDGE_AUTO_LEARN,
     KNOWLEDGE_AUTO_SEEN,
 )
+from jarvis.app.web_research import public_sources
 
 if TYPE_CHECKING:  # pragma: no cover - 只为类型检查
     from jarvis.knowledge.service import KnowledgeService
@@ -117,6 +119,7 @@ class KnowledgeGrowth:
         self._clock = clock
         self._limit = max(1, int(limit_per_day))
         self._min_answer = max(1, int(min_answer_chars))
+        self._write_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # 开关与账目
@@ -157,6 +160,10 @@ class KnowledgeGrowth:
     # ------------------------------------------------------------------
 
     def consider(self, evidence: TurnEvidence) -> GrowthOutcome:
+        with self._write_lock:
+            return self._consider(evidence)
+
+    def _consider(self, evidence: TurnEvidence) -> GrowthOutcome:
         """决定这一轮要不要存。任何一条不满足就**明说原因**，不静默跳过。"""
         if self._knowledge is None:
             return self._no("这台机器上没有知识库这一层")
@@ -170,11 +177,16 @@ class KnowledgeGrowth:
             return self._no("这一轮没有问题原文，存进去也没法回答是谁问的")
         if not any(name in WEB_TOOLS for name in evidence.tools):
             return self._no("这一轮没上网查，没有需要她记的新东西")
+        if not any(
+            public_sources(hit) and not hit.startswith(("工具 ", "[出错]", "[请求失败]"))
+            for hit in evidence.web_results
+        ):
+            return self._no("没有可核对的网页来源，不把模型回答写成事实")
         if len(answer) < self._min_answer:
             return self._no(f"回答只有 {len(answer)} 字，太短不值得存成一条资料")
         if answer.startswith(("[已停止]", "[请求失败]", "[出错]")):
             return self._no("这一轮没答上，不能把失败存成事实")
-        stamp = fingerprint(asked)
+        stamp = self._day() + ":" + fingerprint(asked)
         seen = self._seen_list()
         if stamp in seen:
             return self._no("这个问题她之前已经存过一次了")
@@ -248,8 +260,7 @@ class KnowledgeGrowth:
         lines = [
             f"问：{asked}",
             "",
-            "她当时的回答：",
-            answer[:MAX_BODY],
+            "仅收录本轮检索来源。模型回答留在聊天历史，不将它自动提升为事实。",
             "",
             f"依据（{when} 真从网上查的，可能已经过期）：",
         ]

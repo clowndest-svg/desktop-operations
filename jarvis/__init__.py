@@ -57,6 +57,10 @@ def release_round() -> str:
     return str((_buildinfo() or {}).get("round", "") or "").strip()
 
 
+def is_buyer() -> bool:
+    return bool(getattr(sys, "frozen", False) and (_buildinfo() or {}).get("edition") == "buyer")
+
+
 def build_stamp() -> str:
     """When *this artifact* was produced, as ``YYYY-MM-DD HH:MM``, or ``""``.
 

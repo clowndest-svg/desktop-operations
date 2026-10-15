@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 from datetime import UTC, datetime
@@ -92,6 +93,7 @@ def build_info(root: Path, round_name: str = "") -> dict[str, object]:
         "source_sha256": source_fingerprint(root),
         "round": valid_round(round_name) if round_name else "",
         "schema": 2,
+        "edition": os.environ.get("XIAOYE_BUILD_EDITION", "author"),
     }
 
 

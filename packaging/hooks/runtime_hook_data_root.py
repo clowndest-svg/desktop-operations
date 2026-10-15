@@ -29,7 +29,19 @@ def _seed() -> None:
         for arg in sys.argv[1:]
     ):
         return  # Read-only CLI modes must not create a data directory before main().
+    from jarvis import _buildinfo
+    from jarvis.config.edition import prepare_buyer_environment
     from jarvis.config.paths import ENV_HOME, bundle_data_root
+
+    if (_buildinfo() or {}).get("edition") == "buyer":
+        try:
+            prepare_buyer_environment(os.environ, Path(sys.executable).resolve().parent)
+        except OSError as exc:
+            import ctypes
+
+            ctypes.windll.user32.MessageBoxW(0, str(exc), "小夜启动检查", 0x10)
+            raise SystemExit(2) from exc
+        return
 
     local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
     if not local_app_data:

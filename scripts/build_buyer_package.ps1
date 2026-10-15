@@ -1,11 +1,12 @@
-# 一键为买家生成交付包（PC 便携 exe + 手机 apk + 交付文档，合并成一个 zip）。
+﻿# 一键为买家生成交付包（PC 便携 exe + 手机 apk + 交付文档，合并成一个 zip）。
 # 这是 scripts/deliver_release.ps1 的薄封装：只负责「算下一轮 + 把输出指到交付目录」，
 # 真正的构建/落引擎/压包/独立全 CRC 校验/新 exe 自检（ok+frozen+轮次）全交给那条已验证的流水线。
 # 不要在这里另起一套打包逻辑 —— 那等于把刚验证过的东西重新发明、把风险引回来。
 [CmdletBinding()]
 param(
     [string]$Repo = 'E:\DaiMa\AILiaoTianXiangMu',
-    [string]$BuildRoot = 'D:\AI\XiaoYe\build',
+    [string]$BuildRoot = 'D:\AI\XiaoYe\build\buyer',
+    [string]$MobileRoot = 'D:\AI\XiaoYe\build\mobile',
     [string]$EngineRoot = 'D:\AI\XiaoYe\engine',
     [string]$Out = '',
     [switch]$DryRun,
@@ -15,13 +16,9 @@ $ErrorActionPreference = 'Stop'
 
 $DefaultOut = 'D:\AI\闲鱼展示文档'
 if (-not $Out) {
-    if ($Force -or $DryRun) {
-        $Out = $DefaultOut
-    } else {
-        $in = Read-Host ("输出目录（直接回车＝默认 $DefaultOut）")
-        $Out = if ($in.Trim()) { $in.Trim() } else { $DefaultOut }
-    }
+    $Out = $DefaultOut
 }
+New-Item -ItemType Directory -Path $BuildRoot -Force | Out-Null
 
 function Step($m) { Write-Host ("→ " + $m) -ForegroundColor Cyan }
 function Ok($m) { Write-Host ("✓ " + $m) -ForegroundColor Green }
@@ -32,7 +29,7 @@ $deliver = Join-Path $Repo 'scripts\deliver_release.ps1'
 foreach ($pair in @(
     @{n='项目仓库'; p=$Repo; dir=$true},
     @{n='交付脚本 deliver_release.ps1'; p=$deliver; dir=$false},
-    @{n='构建根（含手机 apk）'; p=(Join-Path $BuildRoot 'mobile'); dir=$true},
+    @{n='手机 apk'; p=$MobileRoot; dir=$true},
     @{n='本地引擎根'; p=$EngineRoot; dir=$true}
 )) {
     $exists = if ($pair.dir) { Test-Path -LiteralPath $pair.p -PathType Container } else { Test-Path -LiteralPath $pair.p -PathType Leaf }
@@ -42,7 +39,7 @@ New-Item -ItemType Directory -Path $Out -Force | Out-Null
 Ok "交付目录就绪：$Out"
 
 # ---- 下一轮 rNN：扫构建根里已有的 r*，取最大 +1（没有就从 r1 起）----
-$nums = Get-ChildItem -LiteralPath $BuildRoot -Directory -ErrorAction SilentlyContinue |
+$nums = Get-ChildItem -LiteralPath @($BuildRoot, (Split-Path -Parent $BuildRoot)) -Directory -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -match '^r[0-9]+$' } |
     ForEach-Object { [int]$_.Name.Substring(1) }
 $next = 1
@@ -52,7 +49,7 @@ Step ("本轮 = " + $round + "（构建根里最大轮 +1；从当前工作树�
 
 if ($DryRun) {
     # 干跑只做「这一轮能不能开建」的体检：新轮还没 exe，不能拿 deliver_release -DryRun 去查它。
-    $mobile = Join-Path $BuildRoot 'mobile'
+    $mobile = $MobileRoot
     $mdirs = Get-ChildItem -LiteralPath $mobile -Directory -ErrorAction SilentlyContinue | Where-Object {
         $_.Name -match '^r[0-9]+$' -and (Get-ChildItem -LiteralPath $_.FullName -Filter '小夜-*.apk' -File)
     }
@@ -65,12 +62,15 @@ if ($DryRun) {
 }
 
 # ---- 交给已验证流水线：前端构建 → PyInstaller → 落模型/引擎 → 新 exe 自检 → 压合并包 → 独立全 CRC 校验 ----
-if (-not $Force) {
-    $ans = Read-Host "确认开始构建并打包 $round？（约 15~20 分钟，输入 Y 继续，其它键取消）"
-    if ($ans -ne 'Y' -and $ans -ne 'y') { Write-Host '已取消，未做任何改动。'; return }
-}
 Step '开始构建并打包（约 15~20 分钟，期间不要改源码、不要开着交付包里的 exe）'
-& $deliver -Round $round -Root $BuildRoot -Out $Out -MediaEngineRoot $EngineRoot -Build
+$python=Join-Path $Repo '.venv\Scripts\python.exe'
+$pending=@(& git -C $Repo diff --name-only HEAD -- jarvis frontend packaging scripts pyproject.toml)
+$newFiles=@(& git -C $Repo ls-files --others --exclude-standard -- jarvis frontend/src packaging scripts)
+if ($LASTEXITCODE -ne 0 -or $pending.Count -gt 0 -or $newFiles.Count -gt 0) { throw '功能源码尚未提交，请提交并通过门禁后再生成买家包，避免混版发货' }
+& $python (Join-Path $PSScriptRoot 'run_gates.py') --frontend --out (Join-Path $BuildRoot ('gates-'+$round+'.json'))
+if ($LASTEXITCODE -ne 0) { throw '质量门禁未通过，没有开始买家构建' }
+& (Join-Path $PSScriptRoot 'setup_webview_runtime.ps1')
+& $deliver -Round $round -Root $BuildRoot -MobileRoot $MobileRoot -Out $Out -MediaEngineRoot $EngineRoot -Edition buyer -Build
 $code = $LASTEXITCODE
 if ($code -ne 0) { Bad ("打包失败，退出码 " + $code + "（交付目录里不会留下半成品 zip）"); exit $code }
 

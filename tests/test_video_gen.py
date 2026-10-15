@@ -425,8 +425,17 @@ class _StubClient:
         self.config = config
 
     def generate(
-        self, prompt: str, *, width: int, height: int, seconds: int, fps: int, frames: int
+        self,
+        prompt: str,
+        *,
+        width: int,
+        height: int,
+        seconds: int,
+        fps: int,
+        frames: int,
+        should_stop: Any = None,
     ) -> tuple[bytes, dict[str, Any]]:
+        assert callable(should_stop)
         return _MP4, {}
 
 

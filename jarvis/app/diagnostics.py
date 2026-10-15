@@ -84,7 +84,14 @@ def runtime_report(package_root: Path | None = None, models: Path | None = None)
         add("desktop_bundle", bool(parser.urls) and not missing, "; ".join(missing))
     except (OSError, ValueError) as exc:
         add("desktop_bundle", False, str(exc))
-    for module in ("webview", "psutil", "onnxruntime", "yaml", "numpy"):
+    for module in (
+        "webview",
+        "psutil",
+        "onnxruntime",
+        "yaml",
+        "numpy",
+        "langid",
+    ):
         try:
             found = importlib.util.find_spec(module) is not None
         except (ImportError, ValueError):

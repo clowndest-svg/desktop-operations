@@ -251,3 +251,123 @@ class TestValidateUrlStillStrict:
     )
     def test_accepted(self, ok: str) -> None:
         assert web_tools.validate_url(ok).startswith("http")
+
+
+class _RoutingOpener:
+    """按 URL 分发响应，并记下试的先后 —— 兜底链的价值全在顺序上。
+
+    一个响应喂四家的话，测出来的是"最前面那家能不能解析"，而不是"前面几家哑了后面
+    还接不接得上"，而后者才是这条链存在的理由。
+    """
+
+    def __init__(self, pages: dict[str, _Response], *, fail: tuple[str, ...] = ()) -> None:
+        self.pages = pages
+        self.fail = fail
+        self.attempted: list[str] = []
+
+    def open(self, request: Any, timeout: float = 0) -> _Response:
+        del timeout
+        url = request.full_url
+        self.attempted.append(url)
+        if any(needle in url for needle in self.fail):
+            raise urllib.error.URLError("网关把这一发挡了")
+        for needle, response in self.pages.items():
+            if needle in url:
+                return response
+        return _Response(b"<html><body>nothing</body></html>", url=url)
+
+
+_EMPTY = _Response(b"<html><body>no results here</body></html>", url="https://www.bing.com/search")
+
+_RSS_PAGE = _Response(
+    (
+        '<rss version="2.0"><channel><item>'
+        "<title>Qwen3 官方博客</title>"
+        "<link>https://qwen.ai/blog</link>"
+        "<description>支持 119 种语言</description>"
+        "</item></channel></rss>"
+    ).encode(),
+    content_type="application/rss+xml",
+    url="https://www.bing.com/search",
+)
+
+_SOGOU_PAGE = _Response(
+    (
+        '<html><div class="vrwrap"><h3 class="vr-title">'
+        '<a href="/link?url=abc123" target="_blank">Qwen3 <em>发布</em></a></h3>'
+        '<div class="str-text-info">2025年4月28日发布，支持119种语言。</div></div></html>'
+    ).encode(),
+    url="https://www.sogou.com/web",
+)
+
+_DDG_PAGE = _Response(
+    (
+        b'<html><div class="result__body">'
+        b'<a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?'
+        b'uddg=https%3A%2F%2Fexample.org%2Fdoc&amp;rut=beef">Qwen3 docs</a>'
+        b"</div></html>"
+    ),
+    url="https://html.duckduckgo.com/html/",
+)
+
+
+class TestTheKeylessFallbackChain:
+    """bing RSS → bing 网页 → 搜狗 → DuckDuckGo：顺序、解包、以及"全哑了要说"。"""
+
+    def test_rss_wins_and_nothing_else_is_asked(self) -> None:
+        opener = _RoutingOpener({"format=rss": _RSS_PAGE})
+        out = _handler(1, opener=opener)({"query": "Qwen3"})
+        assert "搜索引擎：bing" in out
+        assert "https://qwen.ai/blog" in out
+        assert len(opener.attempted) == 1, "第一家就出结果还挨个问一遍，等于每次搜索打四发"
+
+    def test_bing_empty_falls_through_to_sogou(self) -> None:
+        opener = _RoutingOpener({"sogou.com": _SOGOU_PAGE})
+        out = _handler(1, opener=opener)({"query": "Qwen3"})
+        assert "搜索引擎：sogou" in out
+        assert "https://www.sogou.com/link?url=abc123" in out, "搜狗给的是站内跳转，得补成绝对地址"
+        assert "2025年4月28日发布" in out
+        assert any("sogou.com" in url for url in opener.attempted)
+
+    def test_duckduckgo_unwraps_its_own_redirect(self) -> None:
+        opener = _RoutingOpener({"duckduckgo.com": _DDG_PAGE})
+        out = _handler(1, opener=opener)({"query": "Qwen3"})
+        assert "搜索引擎：duckduckgo" in out
+        assert "https://example.org/doc" in out, "uddg 没解包的话，引用到模型那儿的是跳转壳不是来源"
+        assert "uddg=" not in out
+
+    def test_every_engine_answering_empty_says_so_without_raising(self) -> None:
+        opener = _RoutingOpener({})
+        out = _handler(1, opener=opener)({"query": "Qwen3"})
+        assert "没有搜到结果" in out and "已尝试免Key搜索备用入口" in out
+        assert len(opener.attempted) == 4, "四家都得试到，少一家就是那条路静默没了"
+
+    def test_every_engine_blocked_is_reported_not_called_empty(self) -> None:
+        """全被挡 ≠ 全没结果：前者要说"暂不可用"，不然排查方向整个反了。"""
+        opener = _RoutingOpener({}, fail=("bing.com", "sogou.com", "duckduckgo.com"))
+        with pytest.raises(ToolExecutionError) as error:
+            _handler(1, opener=opener)({"query": "Qwen3"})
+        assert "免Key搜索暂不可用" in str(error.value)
+
+    def test_a_country_page_is_not_evidence_for_a_university_question(self) -> None:
+        """搜索引擎会吞掉半截中文词，回一张国家概况页 —— 那不能当"查到了大学排名"。"""
+        generic = _Response(
+            (
+                b'<rss version="2.0"><channel><item><title>China overview</title>'
+                b"<link>https://example.org/china</link>"
+                b"<description>Population and area of China.</description></item></channel></rss>"
+            ),
+            content_type="application/rss+xml",
+            url="https://www.bing.com/search",
+        )
+        ranked = _Response(
+            (
+                '<html><h3 class="vr-title"><a href="/link?url=x">2025 中国大学排行榜100强</a></h3>'
+                "<div>北京大学 清华大学</div></html>"
+            ).encode(),
+            url="https://www.sogou.com/web",
+        )
+        opener = _RoutingOpener({"format=rss": generic, "sogou.com": ranked})
+        out = _handler(1, opener=opener)({"query": "美国前十的大学有哪些"})
+        assert "搜索引擎：sogou" in out, "RSS 那张国家页被当证据的话，模型就照着一页废话排名了"
+        assert "大学排行榜" in out

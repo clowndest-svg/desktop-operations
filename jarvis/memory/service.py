@@ -394,6 +394,19 @@ class MemoryService:
         if assistant_text:
             self.record_turn(session_id, Role.ASSISTANT.value, assistant_text)
 
+        return self.extract_turn(user_text, assistant_text, client=client, extract=extract)
+
+    def extract_turn(
+        self,
+        user_text: str,
+        assistant_text: str = "",
+        *,
+        client: LlmClient | None = None,
+        extract: bool = True,
+    ) -> list[MemoryRecord]:
+        """Extract without recording twice; chat can run this after returning its answer."""
+        self._require()
+
         settings = self._settings_provider()
         if not extract or not settings.auto_extract:
             return []

@@ -214,6 +214,7 @@ else:
     print("WARNING: jarvis/vendor/scrcpy 不在，这一版打包不带投屏运行时（手机投屏会不可用）")
 
 binaries = []
+datas += copy_metadata("langid")
 
 # ``copy_metadata`` because funasr/torch ask for their own version at import
 # time through importlib.metadata, which finds nothing in a frozen tree.

@@ -6,8 +6,11 @@ const port = process.argv[2] || '9228'
 const output = process.argv[3] || 'D:/AI/XiaoYe/qa-ui'
 fs.mkdirSync(output, { recursive: true })
 const pages = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()
-const page = pages.find(p => p.type === 'page' && !p.url.startsWith('devtools:'))
-if (!page) throw new Error('No application page')
+// 桌面版有**两扇** WebView2：`/`（HUD，生图/视频弹窗都在这里）和 `/?mode=pet`（宠物）。
+// 按 type==='page' 随便挑一个会挑到宠物窗 —— 那上面一个 .im__prompt 都没有，
+// 于是所有 waitFor 都在等一个永远不会出现的东西，或者更糟：判据写成箭头函数时恒为真。
+const page = pages.find(p => p.type === 'page' && !p.url.startsWith('devtools:') && !p.url.includes('mode=pet'))
+if (!page) throw new Error(`没有 HUD 页面（候选：${pages.map(p => p.url).join(', ')}）`)
 const socket = new WebSocket(page.webSocketDebuggerUrl)
 await new Promise((resolve, reject) => {
   socket.addEventListener('open', resolve, { once: true })

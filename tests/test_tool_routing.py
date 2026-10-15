@@ -249,10 +249,27 @@ class TestPacksStayWhole:
         against a 4096 window. A count ceiling is the cheap stand-in for that -- the
         thing being guarded is the fallback growing a tool at a time until it is the
         whole table again, which is how this file came to exist.
+
+        r119 raised 8 -> 9 the same way the ceiling was first drawn: 3945 / 35 tools
+        is ~113 tokens a tool, so the ninth costs about 2.8% of the window and the
+        pack still sits at a quarter of the table.
         """
         general = set(PACKS[GENERAL]) | set(CORE)
-        assert len(general) <= 8, f"兜底包已经 {len(general)} 个工具：{sorted(general)}"
+        assert len(general) <= 9, f"兜底包已经 {len(general)} 个工具：{sorted(general)}"
         assert len(general) < len({t for pack in PACKS.values() for t in pack})
+
+    def test_the_fallback_carries_both_directions_of_looking_things_up(self) -> None:
+        """联网查外面的世界，和翻我们俩聊过的话 —— 少一条，那条能力就等于不存在。
+
+        r119 的实测形状：为了让没命中任何关键词的问句也能自动联网（``chat_service`` 只在
+        ``search_web`` 真的随请求出去时才检索），兜底包换进了 ``search_web``，代价是
+        ``chat_search`` 掉出兜底 —— 于是「我们聊过的那个方案」这类没踩到 上次/之前说 的句子，
+        历史检索静默消失。两条都留。
+        """
+        for tool in ("search_web", "chat_search"):
+            assert tool in PACKS[GENERAL], f"兜底包丢了 {tool}"
+        offered = set(select_tool_names((), sorted(_registered()))) | set(CORE)
+        assert {"search_web", "chat_search"} <= offered
 
 
 def test_the_picture_word_may_sit_a_few_chars_behind_the_verb() -> None:

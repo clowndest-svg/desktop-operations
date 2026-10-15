@@ -212,3 +212,67 @@ def test_no_model_and_no_key_names_both_paths() -> None:
         translator.translate("猫")
     message = str(error.value)
     assert "聊天模型" in message and DASHSCOPE_KEY_ENV in message
+
+
+# -- 权重语法 (red car:1.2) 不能被当散文翻掉 ---------------------------------
+# r119 的 120 条矩阵量出来：12 语种里只有"输入本来就是英文"那条保住了括号，
+# 其余全被改写成 "A red car (1.2)"。修法不是让模型"记住再吐回来"（占位符 11/12 次被吃掉），
+# 而是按权重段切开、只翻人话段、原样拼回原位。
+
+
+class _ScriptedClient:
+    """按调用次序回不同的译文 —— 权重段会把一句话切成几段人话，每段各打一发。"""
+
+    def __init__(self, replies: list[str]) -> None:
+        self.replies = replies
+        self.seen: list[str] = []
+
+    def complete(self, messages: Any, options: Any = None) -> _Resp2:
+        del options
+        self.seen.append(messages[1].content)
+        return _Resp2(self.replies[min(len(self.seen) - 1, len(self.replies) - 1)])
+
+
+def test_the_model_is_asked_for_the_prose_only() -> None:
+    client = _ScriptedClient(["on a bridge, no pedestrians on the road"])
+    PromptTranslator(_boom, {}, client_provider=lambda: client).translate(
+        "(red car:1.2) 在桥上，路上没有行人"
+    )
+    assert len(client.seen) == 1, "权重段不该占一发请求"
+    assert "(red car:1.2)" not in client.seen[0], "送进去的必须是不含权重段的那句话"
+    assert "__W0__" not in client.seen[0], "不指望模型保住任何记号"
+
+
+def test_weight_span_goes_back_to_where_it_was() -> None:
+    client = _ScriptedClient(["on a bridge, no pedestrians on the road"])
+    result = PromptTranslator(_boom, {}, client_provider=lambda: client).translate(
+        "(red car:1.2) 在桥上，路上没有行人"
+    )
+    assert result.english == "(red car:1.2) on a bridge, no pedestrians on the road"
+    assert "权重写法原样保留" in result.note
+
+
+def test_two_spans_keep_their_own_positions() -> None:
+    client = _ScriptedClient(["a cat sitting", "and a dog running"])
+    result = PromptTranslator(_boom, {}, client_provider=lambda: client).translate(
+        "(black cat:1.3) 坐着 和 (white dog:1.1) 跑着"
+    )
+    assert result.english.index("(black cat:1.3)") < result.english.index("(white dog:1.1)")
+    assert client.seen == ["坐着 和", "跑着"], "送翻译的必须是被权重段切开的那几段人话"
+
+
+def test_a_mangled_answer_still_cannot_lose_the_span() -> None:
+    """模型答什么都行 —— 权重段是拼回去的，不依赖它吐回来。"""
+    client = _ScriptedClient(["on a bridge"])
+    result = PromptTranslator(_boom, {}, client_provider=lambda: client).translate(
+        "(red car:1.2) 在桥上"
+    )
+    assert result.english.count("(red car:1.2)") == 1
+
+
+def test_a_description_with_no_weights_is_a_single_call() -> None:
+    client = _ScriptedClient(["An orange cat runs"])
+    result = PromptTranslator(_boom, {}, client_provider=lambda: client).translate("一只橘猫在跑步")
+    assert client.seen == ["一只橘猫在跑步"], "没有权重段就不该多打一发"
+    assert result.english == "An orange cat runs"
+    assert "权重" not in result.note

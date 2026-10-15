@@ -18,12 +18,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Any
+
+from release_manifest import source_fingerprint
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -87,6 +90,11 @@ def main() -> int:
     parser.add_argument("--out", type=Path, help="where to write the JSON report")
     parser.add_argument("--quick", action="store_true", help="skip the full pytest run")
     args = parser.parse_args()
+    if platform.system() == "Windows":
+        temporary = Path(os.environ.get("XIAOYE_QA_TMP", "D:/AI/XiaoYe/tmp/gates"))
+        temporary.mkdir(parents=True, exist_ok=True)
+        os.environ["TEMP"] = str(temporary)
+        os.environ["TMP"] = str(temporary)
 
     python = sys.executable
     npm = "npm.CMD" if platform.system() == "Windows" else "npm"
@@ -115,6 +123,7 @@ def main() -> int:
         steps.append(("frontend", [npm, "run", "build"], 900, ROOT / "frontend"))
 
     report: dict[str, Any] = {
+        "source_sha256": source_fingerprint(ROOT),
         "python": platform.python_version(),
         "platform": platform.platform(),
         "tools": {

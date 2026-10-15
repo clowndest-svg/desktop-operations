@@ -126,7 +126,7 @@
           class="hud-field chat__knob"
           :value="String(turns)"
           :disabled="switching"
-          title="每次请求带上的历史轮数"
+          title="最多携带的历史轮数；本地模型会按Token预算裁剪旧上下文，完整历史仍保留"
           @change="saveTurns"
         >
           <option v-for="count in turnOptions" :key="count" :value="String(count)">{{ count }} 轮上下文</option>
@@ -222,10 +222,10 @@
 
       <div ref="listRef" class="chat__log" @scroll.passive="onLogScroll">
         <p v-if="lines.length === 0" class="hud-label chat__empty">
-          打一句话、或点「按一下说」直接开口。文字问答只需要 API Key；语音要在上方点「启用语音」，加载约 30 秒。
+          打一句话即可开始。随包本地模型无需 Key；开启工具后也可联网查询。语音请点「启用语音」。
         </p>
         <div v-for="(line, index) in lines" :key="index" class="chat__turn" :class="`chat__turn--${line.role}`">
-          <div class="chat__bubble">
+          <div class="chat__bubble" @contextmenu.prevent="textMenu($event, index, line.text)">
             <span class="chat__who">{{ line.role === 'user' ? '你' : '小夜' }}</span>
             <div v-if="line.attachments.length" class="chat__files">
               <template v-for="(file, slot) in line.attachments" :key="slot">
@@ -233,7 +233,7 @@
                 <span v-else class="chat__file">{{ file.name }} · {{ formatBytes(file.size) }}</span>
               </template>
             </div>
-            <span class="chat__text" @contextmenu.prevent="textMenu($event, index, line.text)">{{ line.text }}</span>
+            <span class="chat__text" @contextmenu.stop.prevent="textMenu($event, index, line.text)"><template v-for="(part, slot) in textParts(line.text)" :key="slot"><a v-if="part.url" :href="part.url" target="_blank" rel="noopener noreferrer">{{ part.text }}</a><template v-else>{{ part.text }}</template></template></span>
             <!--
               这一轮产出的文件：图就地画出来，其余给一行名字加三颗按钮。
 
@@ -247,7 +247,7 @@
                 v-for="(art, slot) in line.artifacts"
                 :key="`art-${index}-${slot}`"
                 class="chat__art"
-                @contextmenu.prevent="artMenu($event, art)"
+                @contextmenu.stop.prevent="artMenu($event, art)"
               >
                 <img
                   v-if="isPicture(art) && pictureOf(art)"
@@ -300,7 +300,7 @@
             <div
               v-if="line.role === 'assistant'"
               class="chat__footline"
-              @contextmenu.prevent="textMenu($event, index, line.text)"
+              @contextmenu.stop.prevent="textMenu($event, index, line.text)"
             >
               <button class="chat__foot-btn" type="button" @click="copyBubble(index, line.text)">
                 {{ copyMark(index) }}
@@ -458,6 +458,9 @@
         </span>
       </div>
 
+      <p v-if="editing" class="hud-label">正在修改历史提问：发送后新建对话分支，原记录保留。
+        <button class="hud-btn" type="button" @click="editing = null">取消修改</button>
+      </p>
       <form class="chat__form" @submit.prevent="send">
         <button class="hud-btn" type="button" title="附加图片 / 视频 / 文件" @click="openFiles">附件</button>
         <input ref="fileRef" type="file" multiple hidden @change="onFiles" />
@@ -545,6 +548,7 @@ import {
   artifactStat,
   chatCancel,
   chatSend,
+  chatEditQuestion,
   chatCollaborate,
   copyImage,
   copyTextViaBridge,
@@ -601,6 +605,7 @@ const voice = useVoiceStore()
 const LOADER_KINDS = ['dots', 'matrix', 'ring', 'bars']
 
 const draft = ref('')
+const editing = ref<{ conversation: string; id: number } | null>(null)
 const busy = ref(false)
 const localError = ref('')
 const listRef = ref<HTMLElement | null>(null)
@@ -616,6 +621,7 @@ const sessionsOpen = ref(false)
  * every poll instead would race the very turns it is supposed to be showing.
  */
 interface Line {
+  id?: number
   role: string
   text: string
   attachments: Attachment[]
@@ -972,6 +978,7 @@ async function loadCurrent(): Promise<void> {
     seeded.value = stored.messages.map((turn) => {
       const before = previous.find((row) => row.role === turn.role && row.text === turn.content)
       return {
+        id: turn.id,
         role: turn.role,
         text: turn.content,
         reasoning: before?.reasoning ?? '',
@@ -1425,9 +1432,45 @@ function textMenu(event: MouseEvent, index: number, text: string): void {
   const picked = pickedText()
   const entries: MenuEntry[] = []
   if (picked) entries.push({ label: '复制选中文字', run: () => copyAnywhere(picked) })
-  if (text.trim()) entries.push({ label: '复制这段回答', run: () => copyBubble(index, text) })
+  const line = lines.value[index]
+  if (text.trim()) entries.push({ label: line?.role === 'user' ? '复制这个提问' : '复制这段回答', run: () => copyBubble(index, text) })
+  if (line?.role === 'user') entries.push({ label: '修改并重新提问', run: () => editQuestion(index) })
   if (!entries.length) entries.push({ label: '这一段没有内容', run: () => {}, disabled: true })
   openMenu(event, entries)
+}
+
+function textParts(text: string): { text: string; url?: string }[] {
+  const parts: { text: string; url?: string }[] = []
+  let cursor = 0
+  for (const match of text.matchAll(/https?:\/\/[^\s<>）)\]"']+/g)) {
+    const index = match.index ?? 0
+    const url = match[0].replace(/[，。；,.;]+$/, '')
+    if (index > cursor) parts.push({ text: text.slice(cursor, index) })
+    parts.push({ text: url, url })
+    cursor = index + url.length
+  }
+  if (cursor < text.length) parts.push({ text: text.slice(cursor) })
+  return parts
+}
+
+async function editQuestion(index: number): Promise<void> {
+  const line = lines.value[index]
+  const conversation = activeTab.value?.id || activeSession.value
+  if (!line || line.role !== 'user' || !conversation) return
+  try {
+    const stored = await fetchSessionMessages(conversation)
+    const ordinal = lines.value.slice(0, index + 1).filter(row => row.role === 'user').length - 1
+    const original = line.id ? stored.messages.find(row => row.id === line.id) : stored.messages.filter(row => row.role === 'user')[ordinal]
+    if (!original?.id || original.content !== line.text) throw new Error('提问尚未落盘或记录已更新，请稍后重试')
+    editing.value = { conversation, id: original.id }
+    draft.value = original.content
+    pending.value = [...(original.attachments || [])]
+    mode.value = 'single'
+    await nextTick()
+    inputRef.value?.focus()
+  } catch (error) {
+    localError.value = String(error)
+  }
 }
 
 /**
@@ -1758,7 +1801,9 @@ async function send(): Promise<void> {
     // 照发会把 pin 顶掉 —— 屏上三处写着 deepseek、实际花钱问的是 qwen（r86 审计抓到的）。
     const tab = activeTab.value
     const pinned = Boolean(tab?.provider || tab?.model)
-    const started = single.value
+    const started = editing.value
+      ? await chatEditQuestion(editing.value.conversation, editing.value.id, question, attachments)
+      : single.value
       ? await chatSend(
           question,
           attachments,
@@ -1779,6 +1824,11 @@ async function send(): Promise<void> {
       draft.value = question
       overlay.value = null
       return
+    }
+    if (editing.value) {
+      editing.value = null
+      await openConversation(started.conversation)
+      await loadCurrent()
     }
     // One pull, because nothing else may push: a quiet microphone has no reason to
     // change state, and the question we just asked is already Python's to report.

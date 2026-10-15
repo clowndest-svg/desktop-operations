@@ -32,6 +32,7 @@ import re
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from jarvis.app import local_advice
@@ -1945,6 +1946,18 @@ def write_user_env_var(variable: str, value: str | None) -> bool:
     launched from that Explorer still cannot see it, which is a bug we hit once
     already and it cost an hour to find.
     """
+    from jarvis import is_buyer
+
+    if is_buyer():
+        from jarvis.config.credentials import write_credential
+
+        try:
+            write_credential(Path(os.environ["JARVIS_HOME"]), variable, value)
+            return True
+        except (OSError, ValueError, KeyError):
+            logger.exception("could not save buyer credential %s", variable)
+            return False
+
     import ctypes
     import sys
 

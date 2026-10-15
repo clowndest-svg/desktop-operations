@@ -829,6 +829,7 @@ class HudBridge:
         self._documents = documents
         # 读本轮产出文件的那几扇门，要知道哪些目录算软件自己写的。
         self._paths = paths or AppPaths.resolve()
+        self._media_url: Callable[[Path], str] | None = None
         self._network = network
         self._phone = phone_screen
         self._pet: PetController | None = None
@@ -2906,6 +2907,22 @@ class HudBridge:
             return {"ok": False, "error": "面板没能收到聚焦指令"}
         return {"ok": True, "shown": shown, "error": ""}
 
+    def chat_edit_question(
+        self, conversation: str, message_id: object, text: str, attachments: object = ()
+    ) -> dict[str, object]:
+        """Branch before this question; never overwrite the original transcript."""
+        if self._chat is None or not str(text).strip() or len(str(text)) > 2000:
+            return {"ok": False, "error": "问题为空、过长或对话服务未启用"}
+        try:
+            target_id = int(str(message_id))
+        except ValueError:
+            return {"ok": False, "error": "这条提问没有有效的历史编号"}
+        branch = self._chat.fork_question(str(conversation), target_id, str(text))
+        if not branch:
+            return {"ok": False, "error": "原提问已不存在，未修改任何历史"}
+        self.chat_open(branch)
+        return self._start_turn(str(text), attachments, branch, "", "", wait=False)
+
     def chat_send(
         self,
         text: str,
@@ -3502,6 +3519,9 @@ class HudBridge:
         if where is None or where.suffix.lower() != ".mp4":
             return {"ok": False, "data_url": "", "error": "不是软件生成的视频"}
         try:
+            media_url = getattr(self, "_media_url", None)
+            if media_url is not None:
+                return {"ok": True, "data_url": media_url(where), "error": ""}
             if where.stat().st_size > 32 * 1024 * 1024:
                 return {"ok": False, "data_url": "", "error": "视频较大，请用打开按钮播放"}
             return {
@@ -4605,6 +4625,8 @@ def run(
         videos=videos,
         phone_screen=phone_screen,
     )
+    server.media.validate = lambda path: bridge._artifact_here(path) is not None
+    bridge._media_url = lambda path: server.url + server.media.register(path)
     gateway = build_mobile_gateway(bridge, mobile, mobile_dir)
     if turns is not None:
         # Attached after construction like the pet and the greeter: the table exists from

@@ -210,6 +210,11 @@ class ToolService:
         """The shared registry. MCP and plugins register into this instance."""
         return self._registry
 
+    def cancel_media_for_owner(self, owner: int) -> None:
+        cancel = getattr(self._images, "cancel", None)
+        if callable(cancel):
+            cancel(expected_owner=owner)
+
     def invoke(
         self,
         name: str,

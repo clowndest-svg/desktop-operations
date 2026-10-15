@@ -53,10 +53,15 @@ def place(source: Path, destination: Path) -> None:
             target = destination / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             if not target.exists():
-                try:
-                    os.link(path, target)
-                except OSError:
-                    shutil.copy2(path, target)
+                # Mutable Python/runtime files must not share an inode with the
+                # author's working engine. Only immutable model weights may link.
+                if path.suffix.lower() in {".safetensors", ".ckpt", ".gguf"}:
+                    try:
+                        os.link(path, target)
+                        continue
+                    except OSError:
+                        pass
+                shutil.copy2(path, target)
     print(f"本地图片/视频引擎就绪：{destination}", flush=True)
 
 

@@ -72,7 +72,11 @@ PACKS: Final[dict[str, tuple[str, ...]]] = {
     # names no picture-word at all, so no regex can catch it, and the model was handed
     # a tool table with no way to draw -- 「当前我无法直接生成图片」 on a machine where
     # ComfyUI was running two metres away.
+    # ``chat_search`` stays even though ``memory`` above already carries it: 上次/之前说/
+    # 以前聊 catch the phrased cases, and 「我们聊过的那个方案」 catches none, so dropping
+    # it here is a history lookup that quietly stops existing for one class of sentence.
     GENERAL: (
+        "search_web",
         "memory_search",
         "remember",
         "knowledge_search",
@@ -110,7 +114,7 @@ _PATTERNS: Final[dict[str, re.Pattern[str]]] = {
     ),
     "network": re.compile(
         r"联网|上网|网上|网页|网址|链接|http://|https://|搜索|搜一下|搜下|查一下|查下|"
-        r"最新|新闻|实时|行情|天气|股价|汇率|热搜",
+        r"最新|新闻|实时|行情|天气|股价|汇率|热搜|排名|前十|排行榜|top\s*10",
         re.IGNORECASE,
     ),
     "open_app": re.compile(
