@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -32,8 +33,16 @@ from jarvis.vector import HashingEmbedder, VectorService  # noqa: E402
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("model", nargs="?", default="Qwen3-0.6B-Q8_0.gguf")
+    parser.add_argument(
+        "--question",
+        default="请联网查询美国前十的大学有哪些，说明榜单来源和年份，不确定的部分直说。",
+    )
+    parser.add_argument("--skip-translation", action="store_true")
+    args = parser.parse_args()
     config = AppConfig.from_mapping(load_defaults())
-    model = sys.argv[1] if len(sys.argv) > 1 else "Qwen3-0.6B-Q8_0.gguf"
+    model = args.model
     local_server.configure(local_server.Tuning(context=4096, idle_seconds=0, model=model))
     store = SqliteStore(HOME / "chat.db")
     store.start()
@@ -70,7 +79,7 @@ def main() -> int:
             max_tool_rounds=0,
         )
         chat.start()
-        reply = chat.ask("请联网查询美国前十的大学有哪些，说明榜单来源和年份，不确定的部分直说。")
+        reply = chat.ask(args.question)
         rows = transcript.whole_session(chat.session_id)
         branch = (
             chat.fork_question(chat.session_id, rows[0]["id"], "只解释什么是大学排名")
@@ -83,8 +92,13 @@ def main() -> int:
         )
         translations = []
         for text in (
-            "三只红猫坐在蓝色长椅上，没有帽子",
-            "Trois chats rouges sur un banc bleu, sans chapeau",
+            ()
+            if args.skip_translation
+            else (
+                "三只红猫坐在蓝色长椅上，没有帽子",
+                "Trois chats rouges sur un banc bleu, sans chapeau",
+                "(三只红猫:1.20) 在蓝色长椅上，没有帽子",
+            )
         ):
             try:
                 result = translator.translate(text)
@@ -93,6 +107,28 @@ def main() -> int:
                 )
             except Exception as exc:
                 translations.append({"input": text, "error": str(exc)})
+        # Reopen the actual database and index, then use a fresh conversation:
+        # a row count alone cannot prove the assistant can use what it learned.
+        chat.stop()
+        knowledge.stop()
+        vector.stop()
+        store.stop()
+        store.start()
+        vector.start()
+        knowledge.start()
+        persisted = knowledge.retrieve("美国大学排名")
+        followup_chat = ChatService(
+            lambda: client,
+            knowledge_provider=lambda: knowledge,
+            pair_provider=lambda: ("local", client.model),
+            tuning_for=lambda _p, _m: ConversationTuning(thinking=ThinkingRequest(False, 0)),
+            max_tool_rounds=0,
+        )
+        followup_chat.start()
+        followup = followup_chat.ask(
+            "不要联网，仅根据知识库，列出美国大学排名资料的出处和查询时间。"
+        )
+        followup_chat.stop()
         report = {
             "model": model,
             "seconds": round(time.monotonic() - started, 1),
@@ -101,6 +137,9 @@ def main() -> int:
             "branch": branch,
             "branch_messages": transcript.whole_session(branch) if branch else [],
             "translations": translations,
+            "reopened_hits": [hit.to_dict() for hit in persisted],
+            "offline_followup": followup.to_dict(),
+            "offline_sources": list(followup.sources),
         }
         (HOME / "result.json").write_text(
             json.dumps(report, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
@@ -111,6 +150,10 @@ def main() -> int:
             and bool(branch)
             and not report["branch_messages"]
             and bool(report["knowledge_documents"])
+            and bool(persisted)
+            and not followup.error
+            and bool(followup.sources)
+            and "search_web" not in followup.tools_used
         )
         print(
             json.dumps(

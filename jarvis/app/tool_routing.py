@@ -23,6 +23,8 @@ import re
 from collections.abc import Iterable, Sequence
 from typing import Final
 
+from jarvis.app.web_research import NETWORK_QUERY
+
 GENERAL: Final[str] = "general"
 """Nothing matched. The conversational minimum, not the whole table."""
 
@@ -114,7 +116,7 @@ _PATTERNS: Final[dict[str, re.Pattern[str]]] = {
     ),
     "network": re.compile(
         r"联网|上网|网上|网页|网址|链接|http://|https://|搜索|搜一下|搜下|查一下|查下|"
-        r"最新|新闻|实时|行情|天气|股价|汇率|热搜|排名|前十|排行榜|top\s*10",
+        r"实时|行情|热搜|" + NETWORK_QUERY.pattern,
         re.IGNORECASE,
     ),
     "open_app": re.compile(

@@ -80,7 +80,7 @@ Ok ("交付包已生成：" + $zip)
 Ok ("校验凭据：" + $report)
 Write-Host ''
 Write-Host '买家侧提醒（bat 变不了魔术，这几条决定"双击就能用"）：' -ForegroundColor Yellow
-Write-Host '  · PC 解压后双击 小夜\小夜.exe；缺 WebView2 运行时的干净系统需先装（可选在包里放离线 bootstrapper）。'
+Write-Host '  · PC 完整解压到非系统盘，双击 小夜\小夜.exe；买家包已附带 WebView2，无需另外下载。'
 Write-Host '  · 首次运行 SmartScreen 可能拦未签名 exe，需点「仍要运行」。'
 Write-Host '  · 本地生图/视频要 NVIDIA 显卡+驱动；没有也能跑，那两项会如实提示不可用或走云端。'
 if (Test-Path -LiteralPath $report) { Start-Process explorer.exe -ArgumentList ('/select,"' + $zip + '"') }

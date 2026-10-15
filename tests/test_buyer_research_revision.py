@@ -9,12 +9,46 @@ import pytest
 
 from jarvis.app.image_gen import ImageService
 from jarvis.app.media_prompt import LocalLlmTranslator, TranslationError, _looks_english
+from jarvis.app.tool_routing import classify_tool_intent
 from jarvis.app.transcript_service import TranscriptService
 from jarvis.app.web_research import public_sources, wants_web
 from jarvis.config.edition import prepare_buyer_environment
 from jarvis.database import SqliteStore
 from jarvis.llm.errors import LlmConnectionError
 from jarvis.tools.builtins.web_tools import _parse_rss
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "What are the latest US university rankings?",
+        "Please search the web for current university rankings.",
+        "今日の天気を調べて",
+        "최신 대학 순위 검색",
+        "Rechercher les actualités et le classement des universités",
+        "Buscar en internet la clasificación de universidades",
+        "Aktuelle Nachrichten und Wetter",
+        "Новости и рейтинг университетов",
+        "今年美国大学有哪些排名",
+    ],
+)
+def test_online_requests_in_other_languages_get_search_and_page_tools(question: str) -> None:
+    assert wants_web(question)
+    assert "network" in classify_tool_intent(question)
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Offline: explain university rankings",
+        "Don't browse, explain the latest document I uploaded",
+        "Without internet, tell me about weather patterns",
+        "検索しないで天気の仕組みを説明して",
+        "不要联网，只解释大学排名是什么",
+    ],
+)
+def test_explicit_offline_instructions_prevent_automatic_search(question: str) -> None:
+    assert not wants_web(question)
 
 
 def test_edit_branch_keeps_prefix_and_original_and_refuses_cross_session(tmp_path: Path) -> None:

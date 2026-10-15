@@ -6,11 +6,20 @@ import re
 from urllib.parse import urlsplit
 
 _OFFLINE = re.compile(
-    r"不要联网|别联网|禁止联网|离线回答|仅[用查看].{0,8}(资料|文档)|只[用查看].{0,8}(资料|文档)"
+    r"不要联网|别联网|禁止联网|离线回答|仅[用查看].{0,8}(资料|文档)|只[用查看].{0,8}(资料|文档)|"
+    r"\b(?:offline|do not (?:browse|search)|don't (?:browse|search)|"
+    r"without (?:internet|browsing))\b|"
+    r"ネットに接続しない|検索しない|オフライン|오프라인|인터넷 없이|ne cherche pas|sans internet",
+    re.IGNORECASE,
 )
-_CURRENT = re.compile(
+NETWORK_QUERY = re.compile(
     r"联网|上网|网上|搜索|探索|调研|查一下|查下|最新|今天|今年|目前|现在.{0,8}(谁|多少|哪些)|"
-    r"新闻|天气|股价|汇率|排名|排行榜|前十|top\s*10|大学.{0,8}有哪些",
+    r"新闻|天气|股价|汇率|排名|排行榜|前十|top\s*10|大学.{0,8}有哪些|"
+    r"\b(?:latest|current|today|news|weather|rankings?|exchange rates?|stock price|"
+    r"search (?:the )?(?:web|online)|look up|browse (?:the )?(?:web|internet))\b|"
+    r"最新|ニュース|天気|調べて|検索して|ランキング|날씨|최신|검색|순위|"
+    r"\b(?:actualit[eé]s|m[eé]t[eé]o|classement|recherche|noticias|clasificaci[oó]n|"
+    r"buscar en internet|nachrichten|wetter|rangliste|онлайн|погода|новости|рейтинг)\b",
     re.IGNORECASE,
 )
 _URL = re.compile(r"https?://[^\s<>）)\]\"']+")
@@ -19,7 +28,7 @@ _URL = re.compile(r"https?://[^\s<>）)\]\"']+")
 def wants_web(question: str) -> bool:
     if re.search(r"今天几号|现在几点|今天星期|今天周几|现在时间", question):
         return False
-    return not bool(_OFFLINE.search(question)) and bool(_CURRENT.search(question))
+    return not bool(_OFFLINE.search(question)) and bool(NETWORK_QUERY.search(question))
 
 
 def public_sources(text: str) -> tuple[str, ...]:

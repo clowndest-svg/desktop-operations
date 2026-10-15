@@ -79,6 +79,7 @@ _ENGLISH_MARKERS: frozenset[str] = frozenset(
 _WORD = re.compile(r"[a-zA-Z]+")
 
 _WEIGHT_SPAN: Final = re.compile(r"\([^()\n]{1,80}\)")
+_WEIGHT_SUFFIX: Final = re.compile(r"(:\s*[+-]?(?:\d+(?:\.\d*)?|\.\d+)\s*)$")
 """生成器那套权重写法：``(red car:1.2)``、``(cityscape)``。
 
 对 SD/ComfyUI 来说这不是散文，是带权重的指令。r119 的 120 条矩阵量出来：模型会把它当句子
@@ -255,7 +256,18 @@ class PromptTranslator:
             head: Translation | None = None
             for kind, piece in pieces:
                 if kind == "span":
-                    rendered.append(piece)
+                    # Preserve the syntax, not untranslated prose inside it. A buyer
+                    # can write (三只红猫:1.20); only its inner words go to the model.
+                    inner = piece[1:-1]
+                    weight = _WEIGHT_SUFFIX.search(inner)
+                    words = inner[: weight.start()] if weight else inner
+                    if _has_untranslated_text(words):
+                        one = self._translate_plain(words.strip())
+                        if head is None:
+                            head = one
+                        rendered.append("(" + one.english + (weight[0] if weight else "") + ")")
+                    else:
+                        rendered.append(piece)
                     continue
                 prose = piece.strip(" ，,。;；")
                 if not prose:
@@ -270,7 +282,7 @@ class PromptTranslator:
                 " ".join(rendered).strip(),
                 head.language if head is not None else "auto",
                 provider=head.provider if head is not None else "本地模型",
-                note_text=f"{spans} 段权重写法原样保留未交翻译，其余按整句翻译。",
+                note_text=f"{spans} 段权重写法原样保留，括号内非英文及其余描述分别翻译。",
             )
         with self._lock:
             self._cache[cache_key] = translated

@@ -276,3 +276,21 @@ def test_a_description_with_no_weights_is_a_single_call() -> None:
     assert client.seen == ["一只橘猫在跑步"], "没有权重段就不该多打一发"
     assert result.english == "An orange cat runs"
     assert "权重" not in result.note
+
+
+def test_non_english_words_inside_weights_are_translated_without_changing_weights() -> None:
+    client = _ScriptedClient(["three red cats", "on a blue bench"])
+    result = PromptTranslator(_boom, {}, client_provider=lambda: client).translate(
+        "(三只红猫:1.20) 在蓝色长椅上"
+    )
+    assert result.english == "(three red cats:1.20) on a blue bench"
+    assert client.seen == ["三只红猫", "在蓝色长椅上"]
+
+
+def test_french_and_unweighted_chinese_parentheses_do_not_bypass_translation() -> None:
+    client = _ScriptedClient(["three red cats", "wearing glasses"])
+    result = PromptTranslator(_boom, {}, client_provider=lambda: client).translate(
+        "(trois chats rouges:1.2) (戴着眼镜)"
+    )
+    assert result.english == "(three red cats:1.2) (wearing glasses)"
+    assert client.seen == ["trois chats rouges", "戴着眼镜"]

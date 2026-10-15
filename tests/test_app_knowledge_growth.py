@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from jarvis.app.chat_service import ChatService
+from jarvis.app.chat_service import ChatService, _Turn
 from jarvis.app.knowledge_growth import (
     AUTO_COUNT,
     AUTO_LEARN,
@@ -393,6 +393,50 @@ class TestTheFingerprint:
 
     def test_different_questions_stay_different(self) -> None:
         assert fingerprint("Qwen3 上下文长度") != fingerprint("Qwen3 4B 上下文长度")
+
+
+def test_cancelled_web_turn_does_not_schedule_learning() -> None:
+    queued: list[Any] = []
+    chat = ChatService(
+        lambda: _Silent(), growth_provider=lambda: object(), learn_spawn=queued.append
+    )
+    chat._learn("排名", ANSWER, _Turn(ANSWER, tools_used=("search_web",), cancelled=True))
+    assert queued == []
+
+
+def test_tiny_model_quotes_saved_evidence_instead_of_inventing_a_ranking(tmp_path: Path) -> None:
+    knowledge = _knowledge(tmp_path)
+    result = knowledge.ingest_text(
+        "大学排名来源",
+        "美国大学排名资料：2026-10-15 查询 https://example.org/ranking ，原文只列普林斯顿。",
+    )
+    assert result.doc_id
+
+    class _MustNotInvent(_Silent):
+        model = "qwen3-0.6b"
+
+        def complete(
+            self, messages: Sequence[ChatMessage], *, options: GenerationOptions | None = None
+        ) -> ChatResponse:
+            raise AssertionError("轻量模型不能从片段自行编出十个名次")
+
+    chat = ChatService(
+        lambda: _MustNotInvent(),
+        pair_provider=lambda: ("local", "qwen3-0.6b"),
+        knowledge_provider=lambda: knowledge,
+    )
+    chat.start()
+    try:
+        reply = chat.ask("不要联网，仅根据知识库，列出美国大学排名资料的出处和查询时间。")
+        assert not reply.error, reply.error
+        assert reply.sources
+        assert "https://example.org/ranking" in reply.answer
+        assert "2026-10-15" in reply.answer
+        assert "未重新联网核对" in reply.answer
+        assert not reply.tools_used
+    finally:
+        chat.stop()
+        knowledge.stop()
 
 
 class TestTheChatLoopHandsItOver:
