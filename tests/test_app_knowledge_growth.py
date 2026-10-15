@@ -404,6 +404,52 @@ def test_cancelled_web_turn_does_not_schedule_learning() -> None:
     assert queued == []
 
 
+def test_explicit_knowledge_only_miss_does_not_invent_sources(tmp_path: Path) -> None:
+    knowledge = _knowledge(tmp_path)
+
+    class _MustNotGuess(_Silent):
+        def complete(
+            self, messages: Sequence[ChatMessage], *, options: GenerationOptions | None = None
+        ) -> ChatResponse:
+            raise AssertionError("知识库未命中时不能凭空声称有来源")
+
+    chat = ChatService(lambda: _MustNotGuess(), knowledge_provider=lambda: knowledge)
+    chat.start()
+    try:
+        reply = chat.ask("不要联网，仅根据知识库，列出美国大学排名资料的出处和查询时间。")
+        assert not reply.error
+        assert "本次检索未命中" in reply.answer
+        assert not reply.sources and not reply.tools_used
+    finally:
+        chat.stop()
+        knowledge.stop()
+
+
+def test_knowledge_only_constraint_blocks_even_an_unrequested_model_web_call(
+    tmp_path: Path,
+) -> None:
+    knowledge = _knowledge(tmp_path)
+    assert knowledge.ingest_text("Qwen3 上下文", ANSWER).doc_id
+    opener = _Opener(_bing_page(["Qwen3 上下文"]))
+    tools = _tools(tmp_path, opener)
+    chat = ChatService(
+        lambda: _AsksTheWeb(),
+        knowledge_provider=lambda: knowledge,
+        tool_provider=lambda: tools,
+    )
+    chat.start()
+    try:
+        reply = chat.ask("只用知识库回答 Qwen3 的上下文长度")
+        assert not reply.error
+        assert reply.sources, "必须命中资料并进入模型回合，不能靠未命中分支蒙混"
+        assert opener.urls == []
+        assert "search_web" not in reply.tools_used
+    finally:
+        chat.stop()
+        tools.stop()
+        knowledge.stop()
+
+
 def test_tiny_model_quotes_saved_evidence_instead_of_inventing_a_ranking(tmp_path: Path) -> None:
     knowledge = _knowledge(tmp_path)
     result = knowledge.ingest_text(

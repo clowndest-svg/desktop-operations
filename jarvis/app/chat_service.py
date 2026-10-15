@@ -67,7 +67,7 @@ from jarvis.app.tool_routing import (
     classify_tool_intent,
     select_tool_names,
 )
-from jarvis.app.web_research import public_sources, wants_web
+from jarvis.app.web_research import corpus_only, public_sources, wants_web
 from jarvis.core.exceptions import JarvisError
 from jarvis.llm import local_server
 from jarvis.llm.client import StreamingClient
@@ -1050,6 +1050,8 @@ class ChatService:
             # corpus again" depends on whether ``knowledge_search`` is actually going
             # out with this request, and on a narrowed local pack it often is not.
             tools, pack = self._tool_schemas(pair, intents)
+            if corpus_only(question):
+                tools = [spec for spec in tools if _tool_name(spec) not in _WEB_TOOLS]
             source_evidence: list[str] = []
             user_content, sources = self._build_user_message(
                 _with_attachment_note(question, kept, sees_images=bool(images)),
@@ -1110,11 +1112,17 @@ class ChatService:
                     on_delta=on_delta,
                     on_phase=on_phase,
                     should_stop=should_stop,
+                    allow_web=not corpus_only(question),
                 )
 
             try:
                 tiny_local = _is_bundled(pair) and ("0.6" in pair.model or "0.6" in client.model)
-                if web_evidence.startswith("联网搜索") and tiny_local:
+                if corpus_only(question) and not sources:
+                    turn = _Turn(
+                        text="按你限定的知识库范围，本次检索未命中相关片段。请换更具体的关键词，或先导入相关资料。",
+                        cancelled=bool(should_stop and should_stop()),
+                    )
+                elif web_evidence.startswith("联网搜索") and tiny_local:
                     turn = _Turn(text=web_evidence, cancelled=bool(should_stop and should_stop()))
                 elif (
                     tiny_local
@@ -1958,6 +1966,7 @@ class ChatService:
         chat: Conversation,
         pair: _Pair,
         task_id: str = "",
+        allow_web: bool = True,
         on_delta: Callable[[str], None] | None = None,
         on_phase: Callable[[str], None] | None = None,
         should_stop: Callable[[], bool] | None = None,
@@ -2077,6 +2086,13 @@ class ChatService:
                         round_index + 1,
                     )
                     break
+                if not allow_web and requested.name in _WEB_TOOLS:
+                    messages.append(
+                        ChatMessage.tool_result(
+                            requested.id, "本轮限定只使用知识库，未执行联网请求。"
+                        )
+                    )
+                    continue
                 used.append(requested.name)
                 self._phase(chat, chat.tool_phase(), on_phase)
                 result_text = self._invoke(requested.name, requested.arguments, should_stop=stop)

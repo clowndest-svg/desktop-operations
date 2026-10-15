@@ -23,12 +23,25 @@ NETWORK_QUERY = re.compile(
     re.IGNORECASE,
 )
 _URL = re.compile(r"https?://[^\s<>）)\]\"']+")
+_CORPUS_ONLY = re.compile(
+    r"(?:仅|只)(?:能|可)?(?:根据|依据|使用|用|从).{0,6}(?:知识库|资料库|导入的?(?:资料|文档))|"
+    r"\bonly (?:use|using|from) (?:the |my )?(?:knowledge base|imported documents)\b",
+    re.IGNORECASE,
+)
+
+
+def corpus_only(question: str) -> bool:
+    return bool(_CORPUS_ONLY.search(question))
 
 
 def wants_web(question: str) -> bool:
     if re.search(r"今天几号|现在几点|今天星期|今天周几|现在时间", question):
         return False
-    return not bool(_OFFLINE.search(question)) and bool(NETWORK_QUERY.search(question))
+    return (
+        not corpus_only(question)
+        and not bool(_OFFLINE.search(question))
+        and bool(NETWORK_QUERY.search(question))
+    )
 
 
 def public_sources(text: str) -> tuple[str, ...]:

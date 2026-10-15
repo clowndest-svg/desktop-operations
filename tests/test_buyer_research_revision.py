@@ -45,6 +45,8 @@ def test_online_requests_in_other_languages_get_search_and_page_tools(question: 
         "Without internet, tell me about weather patterns",
         "検索しないで天気の仕組みを説明して",
         "不要联网，只解释大学排名是什么",
+        "只用知识库回答最新大学排名",
+        "Only use my knowledge base for the latest rankings",
     ],
 )
 def test_explicit_offline_instructions_prevent_automatic_search(question: str) -> None:
