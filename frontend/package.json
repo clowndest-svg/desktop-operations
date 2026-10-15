@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vue-tsc -b && vite build",
+    "test": "node --experimental-strip-types --test tests/*.test.mjs",
+    "build": "npm run test && vue-tsc -b && vite build",
     "build:mobile": "vue-tsc -b && vite build --config vite.mobile.config.ts",
     "android": "npm run build:mobile && npx cap sync android",
     "preview": "vite preview"

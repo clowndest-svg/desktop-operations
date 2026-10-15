@@ -542,6 +542,7 @@ const pictureAsked = new Set<string>()
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { describeToolReport as toolReport } from '../chat/toolReport'
 import {
   artifactRead,
   artifactVideo,
@@ -1079,23 +1080,6 @@ onBeforeUnmount(() => {
  * chat panel is a reader having to work out which one is real.
  */
 /** One line under the bubble: what the request carried, in the words the backend chose. */
-function toolReport(tools: ToolReport): string {
-  const pack = tools.pack ? `（能力包 ${tools.pack}）` : ''
-  if (tools.used.length) {
-    return `本轮调用了 ${tools.used.join('、')}${pack}`
-  }
-  if (tools.degraded === 'overflow') {
-    return '上下文装不下工具表，这一轮没带工具，所以她没能动手'
-  }
-  if (tools.degraded === 'model') {
-    return `带了 ${tools.count} 个工具${pack}，她一个都没调用就答了`
-  }
-  if (!tools.count) {
-    return '这一轮没有携带工具'
-  }
-  return `带了 ${tools.count} 个工具${pack}，本轮没用到`
-}
-
 const lines = computed<Line[]>(() =>
   [
     ...seeded.value,

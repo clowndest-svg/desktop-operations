@@ -19,6 +19,14 @@ if (-not $Out) {
     $Out = $DefaultOut
 }
 New-Item -ItemType Directory -Path $BuildRoot -Force | Out-Null
+$buildCache = Join-Path $BuildRoot '_cache'
+foreach ($cacheSetting in @{
+    TEMP='tmp'; TMP='tmp'; PYINSTALLER_CONFIG_DIR='pyinstaller'; MPLCONFIGDIR='matplotlib'; NUMBA_CACHE_DIR='numba'
+}.GetEnumerator()) {
+    $cachePath = Join-Path $buildCache $cacheSetting.Value
+    New-Item -ItemType Directory -Path $cachePath -Force | Out-Null
+    [Environment]::SetEnvironmentVariable($cacheSetting.Key, $cachePath, 'Process')
+}
 
 function Step($m) { Write-Host ("→ " + $m) -ForegroundColor Cyan }
 function Ok($m) { Write-Host ("✓ " + $m) -ForegroundColor Green }
