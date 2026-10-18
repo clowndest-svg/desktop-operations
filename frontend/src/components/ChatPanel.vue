@@ -60,12 +60,13 @@
           views start disagreeing about what was said.
         -->
         <button
+          v-if="!expanded"
           class="hud-btn chat__expand"
           type="button"
-          :title="expanded ? '收回对话区（Esc）' : '放大到整窗，在弹窗里对话'"
+          title="放大到整窗，在弹窗里对话"
           @click="toggleExpanded"
         >
-          {{ expanded ? '收回' : '放大' }}
+          放大
         </button>
         <!--
           The model picker lives here rather than only in the settings dialog because
@@ -97,11 +98,15 @@
           </option>
         </select>
         <select
-          v-if="models.length > 1"
+          v-if="models.length > 1 || modelRowLocked"
           class="hud-field chat__model"
           :value="model"
           :disabled="switching"
-          title="该服务商下的大模型"
+          :title="
+            modelRowLocked
+              ? '自带模型：这一格只报当前在跑的那一档，想换去「设置 → 本地模型」。名字里带「仅冒烟」的档位只够验证能不能连通，别拿它聊天'
+              : '该服务商下的大模型'
+          "
           @change="chooseModel"
         >
           <option v-for="entry in models" :key="entry.id" :value="entry.id">{{ entry.label }}</option>
@@ -154,6 +159,23 @@
           <option v-for="key in MODE_ORDER" :key="key" :value="key">{{ MODE_LABELS[key] }}</option>
         </select>
       </header>
+
+      <!--
+        放大态的关闭放在右上角 —— 和其余十三扇弹窗同一个位置、同一个词。
+        以前它叫「收回」，蹲在顶栏那一排按钮中间，找它得把顶栏扫一遍；而窗口右上角
+        空着，那里恰恰是所有人本能会去看的地方。绝对定位而不是塞进 header：
+        .hud-title 有个 ::after{flex:1} 在吃剩余空间画那条渐变线，往 header 里加
+        margin-left:auto 会把线挤没。
+      -->
+      <button
+        v-if="expanded"
+        class="hud-btn chat__close"
+        type="button"
+        title="关闭对话大窗（Esc）"
+        @click="toggleExpanded"
+      >
+        关闭
+      </button>
 
       <!--
         椅子。顺序就是点它的顺序，而"顺序意味着什么"跟着形态变：圆桌里第一家负责合并，
@@ -519,7 +541,7 @@
             {{ tools ? '带工具' : '不带工具' }}
           </span>
           <span class="hud-label">{{ lines.length }} 条 · 会话 {{ activeTitle }}</span>
-          <span class="hud-label">Esc 收回</span>
+          <span class="hud-label">Esc 关闭</span>
         </footer>
       </div>
 
@@ -773,10 +795,19 @@ function setMode(event: Event): void {
   }
 }
 
-/** The models of the picked provider, and the level names as the backend spells them. */
-const models = computed<ModelSpec[]>(
-  () => providers.value.find((entry) => entry.name === provider.value)?.models ?? [],
+/** The picked provider's own row -- read once, because a second read can disagree with
+ *  the first if the picker moves between the two. */
+const currentRow = computed<ProviderChoice | undefined>(
+  () => providers.value.find((entry) => entry.name === provider.value),
 )
+
+/** The models of the picked provider, and the level names as the backend spells them. */
+const models = computed<ModelSpec[]>(() => currentRow.value?.models ?? [])
+
+/** 自带那一行的模型表由「选哪个离线模型」决定，所以永远只有一张卡。以前"只有一个模型
+ *  就不显示这一格"把它藏掉了，结果是屏上从头到尾只写着 'local'，看不出加载的是 0.6B
+ *  还是 4B（2026-10-18：三条新问题被答成同一句原话，用户只能怀疑软件坏了）。 */
+const modelRowLocked = computed(() => Boolean(currentRow.value?.models_locked))
 
 /**
  * Friendly names for the four thinking levels. The wire values (`off`/`low`/...) are
@@ -2030,11 +2061,24 @@ async function clear(): Promise<void> {
 }
 
 .chat__main {
+  /* 放大态那颗「关闭」的定位上下文（见模板里 chat__close 那段注释）。 */
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 8px;
   min-height: 0;
   min-width: 0;
+}
+
+/*
+ * 右上角，和其余弹窗的「关闭」同一个位置。top 用 1px 而不是 0：header 那行是
+ * 10.5px 的字配 24px 的按钮，贴顶会高出半格。
+ */
+.chat__close {
+  position: absolute;
+  top: 1px;
+  right: 0;
+  z-index: 2;
 }
 
 /*

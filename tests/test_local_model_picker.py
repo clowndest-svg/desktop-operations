@@ -708,3 +708,63 @@ def test_the_bundled_row_is_marked_locked_for_the_page(prefs: Preferences) -> No
 
     assert rows["local"]["models_locked"] is True
     assert rows["alpha"]["models_locked"] is False
+
+
+def test_the_chat_picker_row_carries_the_lock_too(prefs: Preferences) -> None:
+    """顶栏那一路（``model_choices``）也问得到锁，不然页面只能回去抄 'local'。
+
+    上面那条只钉住了设置那一路。2026-10-18 实拍：顶栏写的是"只有一个模型就不显示这一格"，
+    而自带那一行永远只有一张卡，于是屏上从头到尾只写着 local —— 加载的是 0.6B 还是 4B
+    看不出来，用户只能怀疑软件坏了（三条新提问被答成同一句原话）。
+    """
+    service = _picker_service(prefs)
+
+    rows = {str(row["name"]): row for row in service.model_choices()["providers"]}
+
+    assert rows["local"]["models_locked"] is True, rows["local"]
+    assert rows["alpha"]["models_locked"] is False, rows["alpha"]
+
+
+def test_the_smoke_verdict_sits_on_the_small_card_only() -> None:
+    """判词挂在正确的卡上：四张里只有 0.6B 是"仅冒烟"，买家自己丢进来的不算。
+
+    反向那半同样要钉 —— 四张全 True 和全 False 一样没用，只是把提示变成了噪音。
+    """
+    flagged = {card.file for card in MODEL_CARDS.values() if card.smoke_only}
+
+    assert flagged == {"Qwen3-0.6B-Q8_0.gguf"}, flagged
+    assert local_server.estimate_card(Path("自己下的.gguf")).smoke_only is False
+
+
+def test_the_settings_catalog_shows_the_verdict(monkeypatch: pytest.MonkeyPatch) -> None:
+    """设置里那张模型表读的是 catalog：判词没带出去，选的时候仍然只看得到"多大、要约几 GB"。
+
+    0.6B 恰恰是这表里最便宜最快的一档 —— 只报体积不报能力，选错是这张表自己促成的。
+    """
+    monkeypatch.setattr(local_server, "installed_models", lambda: [])
+    rows = {str(row["file"]): row for row in local_server.bundled_catalog()}
+
+    assert rows["Qwen3-0.6B-Q8_0.gguf"]["smoke_only"] is True
+    assert rows["Qwen3-4B.Q4_K_M.gguf"]["smoke_only"] is False
+
+
+def test_a_smoke_only_card_says_so_in_the_name_the_chat_header_shows(
+    prefs: Preferences, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """判词从卡上走到那一格的名字里：0.6B 要说"仅冒烟"，4B 不许跟着喊。
+
+    两张卡都取自 ``MODEL_CARDS``（不新造一张带这个字段的假卡），所以这条同时钉住
+    "判据在哪张卡上"和"这句话真的会出现在屏上"——中间任何一环不读那个字段都会红。
+    """
+    service = _picker_service(prefs)
+
+    def shown_as(card: ModelCard) -> str:
+        monkeypatch.setattr(local_server, "selected_card", lambda: card)
+        rows = {str(row["name"]): row for row in service.model_choices()["providers"]}
+        return str(rows["local"]["models"][0]["label"])
+
+    small = shown_as(MODEL_CARDS["Qwen3-0.6B-Q8_0.gguf"])
+    big = shown_as(MODEL_CARDS["Qwen3-4B.Q4_K_M.gguf"])
+
+    assert small == "自带·Qwen3-0.6B（离线·仅冒烟）", small
+    assert big == "自带·Qwen3-4B（离线）", big

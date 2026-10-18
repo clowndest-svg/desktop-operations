@@ -293,6 +293,34 @@ def _artifacts_of(name: str, result: str) -> tuple[str, ...]:
     return tuple(found)
 
 
+#: 没带工具却答出本机数字时，要往**那份会被带回下一轮的文本**里补的一句。
+#: 2026-10-18 打包版实拍：她回「亲爱的，我刚检查了一下，你现在电脑的内存占用是72%」，
+#: 而那一轮气泡下面明明写着「这一轮没有携带工具」。这条谎落进历史之后，下一轮她照抄
+#: 自己上文的范例 —— 拿旧人设同样 4/4 报数、4/4 谎称查过。所以界面那行标注救不了它：
+#: 标注不进 chat_messages，她下次抄不到约束。要打破这个环，约束必须长在正文里。
+_LOCAL_NUMBER_SHAPE = re.compile(
+    r"(内存|CPU|磁盘|C盘|D盘|E盘|占用率?|剩余空间|版本|进程)[^。\n]{0,24}?"
+    r"\d+(?:\.\d+)?\s*(?:%|GB|MB|KB|GHz|核|个)"
+)
+_CLAIMED_LOOKUP = re.compile(
+    r"(刚检查|刚查看|我刚看|我查了|查了一下|查看了一下|我看了一下|检查了一下)"
+)
+_UNSOURCED_LOCAL_NOTE = (
+    "\n\n（这一轮没有携带工具：上面这些本机数字没有依据，是我没查就说的。"
+    "别把它当成查到的事实，也别学这个说法。）"
+)
+
+
+def _flag_unsourced_local_numbers(answer: str) -> str:
+    """这一轮没带工具，却报了本机数字或声称「我刚查过」——把这句话接在答案后面。
+
+    改屏幕上的标注没有用，要改的是**会被 replay 进下一次请求的那一份**。
+    """
+    if _LOCAL_NUMBER_SHAPE.search(answer) or _CLAIMED_LOOKUP.search(answer):
+        return answer + _UNSOURCED_LOCAL_NOTE
+    return answer
+
+
 def _error_kind(exc: BaseException) -> str:
     """The token the page draws its advice from, off the exception's own class.
 
@@ -1228,6 +1256,13 @@ class ChatService:
                 model=pair.model,
                 task_id=task_id,
             )
+        #: 「这一轮没带工具」有两种，都得算：用户在顶栏关掉的（tools 空、lean 仍是 False），
+        #: 和窗口塞不下被迫去掉的（lean）。只认 lean 会正好漏掉打包版实拍那一种 —— 那一次
+        #: 气泡上写着「这一轮没有携带工具」，人却报了个 72%。
+        if answer and (lean or not tools):
+            # 必须在落库**之前**改：_remember 和 _record_answer 拿的是同一份文本，
+            # 下一轮 replay 出来的就是这一份。晚一步就只改到了屏幕。
+            answer = _flag_unsourced_local_numbers(answer)
         if remembered and answer:
             self._remember(chat, question, answer)
             self._record_answer(chat, answer, model=pair.model, task_id=task_id)

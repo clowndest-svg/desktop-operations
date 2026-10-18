@@ -633,7 +633,9 @@ def read_back(
             bad.append(f"包里出现隐私形状的文件（{len(leaked)} 条）：" + "、".join(leaked[:8]))
         print(
             f"  条目数 {len(infos)}：源 {len(files)} 个文件 + 注入文本"
-            + (f" + 手机/文档（{len(docs)} 份）" if docs else "")
+            # 这一行数的就是买家文档那几份，以前写成「手机/文档」，不带手机时也会印出来，
+            # 看着像包里真有手机目录（r122 被它绊过一次）。
+            + (f" + 买家文档（{len(docs)} 份）" if docs else "")
         )
     return bad
 
@@ -708,6 +710,17 @@ def stale_number_lines(round_name: str) -> list[str]:
                 if token != round_name:
                     hits.append(f"{path.name}:{index} 还带着 {token} —— {line.strip()[:76]}")
     return hits
+
+
+def package_name(round_name: str, with_mobile: bool) -> str:
+    """合并包的文件名必须跟着**里面真装了什么**。
+
+    这一行以前无条件写「小夜-电脑+手机-rNN.zip」。r122 因为手机端 APK 版本和源码不一致
+    （盘上 0.4.2/10，`build.gradle` 已改到 0.5.0/11）只能先出电脑端，结果 10.3 GB 的包
+    顶着「+手机」的名字、清单和发货记录也跟着印这个名字，而包内 APK 成员数是 0 ——
+    买家按名字去找手机那一半会找不到。名字也是一种承诺。
+    """
+    return f"小夜-{'电脑+手机' if with_mobile else '电脑'}-{round_name}.zip"
 
 
 def main() -> int:
@@ -895,7 +908,8 @@ def main() -> int:
     files = [p for p in source.rglob("*") if p.is_file()]
     total_bytes = sum(f.stat().st_size for f in files)
     out_dir = Path(args.out)
-    combined = out_dir / f"小夜-电脑+手机-{round_name}.zip"
+    # 包名跟着内容走，见 package_name() 那段（r122 踩的：不带 --with-mobile 却叫「电脑+手机」）。
+    combined = out_dir / package_name(round_name, args.with_mobile)
     pc_zip = out_dir / f"小夜-{round_name}.zip"
 
     need = total_bytes + (DISK_HEADROOM_MB << 20)
@@ -936,7 +950,11 @@ def main() -> int:
             f"构建轮次：{round_name}  exe {exe.stat().st_size:,} 字节  构建于 "
             f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(exe.stat().st_mtime))}",
             "",
-            "包内布局：先看我一页.txt + 小夜/（双击 小夜/小夜.exe）+ 手机/ + 文档/ + 清单.txt —— 解压一层就到位",
+            # 布局那一行也不许写死「+ 手机/」：不带 --with-mobile 时包里根本没有手机目录，
+            # 买家照着清单去找会找不到（r122 同一处 bug 的第二半，前半是包名）。
+            "包内布局：先看我一页.txt + 小夜/（双击 小夜/小夜.exe）"
+            + ("+ 手机/ " if args.with_mobile else "")
+            + "+ 文档/ + 清单.txt —— 解压一层就到位",
             *(
                 f"⚠ 压缩包里 {name} 会显示成 {size % 2**32:,} 字节（真实 {size:,}）—— 32 位显示截断，"
                 "不是包坏了；实测用 Windows 自带解压解出来的文件，大小和 md5 都和包里的一致"

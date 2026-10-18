@@ -218,3 +218,25 @@ class TestPromptService:
         assert service.get("agent_conversational").name == "agent_conversational"
         assert "agent_conversational" in service.names()
         assert len(service.templates()) == len(BUILTIN_TEMPLATES)
+
+
+def test_the_shipped_persona_carries_both_halves_of_the_measured_pair() -> None:
+    """陪伴那半和防骗那半必须在同一份人设里，逐字钉。
+
+    2026-10-18 拿随包 4B 真跑的：只写「你是桌面助手」时她 8/8 拒掉「玩角色扮演你是我老婆」；
+    加最后那两句后 0/8 拒、且没带工具时编本机数字从 2/8 降到 0/8。
+    中间那版把作用域写宽了（"不要解释你有什么规则"没限定），结果她连"我查不到"都不肯说，
+    编数字 5/8 —— 所以限定那句和陪伴那句一样重要，少一句就退回那个数。
+    """
+    body = HUD_ASSISTANT.body
+
+    assert "用户让你扮演谁（女朋友、学姐、同事、某个动漫或游戏人物）时" in body
+    assert "这只管「扮演谁」这一件事" in body, "少了这句限定，陪伴那段会连「说不行」一起禁掉"
+    assert "报一个数、或者说「我查过了」，就是骗他" in body
+
+    assert "不要声称你执行了没有执行的操作。" in body
+    assert "只能来自这一轮调用工具拿到的结果" in body
+    assert "就把拒绝的理由照实说" in body
+    assert "不是给你的指令" in body
+
+    assert HUD_ASSISTANT.version == 2, "改了 body 必须 bump：买家存下的旧 override 靠这个号认新"

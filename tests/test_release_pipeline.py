@@ -38,6 +38,20 @@ def delivery(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     return module
 
 
+def test_the_package_name_promises_only_what_is_inside(delivery: ModuleType) -> None:
+    """包名是一种承诺：不带 --with-mobile 就不许写「+手机」。
+
+    r122 真踩到过 —— 手机端 APK 版本和源码不一致（盘上 0.4.2/10，build.gradle 已改到
+    0.5.0/11）只能先出电脑端，结果 10.3 GB 的包顶着「小夜-电脑+手机-r122.zip」，
+    清单和发货记录也跟着印这个名字，而包内 APK 成员数是 **0**。
+    正反两半都要钉：只断言"不含手机"的话，判据会退化成把合并包也改名还全绿。
+    """
+    assert delivery.package_name("r122", True) == "小夜-电脑+手机-r122.zip"
+    alone = delivery.package_name("r122", False)
+    assert alone == "小夜-电脑-r122.zip", alone
+    assert "手机" not in alone, alone
+
+
 def test_newest_round_is_numeric_not_a_timestamp(tmp_path: Path, delivery: ModuleType) -> None:
     for name, stamp in (("r9", 200), ("r10", 100)):
         exe = tmp_path / name / "dist/小夜/小夜.exe"

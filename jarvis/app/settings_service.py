@@ -332,7 +332,7 @@ class SettingsService:
                     "current": name == provider_name,
                     # 界面据此把「加模型 / 删」这两枚按钮按下去：能让用户点的按钮点了必须有效，
                     # 而这一行的模型表由「选哪个离线模型」决定，在这里加完也会被盖掉。
-                    "models_locked": name == LOCAL_PROVIDER,
+                    "models_locked": _models_locked(name),
                 }
                 for name, row in sorted(shown.items())
             ],
@@ -437,6 +437,9 @@ class SettingsService:
                     "key_optional": row.key_optional,
                     "timeout_seconds": row.timeout_seconds,
                     "current": name == provider_name,
+                    # 聊天顶栏据此决定"只有一个模型时那一格还显不显示"：自带那一行永远只有
+                    # 一张卡，不显示就等于屏上看不出加载的是 0.6B 还是 4B（2026-10-18 实拍）。
+                    "models_locked": _models_locked(name),
                 }
                 for name, row in sorted(shown.items())
             ],
@@ -1872,11 +1875,24 @@ def _follows_picker(name: str, row: ProviderSection) -> ProviderSection:
     之前这一行永远写着 defaults.yaml 里的 qwen2.5-7b，而实际加载的是 Qwen3-4B：同一个设置
     出现两处、各说一套，用户照着那一行去找模型就找不到（r84 实拍）。
     """
-    if name != LOCAL_PROVIDER:
+    if not _models_locked(name):
         return row
     card = local_server.selected_card()
-    spec = ModelSpec(id=card.alias, label=f"自带·{card.label}（离线）")
+    # 只适合冒烟测试的那一档要把话写在名字里：这一行没有别的出口说得出"你现在用的这个
+    # 不能聊天"，而 0.6B 在贪心解码下会把新问题答成上一轮的原话（实测三条回答 md5 相同）。
+    note = "·仅冒烟" if card.smoke_only else ""
+    spec = ModelSpec(id=card.alias, label=f"自带·{card.label}（离线{note}）")
     return replace(row, models=(spec,), default_model=card.alias)
+
+
+def _models_locked(name: str) -> bool:
+    """这一行的模型表是不是由「选哪个离线模型」决定的 —— 判据只许有这一处。
+
+    设置面板拿它按掉「加/删模型」两枚按钮，聊天顶栏拿它决定"只有一个模型时这一格要不要
+    显示"（自带那一行必须显示，否则屏上永远看不出加载的是哪一档）。两处各写一遍
+    ``name == LOCAL_PROVIDER`` 就是两个判据，第三个人来抄的时候会抄错。
+    """
+    return name == LOCAL_PROVIDER
 
 
 def _serialise_models(specs: tuple[ModelSpec, ...]) -> list[dict[str, str]]:

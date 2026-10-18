@@ -1205,10 +1205,12 @@ const bundledModels = computed<BundledModel[]>(
   () => original.value?.local_models ?? modelServer.value.models ?? [],
 )
 
-/** 下拉里的写法：名字 + 多大 + 要约几 GB 空闲。选模型就是在选内存，别只给一个名字。 */
+/** 下拉里的写法：名字 + 多大 + 要约几 GB 空闲。选模型就是在选内存，别只给一个名字。
+ *  最后那一截是判词：0.6B 装得下、跑得快，可它不能聊天，挑的时候就得看见。 */
 function modelLabel(row: BundledModel): string {
   const cost = row.measured ? `要约 ${mbText(row.gate_mb)} 空闲内存` : `按大小估约 ${mbText(row.gate_mb)} 空闲内存`
-  return `${row.label}｜${(row.size_mb / 1024).toFixed(1)} GB｜${cost}`
+  const smoke = row.smoke_only ? '｜只够冒烟测试' : ''
+  return `${row.label}｜${(row.size_mb / 1024).toFixed(1)} GB｜${cost}${smoke}`
 }
 
 /** 选中那一格的解释：装不装得下工具、是不是实测过、文件在不在。 */
@@ -1226,9 +1228,12 @@ const pickedModelNote = computed(() => {
     ? '这台机器上实测见过它带 34 个工具调成一次'
     : '还没实测过它带工具能不能调成（装得下 ≠ 调成过）'
   const think = picked.thinking ? '；它默认爱先思考，把「思考」关掉回答才不会看着是空的' : ''
+  const smoke = picked.smoke_only
+    ? '；但这一档太小，实测会把新提问逐字答成上一轮那句原话，只够验证能不能连通，别拿它聊天'
+    : ''
   return (
     `现在选的是 ${picked.label}：${(picked.size_mb / 1024).toFixed(1)} GB，` +
-    `本机常驻约 ${mbText(picked.resident_mb)}（没显卡的机器约 ${mbText(picked.cpu_mb)}）。${acts}${think}。`
+    `本机常驻约 ${mbText(picked.resident_mb)}（没显卡的机器约 ${mbText(picked.cpu_mb)}）。${acts}${smoke}${think}。`
   )
 })
 

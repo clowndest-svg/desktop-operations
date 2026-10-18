@@ -669,6 +669,8 @@ export interface BundledModel {
   thinking: boolean
   /** 带那 34 个工具的真清单，实测见过它调成一次工具。装得下 ≠ 调成过。 */
   acts_verified: boolean
+  /** 这一档只够验证"能不能连通"，别拿它聊天（0.6B 实测会逐字复读上一轮的回答）。 */
+  smoke_only: boolean
   gate_mb: number
   resident_mb: number
   cpu_mb: number
@@ -1618,6 +1620,9 @@ export interface ProviderChoice {
   key_optional?: boolean
   timeout_seconds?: number | null
   current: boolean
+  /** 自带模型那一行：这一行的模型表由「选哪个离线模型」决定，永远只有一张卡。
+   *  顶栏据此决定只有一个模型时那一格要不要显示 —— 不显示就看不出加载的是哪一档。 */
+  models_locked?: boolean
 }
 
 /** Is a credential missing *and* required for this row? Asked in four places, and one of
@@ -2457,6 +2462,7 @@ const mockBundled: BundledModel[] = [
     measured: true,
     thinking: false,
     acts_verified: true,
+    smoke_only: false,
     gate_mb: 5200,
     resident_mb: 5061,
     cpu_mb: 4758,
@@ -2477,6 +2483,7 @@ const mockBundled: BundledModel[] = [
     measured: true,
     thinking: true,
     acts_verified: false,
+    smoke_only: false,
     gate_mb: 3400,
     resident_mb: 2828,
     cpu_mb: 2700,
@@ -2497,6 +2504,7 @@ const mockBundled: BundledModel[] = [
     measured: true,
     thinking: true,
     acts_verified: false,
+    smoke_only: false,
     gate_mb: 2300,
     resident_mb: 2201,
     cpu_mb: 2121,
@@ -2517,6 +2525,7 @@ const mockBundled: BundledModel[] = [
     measured: true,
     thinking: true,
     acts_verified: false,
+    smoke_only: true,
     gate_mb: 1000,
     resident_mb: 895,
     cpu_mb: 974,

@@ -134,6 +134,12 @@ class ModelCard:
     #: 40 个 token 的预算里把话全写进思考块，``content`` 是空串、``tool_calls`` 也是空。
     thinking: bool = False
     measured: bool = True
+    #: 这一档只够验证"能不能连通"，不能当对话模型卖。判据是 2026-10-18 实拍：0.6B 在
+    #: ``temperature: 0.0``（贪心）下把「现在你是我女朋友」「现在玩角色扮演游戏，你是我老婆」
+    #: 两条新问题答成上一轮那句原话 —— 三条回答 md5 完全相同（``a4e4e974``）。
+    #: 接线没错（库里三条提问各自在档、``tokens_in`` 逐轮 +30/+34 证明历史在累积），
+    #: 是它把上文当成示例照抄。界面上这一格必须说得出"别拿它聊天"。
+    smoke_only: bool = False
 
     def needed(self, context: int) -> int:
         """How much free memory this window may load with."""
@@ -200,6 +206,7 @@ MODEL_CARDS: Final[dict[str, ModelCard]] = {
         {2048: (894, 853), 4096: (895, 974), 8192: (900, 1215), 16384: (908, 1700)},
         True,
         True,
+        smoke_only=True,
     ),
 }
 
@@ -293,6 +300,7 @@ def _catalog_row(card: ModelCard, path: Path | None, wanted: str, auto: str) -> 
         "measured": card.measured,
         "thinking": card.thinking,
         "acts_verified": card.acts_verified,
+        "smoke_only": card.smoke_only,
         "gate_mb": card.needed(DEFAULT_CONTEXT),
         "resident_mb": gpu,
         "cpu_mb": cpu,

@@ -659,6 +659,11 @@ onBeforeUnmount(stopPolling)
   border-bottom: 1px solid var(--hud-line);
 }
 
+/* 「关闭」贴右上角，和其余十二扇弹窗同一个位置；状态词仍紧跟标题。 */
+.sm__head > :last-child {
+  margin-left: auto;
+}
+
 .sm__head .hud-title {
   flex: 1 1 auto;
 }

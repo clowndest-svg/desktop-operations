@@ -455,6 +455,11 @@ onBeforeUnmount(() => clearInterval(timer))
   padding: 12px 16px;
   border-bottom: 1px solid var(--hud-line, #285264);
 }
+
+/* 「关闭」贴右上角，和其余十二扇弹窗同一个位置；状态词仍紧跟标题。 */
+.vp__head > :last-child {
+  margin-left: auto;
+}
 .vp__head .hud-title {
   flex: 1;
   margin: 0;

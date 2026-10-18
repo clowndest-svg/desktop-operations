@@ -87,8 +87,3 @@ jarvis/vendor/
 # Release audit evidence and historical verification scratch
 /.r[0-9]*/
 /.audit/
-
-# 公开分支永远不带商业材料（报价/需求确认单/文案/演示脚本）。
-# 上一轮配方靠 checkout 后 rm --cached，但文件还留在工作树里等着被 git add -A 捡走，
-# 所以这一轮改成同时写进 ignore —— 拆雷而不是每次绕开。
-commercial/

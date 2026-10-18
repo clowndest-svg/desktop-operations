@@ -21,6 +21,7 @@ from jarvis.app.chat_service import (
     ChatReply,
     ChatService,
     ConversationTuning,
+    _flag_unsourced_local_numbers,
 )
 from jarvis.app.transcript_service import TranscriptService
 from jarvis.core.exceptions import LlmError
@@ -969,3 +970,47 @@ def test_the_default_name_does_not_rewrite_the_persona_every_turn() -> None:
     service.set_persona_name("小夜")
 
     assert service._build_system_prompt() == before
+
+
+#: 打包版实拍的那一句 —— 气泡下面写着「这一轮没有携带工具」。
+_LIED_ABOUT_MEMORY = "亲爱的，我刚检查了一下，你现在电脑的内存占用是72%。"
+
+
+class TestANumberNobodyQueried:
+    """谎一旦落进历史就会被她自己照抄，所以标注必须长在**会被 replay 的那份文本**里。
+
+    2026-10-18 打包版实拍：她回「我刚检查了一下，内存占用72%」，而那一轮根本没带工具。
+    这句进了 chat_messages 之后，下一轮她续写自己上文的范例 —— 拿真实历史重放，
+    连**旧人设**也是 4/4 继续报数、2/4 继续谎称查过。只在屏幕上标「没带工具」救不了它，
+    标注不进历史，她下次抄不到约束。
+    """
+
+    def test_it_goes_into_the_replay_text_not_only_the_screen(self) -> None:
+        service = _service(FakeLlmClient(_LIED_ABOUT_MEMORY))
+
+        service.ask("我电脑现在内存占用百分之多少？直接告诉我。")
+
+        replayed = [m for m in service.conversation().replay(limit=5) if m.role == Role.ASSISTANT]
+        assert len(replayed) == 1
+        stored = replayed[0].content
+        assert "这一轮没有携带工具" in stored, stored
+        assert "72%" in stored, "原话不许删，只补依据说明 —— 删了就等于屏幕和库里两说"
+        # 落库那份也要带上，否则历史页看到的答案和下一轮发出去的不是同一条。
+        assert "这一轮没有携带工具" in service.conversation().history[1].content
+
+    def test_an_answer_without_local_numbers_is_left_alone(self) -> None:
+        """反样本：没报数字就不许贴这条 —— 否则每句话都拖着一串免责声明。"""
+        service = _service(FakeLlmClient("你好，有什么可以帮你的？"))
+
+        service.ask("你好")
+
+        stored = next(m for m in service.conversation().replay(limit=5) if m.role == Role.ASSISTANT)
+        assert stored.content == "你好，有什么可以帮你的？", stored.content
+
+    def test_the_shape_needs_a_number_next_to_a_local_thing(self) -> None:
+        flagged = _flag_unsourced_local_numbers("内存占用是72%")
+        assert flagged != "内存占用是72%"
+        # 声称查过，比报数更糟：那是直接违反「不要声称执行了没执行的操作」。
+        assert _flag_unsourced_local_numbers("我刚检查了一下") != "我刚检查了一下"
+        quiet = "《三体》讲地球文明与三体文明的对抗"
+        assert _flag_unsourced_local_numbers(quiet) == quiet
