@@ -244,6 +244,114 @@ def test_cleanup_requires_full_verification_and_preserves_user_data(tmp_path: Pa
     assert (root / "mobile/r2/小夜.apk").exists()
 
 
+def test_pc_only_round_cleans_without_touching_any_apk(tmp_path: Path) -> None:
+    """只出电脑端的那一轮：凭据里 apk 是空串。
+
+    正反两半都要钉：
+    - 修之前第 47 行无条件 ``Assert-Child $proof.apk``，空串直接把清理掐死（电脑单独发货
+      那一轮根本清不了旧包）；
+    - 光把校验跳过去更糟 —— 新包里没有任何 APK 替代品，旧 APK 却跟着候选被删。
+    还有一半：老代码那句 ``Get-ChildItem $mobileRoot`` 在盘上压根没有 mobile 目录时抛异常，
+    所以 B 段用一份不含 mobile 的根再跑一次。
+    """
+    powershell = shutil.which("powershell") or shutil.which("pwsh")
+    if powershell is None or sys.platform != "win32":
+        pytest.skip("Windows release cleanup test")
+
+    def build(case: str, with_mobile_dir: bool) -> tuple[list[str], Path, Path]:
+        root = tmp_path / case / "JarvisBuild"
+        out = tmp_path / case / "delivery"
+        out.mkdir(parents=True)
+        for name in ("r1", "r3"):
+            exe = root / name / "dist/小夜/小夜.exe"
+            exe.parent.mkdir(parents=True)
+            exe.write_bytes(b"exe")
+        if with_mobile_dir:
+            apk = root / "mobile" / "r1" / "小夜.apk"
+            apk.parent.mkdir(parents=True)
+            apk.write_bytes(b"apk")
+        archive = out / "小夜-电脑-r3.zip"
+        archive.write_bytes(b"archive fixture")
+        stale = out / "小夜-电脑-r1.zip"
+        stale.write_bytes(b"stale fixture")
+        # 三种历史包名都要清：老「小夜-rNN.zip」、这一轮起的「小夜-电脑-rNN.zip」、
+        # 合并包「小夜-电脑+手机-rNN.zip」。少一种就是无声漏掉 10 GB。
+        (out / "小夜-r2.zip").write_bytes(b"legacy fixture")
+        (out / "小夜-电脑+手机-r1.zip").write_bytes(b"combined fixture")
+        (out / "清单-r1.txt").write_bytes(b"manifest fixture")
+        proof: dict[str, Any] = {
+            "ok": True,
+            "full_crc": True,
+            "round": "r3",
+            "zip": str(archive),
+            "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+            "source": str(root / "r3/dist/小夜"),
+            "exe_sha256": hashlib.sha256(b"exe").hexdigest(),
+            "apk": "",
+            "apk_sha256": "",
+        }
+        evidence = tmp_path / case / "proof.json"
+        evidence.write_text(json.dumps(proof), encoding="utf-8")
+        args = [
+            powershell,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(ROOT / "scripts/cleanup_releases.ps1"),
+            "-Root",
+            str(root),
+            "-Out",
+            str(out),
+            "-KeepRound",
+            "r3",
+            "-Verification",
+            str(evidence),
+            "-Apply",
+        ]
+        return args, root, out
+
+    args, root, out = build("A", with_mobile_dir=True)
+    result = subprocess.run(args, capture_output=True, timeout=60, check=False)
+    stdout = result.stdout.decode(errors="replace")
+    assert result.returncode == 0, stdout + result.stderr.decode(errors="replace")
+    assert not (root / "r1").exists(), "旧电脑轮次没清掉"
+    assert not (out / "小夜-电脑-r1.zip").exists(), "旧电脑 zip 没清掉"
+    for leftover in ("小夜-r2.zip", "小夜-电脑+手机-r1.zip", "清单-r1.txt"):
+        assert not (out / leftover).exists(), f"{leftover} 没进清理候选（包名正则漏形状）"
+    assert (out / "小夜-电脑-r3.zip").exists(), "当轮包被误删"
+    assert (root / "mobile/r1/小夜.apk").exists(), "新包里没有 APK，旧 APK 却被删了"
+    receipt = json.loads((out / "清理-r3.json").read_text(encoding="utf-8-sig"))
+    assert receipt["applied"] is True
+    assert {Path(p).name for p in receipt["removed"]} == {
+        "r1",
+        "小夜-电脑-r1.zip",
+        "小夜-r2.zip",
+        "小夜-电脑+手机-r1.zip",
+        "清单-r1.txt",
+    }
+    assert receipt["keep_mobile"] == "", "回执里还记着一条不存在的手机保留轮次"
+
+    args, root, _ = build("B", with_mobile_dir=False)
+    result = subprocess.run(args, capture_output=True, timeout=60, check=False)
+    assert result.returncode == 0, result.stdout.decode(errors="replace") + result.stderr.decode(
+        errors="replace"
+    )
+    assert not (root / "r1").exists()
+    assert (root / "r3/dist/小夜/小夜.exe").exists()
+
+    # C) 调用方把 -KeepMobileRound 传进来了而凭据里没有 APK（交付链第 141 行就是无条件传）：
+    #    这一句必须打在输出上，否则"没删旧 APK"就成了静默跳过。
+    args, root, _ = build("C", with_mobile_dir=True)
+    k = args.index("-Verification")
+    args[k:k] = ["-KeepMobileRound", "r1"]
+    result = subprocess.run(args, capture_output=True, timeout=60, check=False)
+    stdout = result.stdout.decode(errors="replace")
+    assert result.returncode == 0, stdout + result.stderr.decode(errors="replace")
+    assert "凭据里没有手机包（apk 空）：忽略 -KeepMobileRound=r1，旧 APK 一律不删" in stdout
+    assert (root / "mobile/r1/小夜.apk").exists()
+
+
 def test_buyer_commands_follow_the_release_but_history_is_preserved(
     tmp_path: Path, delivery: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:

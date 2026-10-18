@@ -4,7 +4,10 @@ param(
     [Parameter(Mandatory=$true)][string]$Root,
     [Parameter(Mandatory=$true)][string]$Out,
     [Parameter(Mandatory=$true)][ValidatePattern('^r[0-9]+$')][string]$KeepRound,
-    [Parameter(Mandatory=$true)][ValidatePattern('^r[0-9]+$')][string]$KeepMobileRound,
+    # 只出电脑端的那一轮没有 APK 可保：留空表示"本轮没有手机包"。
+    # 原来这里写死 Mandatory + 形状校验，而第 47 行无条件读 $proof.apk —— 于是
+    # 「电脑版单独发货」那一轮清理根本跑不起来（r123 实测撞在空串上）。
+    [ValidatePattern('^(|r[0-9]+)$')][string]$KeepMobileRound='',
     [Parameter(Mandatory=$true)][string]$Verification,
     [switch]$Apply
 )
@@ -40,27 +43,43 @@ $expectedSource = Join-Path $keep 'dist\小夜'
 if ([IO.Path]::GetFullPath($proof.source) -ne [IO.Path]::GetFullPath($expectedSource)) { throw '校验凭据对应的不是当前保留的电脑包' }
 if (-not (Test-Path -LiteralPath (Join-Path $expectedSource '小夜.exe') -PathType Leaf)) { throw '新电脑包不存在' }
 $mobileRoot = Join-Path $rootPath 'mobile'
-$mobileKeep = Assert-Child (Join-Path $mobileRoot $KeepMobileRound) $mobileRoot
-if (-not (Get-ChildItem -LiteralPath $mobileKeep -Filter '*.apk' -File)) { throw '新手机包不存在' }
+# 只出电脑端的那一轮，凭据里 apk 就是空串。这时不校验 APK，也一个旧 APK 都不许删：
+# 新包里没有任何替代品，删掉就是把手机那条线唯一的产物清了。
+$hasMobile = "$($proof.apk)".Trim() -ne ''
+$mobileKeep = ''
+if ($hasMobile) {
+    if (-not $KeepMobileRound) { throw '凭据里有手机包，必须给 -KeepMobileRound 说明保留哪一轮' }
+    $mobileKeep = Assert-Child (Join-Path $mobileRoot $KeepMobileRound) $mobileRoot
+    if (-not (Get-ChildItem -LiteralPath $mobileKeep -Filter '*.apk' -File)) { throw '新手机包不存在' }
+} elseif ($KeepMobileRound) {
+    Write-Output "凭据里没有手机包（apk 空）：忽略 -KeepMobileRound=$KeepMobileRound，旧 APK 一律不删"
+}
 $keptExe = Join-Path $expectedSource '小夜.exe'
 if ((File-Sha256 $keptExe) -ne $proof.exe_sha256) { throw '新 exe 与完整校验结果不一致' }
-$keptApk = Assert-Child $proof.apk $mobileKeep
-if ((File-Sha256 $keptApk) -ne $proof.apk_sha256) { throw '新手机包与完整校验结果不一致' }
+if ($hasMobile) {
+    $keptApk = Assert-Child $proof.apk $mobileKeep
+    if ((File-Sha256 $keptApk) -ne $proof.apk_sha256) { throw '新手机包与完整校验结果不一致' }
+}
 $pcNumber = [int]$KeepRound.Substring(1)
-$mobileNumber = [int]$KeepMobileRound.Substring(1)
+$mobileNumber = if ($hasMobile) { [int]$KeepMobileRound.Substring(1) } else { -1 }
 $candidates = @()
 foreach ($dir in (Get-ChildItem -LiteralPath $rootPath -Directory)) {
     if ($dir.Name -match '^r([0-9]+)$' -and [int]$Matches[1] -lt $pcNumber -and
         (Test-Path -LiteralPath (Join-Path $dir.FullName 'dist\小夜\小夜.exe') -PathType Leaf)) { $candidates += $dir }
 }
-foreach ($dir in (Get-ChildItem -LiteralPath $mobileRoot -Directory)) {
-    if ($dir.Name -match '^r([0-9]+)$' -and [int]$Matches[1] -lt $mobileNumber -and
-        (Get-ChildItem -LiteralPath $dir.FullName -Filter '*.apk' -File)) { $candidates += $dir }
+if ($hasMobile) {
+    foreach ($dir in (Get-ChildItem -LiteralPath $mobileRoot -Directory)) {
+        if ($dir.Name -match '^r([0-9]+)$' -and [int]$Matches[1] -lt $mobileNumber -and
+            (Get-ChildItem -LiteralPath $dir.FullName -Filter '*.apk' -File)) { $candidates += $dir }
+    }
 }
 foreach ($file in (Get-ChildItem -LiteralPath $outPath -File)) {
     # 校验凭据和清理回执以前不在这里：旧轮次的 zip 删了，校验-rNN.json 却留在盘上，
     # 于是「这一轮交付过」还剩一份看起来像凭据的东西 —— 它记的是已经不存在的那个包。
-    if ($file.Name -match '^(?:小夜-(?:电脑\+手机-)?|清单-|校验-|清理-)(r[0-9]+)\.(?:zip|txt|json)$' -and
+    # 包名这一栏必须跟着 delivery_package.py 的 package_name() 一起改：r122 起电脑单独发货
+    # 叫「小夜-电脑-rNN.zip」，而这里的正则只认「小夜-电脑+手机-」和光秃秃的「小夜-」，
+    # 于是那一类 10 GB 的旧包**永远匹配不上、永远不清**（10-18 拿判据打出来才发现）。
+    if ($file.Name -match '^(?:小夜-(?:电脑\+手机-|电脑-)?|清单-|校验-|清理-)(r[0-9]+)\.(?:zip|txt|json)$' -and
         [int]$Matches[1].Substring(1) -lt $pcNumber) { $candidates += $file }
 }
 $processes = @([Diagnostics.Process]::GetProcesses() | ForEach-Object { try { $_.MainModule.FileName } catch { } } | Where-Object { $_ })
