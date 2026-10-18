@@ -189,6 +189,42 @@ record('D 服务端确实记下了这一问一答', answered, { 会话: convId, 
 record('D2 她答的是问的那件事（没答非所问）', answered && !dodged, { 落库回答: realAnswer.slice(0, 200) })
 record('D3 没带工具时她不编本机数字', answered && !lied, { 落库回答: realAnswer.slice(0, 200) })
 
+// ── E 放大态的关闭：真在右上角、真点得动、真能收回 ──────────────────────────
+// 这条是这一轮新加的界面改动的验收。量三件事：位置（离容器右上角多近）、
+// elementFromPoint 命中的是不是它本身（不是被别的元素盖住）、点下去真的回到收起态。
+const open = await evaluate(
+  '() => { const b = [...document.querySelectorAll("button")].find(x => (x.textContent||"").trim() === "放大");' +
+    ' if (!b) return { noExpand: true, 有的按钮: [...document.querySelectorAll("button")].map(x => (x.textContent||"").trim()).filter(Boolean).slice(0, 20) };' +
+    ' b.click(); return { clicked: true }; }',
+)
+if (open.noExpand) {
+  record('E 找不到「放大」入口', false, open)
+} else {
+  await sleep(700)
+  const geo = await evaluate(
+    '() => { const c = document.querySelector(".chat__close"); const m = document.querySelector(".chat__main");' +
+      ' if (!c || !m) return { missing: true, close: !!c, main: !!m };' +
+      ' const cr = c.getBoundingClientRect(), mr = m.getBoundingClientRect();' +
+      ' const hit = document.elementFromPoint(cr.left + cr.width / 2, cr.top + cr.height / 2);' +
+      ' return { 文案: (c.textContent||"").trim(), 距容器右边: Math.round(mr.right - cr.right),' +
+      ' 距容器顶: Math.round(cr.top - mr.top), 容器宽: Math.round(mr.width),' +
+      ' 命中是它: !!(hit && (hit === c || c.contains(hit))),' +
+      ' 命中元素: hit ? (hit.className || hit.tagName).toString().slice(0, 30) : null }; }',
+  )
+  record('E 关闭真在右上角（距右边≤4px、距顶≤8px）', !!geo.文案 && geo.文案.includes('关闭') && geo.距容器右边 <= 4 && geo.距容器顶 <= 8, geo)
+  record('E2 那点真的命中它自己（没被盖住）', geo.命中是它 === true, { 命中元素: geo.命中元素 })
+
+  const back = await evaluate(
+    '() => { const c = document.querySelector(".chat__close"); if (!c) return { gone: true }; c.click(); return { clicked: true }; }',
+  )
+  await sleep(700)
+  const after = await evaluate(
+    '() => ({ 还在放大: !!document.querySelector(".chat--max"), 关闭还在: !!document.querySelector(".chat__close"),' +
+      ' 放大入口回来了: [...document.querySelectorAll("button")].some(x => (x.textContent||"").trim() === "放大") })',
+  )
+  record('E3 点它真的收回，且顶栏入口回来了', back.clicked === true && after.还在放大 === false && after.关闭还在 === false && after.放大入口回来了 === true, after)
+}
+
 fs.writeFileSync(
   `${output}/r122-验收.json`,
   JSON.stringify({ api, header, status: { model_label: status && status.model_label, model_selected: status && status.model_selected }, localRow, results, role, fact, serverAnswer: realAnswer, serverMessages: messages.length }, null, 2),
