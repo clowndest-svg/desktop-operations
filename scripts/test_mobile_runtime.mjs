@@ -23,6 +23,11 @@ await test('long history is bounded and begins with a user', () => {
   const result=requestHistory(history,'next')
   assert(result.length<=CONTEXT_MESSAGES); assert.equal(result[0].role,'user'); assert.equal(result.at(-1).text,'next')
 })
+await test('earlier selected document content is replayed while the filename stays on screen', () => {
+  const history=[{role:'user',text:'📄 file.txt',context:'original document content'},{role:'assistant',text:'summary'}]
+  assert.equal(requestHistory(history,'followup')[0].text,'original document content')
+  assert.equal(history[0].text,'📄 file.txt')
+})
 await test('no Authorization for empty or whitespace keys', () => {
   assert.deepEqual(modelHeaders('  '), {'Content-Type':'application/json'})
   assert.equal(modelHeaders(' token ').Authorization, 'Bearer token')
@@ -99,5 +104,23 @@ await test('cancellation after one tool prevents the second tool and the next ro
 })
 await test('a pending human confirmation cannot outlive cancellation', async()=>{
   ran=[];asked=0;await agent.askAgent([{role:'user',text:'test'}],cfg,[],async()=>{stopped=true;return true},{onAction:()=>{}});assert.deepEqual(ran,[]);assert.equal(asked,1)
+})
+let presetMessages
+const presetAgent=await moduleWithPorts('agent', {
+  api:{beginChat:()=>{},chatWasCancelled:()=>false,rawChat:async(messages)=>{presetMessages=messages;return {content:'answer',toolCalls:[],stopped:false}}},
+  actions:{findAction:()=>null,toolSchemas:()=>[],execute:async()=>{throw new Error('unexpected tool')}},
+})
+await test('assistant instructions reach the actual model request without replacing the user question', async()=>{
+  await presetAgent.askAgent([{role:'user',text:'question'}],cfg,[],async()=>false,{onAction:()=>{}},'Write concisely')
+  assert.equal(presetMessages[0].role,'system');assert.equal(presetMessages[0].content,'Write concisely');assert.equal(presetMessages.at(-1).content,'question')
+})
+await test('tools disabled blocks unsolicited model tool calls before execution or approval', async()=>{
+  let execution=0,approval=0,seenTools
+  const plain=await moduleWithPorts('agent', {
+    api:{beginChat:()=>{},chatWasCancelled:()=>false,rawChat:async(_messages,_cfg,tools)=>{seenTools=tools;return {content:'',toolCalls:[{id:'1',name:'set_volume',arguments:'{}'}],stopped:false}}},
+    actions:{findAction:()=>({}),toolSchemas:()=>[{}],execute:async()=>{execution++;return {ok:true,text:'done'}}},
+  })
+  await plain.askAgent([{role:'user',text:'hi'}],cfg,[],async()=>{approval++;return true},{onAction:()=>{},toolsEnabled:false})
+  assert.equal(seenTools.length,0);assert.equal(execution,0);assert.equal(approval,0)
 })
 console.log(`${passed} behavioural checks passed`)

@@ -46,9 +46,10 @@ assets/*.wav
 .workbuddy/
 .workbuddy-ai/
 
-# 与本项目无关的遗留产物（别处的 SVG 动画 demo），留在磁盘但不进公开仓库。
-# 本地 main 分支仍跟踪它；要彻底清理请手工确认后删除文件本身。
-pelican_bicycle_animation.html
+# Local verification evidence and unrelated design drafts are not release source.
+/reports/
+/vibe_images/
+/.claude/
 
 # pytest basetemp left by a debugging run
 .ptmp/
@@ -87,4 +88,6 @@ jarvis/vendor/
 # Release audit evidence and historical verification scratch
 /.r[0-9]*/
 /.audit/
+
+# Private commercial materials are excluded from the public repository.
 commercial/

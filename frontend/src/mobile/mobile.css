@@ -35,15 +35,15 @@
   --xy-kb: 0px;
 
   /* 深色是默认：桌面端本来就是深色 HUD，手机跟着走才像同一个产品。 */
-  --xy-bg: #070d15;
-  --xy-bg-soft: #0b131e;
-  --xy-card: #121c29;
-  --xy-card-2: #182433;
+  --xy-bg: #15121c;
+  --xy-bg-soft: #1c1825;
+  --xy-card: #24202d;
+  --xy-card-2: #2d2737;
   --xy-line: rgba(255, 255, 255, 0.07);
   --xy-line-2: rgba(255, 255, 255, 0.14);
-  --xy-text: #e9f2fb;
-  --xy-text-2: #9db0c6;
-  --xy-text-3: #6d8199;
+  --xy-text: #f1ecf4;
+  --xy-text-2: #bcb1c6;
+  --xy-text-3: #9c91a5;
 
   /* 强调色跟着皮肤走：桌面上选了哪套，手机上就是哪套。
      深色外观下六套皮肤都是亮色，所以"压在强调色上的字"统一用近黑，对比度都够。 */
@@ -60,6 +60,15 @@
   --xy-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
   --xy-shadow-soft: 0 2px 10px rgba(0, 0, 0, 0.3);
 }
+
+.mobile-portrait-backdrop { position: absolute; inset: 64px 0 70px 12%; z-index: -1; pointer-events: none; opacity: .22; mask-image: linear-gradient(transparent, #000 20%, #000 65%, transparent); }
+.mobile-portrait-backdrop .moon-portrait { height: 100%; }
+.mobile-portrait-backdrop .moon-portrait__moon { display: none; }
+.top__mid { position: relative; padding-inline: 30px; }
+.top__logo { position: absolute; left: -8px; top: 50%; transform: translateY(-50%); border-radius: 50%; }
+.drawer__brand { display: inline-flex; align-items: center; gap: 10px; }
+.call__portrait { width: min(90vw, 380px); height: min(42vh, 400px); }
+:root[data-appearance='light'] .mobile-portrait-backdrop { opacity: .08; }
 
 /* 浅色外观：豆包那种白底 + 极淡分隔 + 一层薄阴影。
    浅色下强调色不跟皮肤走 —— 皮肤那六套是给深色玻璃算的亮色（比如琥珀 #ffb45a），

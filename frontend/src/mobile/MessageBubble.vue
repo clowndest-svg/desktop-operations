@@ -1,7 +1,7 @@
 <template>
-  <article class="turn" :class="`turn--${turn.role}`">
+  <article class="turn" :class="[`turn--${turn.role}`, { 'turn--expanded': expanded }]">
     <div v-if="turn.role === 'assistant'" class="turn__avatar" aria-hidden="true">
-      <span class="turn__orb" />
+      <img :src="brandLogo" alt="" width="30" height="30" style="border-radius:50%;object-fit:contain" />
     </div>
 
     <div class="turn__col">
@@ -21,17 +21,26 @@
 
       <div class="turn__foot">
         <time v-if="turn.at" class="turn__time">{{ clock }}</time>
+        <button type="button" class="more" :aria-expanded="expanded" aria-label="展开消息操作" @click="expanded = !expanded">···</button>
         <button v-if="streaming" type="button" class="turn__skip" @click="reveal">
           显示全部
         </button>
         <span v-else-if="copied" class="turn__done">已复制</span>
         <div v-else class="acts">
+          <button class="acts__extra" type="button" :disabled="disabled" @click="$emit('quote')">引用</button>
+          <button class="acts__extra" type="button" :disabled="disabled" @click="$emit('branch')">从这里分支</button>
           <button type="button" @click="copy(turn.text)">复制</button>
           <button v-if="turn.role === 'assistant'" type="button" @click="$emit('speak')">
             朗读
           </button>
-          <button v-if="canRegenerate" type="button" @click="$emit('regenerate')">重来</button>
-          <button type="button" class="acts__bad" @click="$emit('remove')">删除</button>
+          <button v-if="canRegenerate" class="acts__extra" type="button" @click="$emit('regenerate')">重来</button>
+          <button v-if="turn.role === 'assistant'" type="button" :disabled="disabled" @click="$emit('save')">{{ saved ? '已收藏' : '收藏' }}</button>
+          <button v-if="turn.role === 'assistant'" class="acts__extra" type="button" :disabled="disabled" @click="$emit('followup')">继续追问</button>
+          <button v-if="turn.role === 'assistant'" class="acts__extra" type="button" :disabled="disabled" @click="$emit('shorten')">精简</button>
+          <button v-if="turn.role === 'assistant'" class="acts__extra" type="button" :disabled="disabled" @click="$emit('checklist')">转清单</button>
+          <button class="acts__extra" type="button" :disabled="disabled" @click="$emit('note')">存笔记</button>
+          <button v-if="turn.role === 'user'" class="acts__extra" type="button" :disabled="disabled" @click="$emit('edit')">修改提问</button>
+          <button type="button" class="acts__bad acts__extra" :disabled="disabled" @click="$emit('remove')">删除</button>
         </div>
       </div>
     </div>
@@ -39,6 +48,7 @@
 </template>
 
 <script setup lang="ts">
+import brandLogo from '@/assets/brand/logo.webp'
 /**
  * 一条消息。左边是她的，右边是我的，和所有对话应用一样 —— 这一条不需要创新。
  *
@@ -58,6 +68,8 @@ const props = defineProps<{
   turn: Turn
   streaming?: boolean
   canRegenerate?: boolean
+  disabled?: boolean
+  saved?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -66,9 +78,18 @@ const emit = defineEmits<{
   remove: []
   /** 不等逐字上屏了，直接把这条显示全。 */
   skip: []
+  save: []
+  followup: []
+  edit: []
+  quote: []
+  branch: []
+  note: []
+  shorten: []
+  checklist: []
 }>()
 
 const copied = ref(false)
+const expanded = ref(false)
 const blocks = computed(() => splitFences(props.turn.text))
 const clock = computed(() =>
   props.turn.at
@@ -110,6 +131,7 @@ async function copy(text: string): Promise<void> {
 </script>
 
 <style scoped>
+.more { color:var(--xy-text-2); background:transparent; border:0; min-width:36px; min-height:36px; border-radius:8px; cursor:pointer; } .more:focus-visible { outline:2px solid var(--xy-accent); }
 .turn {
   display: flex;
   gap: 8px;
@@ -289,6 +311,7 @@ async function copy(text: string): Promise<void> {
 
 .acts {
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
 }
 
@@ -309,6 +332,9 @@ async function copy(text: string): Promise<void> {
   background: var(--xy-card-2);
   color: var(--xy-text);
 }
+
+.acts .acts__extra { display: none; }
+.turn--expanded .acts .acts__extra { display: block; }
 
 .acts__bad {
   color: var(--xy-text-3);

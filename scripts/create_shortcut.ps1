@@ -50,7 +50,7 @@ if ($Remove) {
     exit 0
 }
 
-$root = "E:\BianChengGongJu\JarvisBuild"
+$root = "E:\DaiMa\XiaoYeBuild"
 if ([string]::IsNullOrWhiteSpace($ExePath)) {
     # Only ever consider a delivered artifact -- <round>\dist\小夜\小夜.exe -- never the
     # intermediate copy under <round>\build\, which is written hours before the one you

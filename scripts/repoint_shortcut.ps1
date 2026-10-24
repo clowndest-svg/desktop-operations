@@ -7,7 +7,7 @@
 # 所以这里按**盘上的实情**改：桌面那枚用真实文件名，开始菜单那枚在 小夜\ 子目录里。
 param(
   [Parameter(Mandatory = $true)][ValidatePattern("^r[0-9]+$")][string]$Round,
-  [string]$Root = 'E:\BianChengGongJu\JarvisBuild'
+  [string]$Root = 'E:\DaiMa\XiaoYeBuild'
 )
 $ErrorActionPreference = 'Stop'
 $name = [string][char]0x5C0F + [char]0x591C

@@ -170,6 +170,7 @@ with open(_buildinfo_file, "w", encoding="utf-8") as _handle:
     json.dump(_manifest["build_info"](Path(ROOT), _round), _handle, ensure_ascii=False)
 
 datas = [
+    (os.path.join(ROOT, "packaging", "licenses"), "licenses"),
     (os.path.join(ROOT, "jarvis", "config", "defaults.yaml"), "jarvis/config"),
     (os.path.join(ROOT, "jarvis", "ui", "web"), "jarvis/ui/web"),
     # The silhouette weights the desktop pet's 生成 door reads (4.57 MB, U^2-Net

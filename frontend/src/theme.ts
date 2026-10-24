@@ -36,6 +36,7 @@ export interface Skin {
  * **不跟着变**：报警必须一直是红的，那是颜色在说话，不是配色。
  */
 export const SKINS: readonly Skin[] = [
+  { id: 'moon', label: '月夜 · 默认', line: 0xb7a8c7, glow: 0xd8cfdf, fill: 0x1d1925 },
   { id: 'blue', label: '蓝 · 赛博', line: 0x2f8fff, glow: 0x9fd4ff, fill: 0x06203f },
   { id: 'cyan', label: '青 · 初版', line: 0x62e4ff, glow: 0xbdf3ff, fill: 0x0d3550 },
   { id: 'violet', label: '紫 · 夜航', line: 0x9d7cff, glow: 0xd3c4ff, fill: 0x1b1038 },
@@ -45,9 +46,14 @@ export const SKINS: readonly Skin[] = [
 ]
 
 const STORAGE_KEY = 'jarvis.skin'
+const BRAND_REVISION = 'xiaoye.brand.moon.v1'
 
 function stored(): string {
   try {
+    if (!localStorage.getItem(BRAND_REVISION)) {
+      localStorage.setItem(BRAND_REVISION, '1')
+      localStorage.setItem(STORAGE_KEY, 'moon')
+    }
     const saved = localStorage.getItem(STORAGE_KEY)
     return SKINS.some((entry) => entry.id === saved) ? (saved as string) : SKINS[0].id
   } catch {

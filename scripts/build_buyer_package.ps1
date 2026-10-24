@@ -5,8 +5,8 @@
 [CmdletBinding()]
 param(
     [string]$Repo = 'E:\DaiMa\AILiaoTianXiangMu',
-    [string]$BuildRoot = 'D:\AI\XiaoYe\build\buyer',
-    [string]$MobileRoot = 'D:\AI\XiaoYe\build\mobile',
+    [string]$BuildRoot = 'E:\DaiMa\XiaoYeBuild\buyer',
+    [string]$MobileRoot = 'E:\DaiMa\XiaoYeBuild\mobile',
     [string]$EngineRoot = 'D:\AI\XiaoYe\engine',
     [string]$Out = '',
     [switch]$DryRun,

@@ -53,7 +53,7 @@ from release_manifest import (
 )
 
 ROOT = Path(__file__).resolve().parents[1] / "闲鱼展示内容"
-BUILD_ROOT = Path("E:/BianChengGongJu/JarvisBuild")
+BUILD_ROOT = Path("E:/DaiMa/XiaoYeBuild")
 REPO_ROOT = ROOT.parent
 
 # 双击运行时当前目录是 闲鱼展示内容/，jarvis 不在 sys.path 上 —— 从仓库根补进去，
@@ -75,6 +75,8 @@ BUYER_DOCS = (
     "04-买家安装与使用说明.md",
     "05-第三方许可清单.md",
     "06-接本地大模型.md",
+    "07-新版界面与功能入口.md",
+    "小夜logo.webp",
 )
 
 # 包里必须有这几条成员 —— 少一条就是"买家拿到的不是完整交付"，宁可失败别静默。
@@ -413,13 +415,12 @@ def model_notice(weights: list[Path], round_name: str, weight_md5: dict[str, str
         "想自己核对：任选一份看开头四个字节是不是 GGUF、general.license 写没写，再比对本页的 MD5。",
         "",
         "运行模型的代码是 llama.cpp（MIT），随包在 _internal\\jarvis\\vendor\\llama\\。",
-        "  ⚠️ 已知缺口：那个目录里目前只有 LICENSE-LLVM-OpenMP 一份文本，llama.cpp 本体的 MIT 全文",
-        "     没跟着进来。要补请从上游仓库取 LICENSE 放回 jarvis/vendor/llama/ 再重新打包。",
+        "  llama.cpp 的 MIT 全文与 LLVM OpenMP 许可随包位于 _internal/licenses/。",
         "",
         "投屏用的代码是 scrcpy（Apache-2.0，上游 github.com/Genymobile/scrcpy），随包在",
         "  _internal\\jarvis\\vendor\\scrcpy\\，那 16 个文件里带着一份 LICENSE.txt（Apache-2.0 全文，11,387 字节）。",
-        "  ⚠️ 同一个目录里还捆着别人的东西，它们的许可文本没有跟着进来：",
-        "     SDL 3.4.18（zlib，libsdl.org）、FFmpeg 8：avcodec-63.1.102 / avformat-63.1.102 /",
+        "  捆绑依赖的许可和出处见 _internal/licenses/README.md 与同目录全文：",
+        "     SDL 3.4.18（zlib，libsdl.org）、FFmpeg：avcodec-63.1.102 / avformat-63.1.102 /",
         "     avutil-61.1.102 / swresample-7（LGPL-2.1+，ffmpeg.org）、libusb 1.0.30（LGPL-2.1，libusb.info）、",
         "     adb 1.0.41 / 37.0.1-15733141 + AdbWinApi.dll（Android platform-tools，Apache-2.0，developer.android.com）。",
         "     版本号取自 scrcpy.exe --version 在本机实测打印的那几行，不是抄上游 README。",

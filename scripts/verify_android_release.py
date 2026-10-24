@@ -109,6 +109,8 @@ def verify(apk: Path, sdk: Path, previous: Path | None = None) -> dict[str, obje
             b"XyNetPlugin",
             b"navigateTo",
             b"setTimer",
+            b"XyFilesPlugin",
+            b"documentCreated",
         ):
             if marker not in dex:
                 raise ValueError(f"APK 缺少本轮原生能力 {marker.decode()}")

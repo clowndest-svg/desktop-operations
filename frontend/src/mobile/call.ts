@@ -80,6 +80,8 @@ class CallAudio {
   private inputRate = 0
   private recording = false
   private playSource: AudioBufferSourceNode | null = null
+  private playbackMeter: AnalyserNode | null = null
+  private playbackData = new Uint8Array(0)
 
   private async ensure(out: boolean): Promise<AudioContext> {
     if (!this.context) {
@@ -250,11 +252,21 @@ class CallAudio {
     }
     const source = context.createBufferSource()
     source.buffer = buffer
-    source.connect(context.destination)
+    const meter = context.createAnalyser()
+    meter.fftSize = 512
+    source.connect(meter)
+    meter.connect(context.destination)
+    this.playbackMeter = meter
+    this.playbackData = new Uint8Array(meter.fftSize)
     this.playSource = source
     await new Promise<void>((resolve) => {
       source.onended = () => {
-        if (this.playSource === source) this.playSource = null
+        source.disconnect()
+        meter.disconnect()
+        if (this.playSource === source) {
+          this.playSource = null
+          this.playbackMeter = null
+        }
         resolve()
       }
       source.start()
@@ -269,6 +281,16 @@ class CallAudio {
       // 已经播完了。每一帧都记一条日志没有意义。
     }
     this.playSource = null
+    this.playbackMeter = null
+  }
+
+  /** RMS of the actual loudspeaker signal, never the microphone. */
+  playbackLevel(): number {
+    if (!this.playSource || !this.playbackMeter) return 0
+    this.playbackMeter.getByteTimeDomainData(this.playbackData)
+    let sum = 0
+    for (const byte of this.playbackData) sum += ((byte - 128) / 128) ** 2
+    return Math.sqrt(sum / this.playbackData.length)
   }
 
   get speaking(): boolean {

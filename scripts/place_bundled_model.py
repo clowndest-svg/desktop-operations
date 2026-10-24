@@ -23,7 +23,7 @@ import shutil
 import sys
 from pathlib import Path
 
-BUILD_ROOT = Path("E:/BianChengGongJu/JarvisBuild")
+BUILD_ROOT = Path("E:/DaiMa/XiaoYeBuild")
 APP_DIRNAME = "".join([chr(0x5C0F), chr(0x591C)])  # 小夜, without depending on the console codepage
 SOURCE_DIR = Path(__file__).resolve().parent.parent / "模型"
 #: Measured with ``--record``; the check that stops a swapped file shipping silently.

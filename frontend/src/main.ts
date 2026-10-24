@@ -1,8 +1,8 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import './styles/hud.css'
+import './styles/moon.css'
 import App from './App.vue'
-import PetStage from './avatar/PetStage.vue'
 import { isPet } from './page'
 import { applyStoredSkin, installSkinChannel } from './theme'
 
@@ -18,4 +18,10 @@ installSkinChannel()
  * ``App.vue`` would put an ``if`` around every panel in the dashboard; switching the
  * root here keeps the HUD exactly as it was tested.
  */
-createApp(isPet ? PetStage : App).use(createPinia()).mount('#app')
+if (isPet) {
+  void import('./avatar/PetStage.vue').then(({ default: PetStage }) => {
+    createApp(PetStage).use(createPinia()).mount('#app')
+  })
+} else {
+  createApp(App).use(createPinia()).mount('#app')
+}

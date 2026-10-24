@@ -18,6 +18,7 @@ import type { ActionRow } from './types'
 const MAX_ROUNDS = 4
 
 export interface AgentHooks {
+  toolsEnabled?: boolean
   /** 每执行一笔调一次：界面拿它写台账。 */
   onAction: (row: ActionRow) => void
   /** 只在**降级**的时候响：这个模型不接工具，那她确实动不了这台手机，
@@ -66,9 +67,11 @@ export async function askAgent(
   attachments: Attachment[],
   approve: Approve,
   hooks: AgentHooks,
+  instruction = '',
 ): Promise<string> {
   beginChat()
   const messages = toMessages(history, attachments)
+  if (instruction.trim()) messages.unshift({ role: 'system', content: instruction.slice(0, 6000) })
   const guardedApproval: Approve = async prompt => {
     if (chatWasCancelled()) return false
     const allowed = await approve(prompt)
@@ -78,7 +81,7 @@ export async function askAgent(
   let spoken = ''
   // 不是所有 OpenAI 兼容端点都接 `tools`：老一点的会直接 4xx。这时候退回纯聊天，
   // 但要把"退回了"说出去——静默降级的结果是用户以为她不愿意动，而不是动不了。
-  let tools: object[] = toolSchemas()
+  let tools: object[] = hooks.toolsEnabled === false ? [] : toolSchemas()
   for (let round = 0; round < MAX_ROUNDS; round += 1) {
     if (chatWasCancelled()) return spoken
     let turn
@@ -97,6 +100,14 @@ export async function askAgent(
     // 参数是逐字流出来的，取消的时候 `{"percent":4` 这种半句完全可能出现。
     if (turn.stopped || chatWasCancelled()) return turn.content || spoken
     if (!turn.toolCalls.length) return turn.content || spoken
+    if (hooks.toolsEnabled === false) {
+      hooks.onNote?.('手机工具已关闭，这次没有执行模型请求的动作')
+      return turn.content || '当前为纯聊天模式，未执行手机操作。'
+    }
+    if (!tools.length) {
+      hooks.onNote?.('本次对话未启用手机工具，没有执行模型返回的操作请求')
+      return turn.content || spoken || '当前只进行文字对话，没有执行手机操作。'
+    }
     messages.push({
       role: 'assistant',
       content: turn.content || '',

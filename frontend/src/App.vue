@@ -1,7 +1,7 @@
 <template>
   <div class="hud-backdrop"></div>
 
-  <div class="app">
+  <div class="app" @keydown.esc="systemsOpen = false">
     <TopBar
         @settings="settingsOpen = true"
         @activity="activityOpen = true"
@@ -14,15 +14,24 @@
       @assistant="assistantOpen = true"
       @extensions="extensionsOpen = true"
       @skin="skinOpen = true"
+      @systems="systemsOpen = true"
+      @voice-controls="voicePanelOpen = !voicePanelOpen"
       />
 
     <p v-if="store.error" class="app__error">{{ store.error }}</p>
     <p v-else-if="runningMocked" class="app__mock">浏览器预览模式 · 数据为模拟生成，非真实机器读数</p>
 
-    <main class="app__grid">
+    <main class="app__scene">
+      <DesktopPortrait class="app__portrait" />
+      <div class="app__shade" aria-hidden="true" />
+      <div class="app__intro"><span>小夜 · 与你此刻相伴</span><small>每一句，都认真听。</small></div>
+      <ChatPanel class="app__chat" @usage="usageOpen = true" @voice="voiceOpen = true" />
+      <div v-show="voicePanelOpen" class="app__voice"><button class="app__voice-close" type="button" aria-label="关闭语音控制" @click="voicePanelOpen = false">关闭</button><VoiceCore /></div>
+    </main>
+    <section v-if="systemsOpen" id="system-drawer" class="app__diagnostics" aria-label="系统与工具">
+      <header class="app__diagnostics-head"><strong>系统与工具</strong><button class="hud-btn" type="button" @click="systemsOpen = false">关闭</button></header>
+      <div class="app__grid">
       <section class="hud-panel rings">
-        <AvatarStage class="rings__avatar" />
-        <VoiceCore class="rings__core" />
 
         <!--
           A gauge pinned at 0% reads as "the machine is idle", which is a different
@@ -91,7 +100,6 @@
       </section>
 
       <TrendPanel class="app__trend" />
-      <ChatPanel class="app__chat" @usage="usageOpen = true" @voice="voiceOpen = true" />
       <CleanPanel class="app__clean" />
       <DiskPanel />
       <ProcessPanel
@@ -101,7 +109,8 @@
         @actions="activityOpen = true"
         @alerts="alertsOpen = true"
       />
-    </main>
+      </div>
+    </section>
 
     <SettingsPanel
       :open="settingsOpen"
@@ -178,7 +187,7 @@
 </template>
 
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { defineAsyncComponent, onBeforeUnmount, onMounted, ref } from 'vue'
 import { formatBytes, reportPetPalette, runningMocked, type SettingsSnapshot } from '@/api/bridge'
 
 /**
@@ -193,13 +202,13 @@ function rate(bytesPerSecond: number | null | undefined): string {
   return `${formatBytes(bytesPerSecond)}/s`
 }
 import ChatPanel from '@/components/ChatPanel.vue'
-import DiskPanel from '@/components/DiskPanel.vue'
+const DiskPanel = defineAsyncComponent(() => import('@/components/DiskPanel.vue'))
 import ActivityPopup from '@/components/ActivityPopup.vue'
 import AlertsPopup from '@/components/AlertsPopup.vue'
 import AssistantPopup from '@/components/AssistantPopup.vue'
 import ExtensionsPopup from '@/components/ExtensionsPopup.vue'
 import SkinPopup from '@/components/SkinPopup.vue'
-import CleanPanel from '@/components/CleanPanel.vue'
+const CleanPanel = defineAsyncComponent(() => import('@/components/CleanPanel.vue'))
 import ComputerAccessPopup from '@/components/ComputerAccessPopup.vue'
 import MobileAccessPopup from '@/components/MobileAccessPopup.vue'
 import MirrorPopup from '@/components/MirrorPopup.vue'
@@ -207,23 +216,25 @@ import ImagePopup from '@/components/ImagePopup.vue'
 import VideoPopup from '@/components/VideoPopup.vue'
 import OfflineNotice from '@/components/OfflineNotice.vue'
 import ContextMenu from '@/components/ContextMenu.vue'
-import ProcessPanel from '@/components/ProcessPanel.vue'
+const ProcessPanel = defineAsyncComponent(() => import('@/components/ProcessPanel.vue'))
 import SettingsPanel from '@/components/SettingsPanel.vue'
 import TopBar from '@/components/TopBar.vue'
 import UsagePopup from '@/components/UsagePopup.vue'
 import VoicePickerPopup from '@/components/VoicePickerPopup.vue'
 import PetForgePopup from '@/components/PetForgePopup.vue'
-import TrendPanel from '@/components/TrendPanel.vue'
+const TrendPanel = defineAsyncComponent(() => import('@/components/TrendPanel.vue'))
 import VoiceCore from '@/components/VoiceCore.vue'
 import { useSystemStore } from '@/stores/system'
 import { useVoiceStore } from '@/stores/voice'
-import AvatarStage from '@/avatar/AvatarStage.vue'
+import DesktopPortrait from '@/avatar/DesktopPortrait.vue'
 import { startAudioChannel, stopAudioChannel } from '@/audio/channel'
 import { applyStoredSkin, currentSkin } from '@/theme'
 
 const store = useSystemStore()
 const voice = useVoiceStore()
 const settingsOpen = ref(false)
+const systemsOpen = ref(false)
+const voicePanelOpen = ref(false)
 
 /**
  * A save must be visible without a restart, in the two places a restart used to be

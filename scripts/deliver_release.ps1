@@ -2,10 +2,11 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^(auto|r[0-9]+)$')][string]$Round='auto',
-    [string]$Root='E:\BianChengGongJu\JarvisBuild',
+    [string]$Root='E:\DaiMa\XiaoYeBuild',
     [string]$Out='',
     [string]$MediaEngineRoot='',
     [string]$MobileRoot='',
+    [string]$ReleaseNotes='免Key本地联网、带来源的知识库自学、多语言画面描述和历史提问修改。',
     [ValidateSet('author','buyer')][string]$Edition='author',
     [switch]$CleanOld,
     [switch]$UpdateShortcut,
@@ -129,7 +130,7 @@ if ($LASTEXITCODE -ne 0) { throw '压包失败，旧包未清理' }
 & $python $maker --round $Round --build-root $Root --check $zip --apk $apk --report $report
 if ($LASTEXITCODE -ne 0) { throw '独立回读失败，旧包未清理' }
 $manifest = Join-Path $Out ('latest-' + $Round + '.json')
-& $python (Join-Path $PSScriptRoot 'make_release_manifest.py') --receipt $report --zip $zip --out $manifest --notes '免Key本地联网、带来源的知识库自学、多语言画面描述和历史提问修改。'
+& $python (Join-Path $PSScriptRoot 'make_release_manifest.py') --receipt $report --zip $zip --out $manifest --notes $ReleaseNotes
 if ($LASTEXITCODE -ne 0) { throw '发布清单生成失败，未更新快捷方式或清理旧包' }
 Write-Output "本地发布清单已生成：$manifest（服务器清单需要另行同步）"
 if ($UpdateShortcut) {

@@ -53,6 +53,7 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(XyNetPlugin.class);
         registerPlugin(XySecurePlugin.class);
         registerPlugin(XyActionPlugin.class);
+        registerPlugin(XyFilesPlugin.class);
         super.onCreate(savedInstanceState);
         reportKeyboardHeight();
     }

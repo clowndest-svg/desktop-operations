@@ -21,12 +21,7 @@
     </header>
 
     <div class="call__stage">
-      <div class="call__orb" :class="`call__orb--${phase}`">
-        <span class="call__core" :style="coreStyle" />
-        <span class="call__ring call__ring--1" />
-        <span class="call__ring call__ring--2" />
-        <span class="call__ring call__ring--3" />
-      </div>
+      <MoonPortrait class="call__portrait" :mood="portraitMood" :read-audio="readPlayback" />
       <p class="call__hint">{{ aside || hint }}</p>
     </div>
 
@@ -119,6 +114,8 @@
  *    一个没在听的麦克风说一分钟。
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import MoonPortrait from '@/avatar/MoonPortrait.vue'
+import type { PortraitMood } from '@/avatar/portraitMotion'
 import {
   pcCallReadiness,
   pcCallSpeak,
@@ -148,13 +145,11 @@ const turns = ref<{ role: 'user' | 'assistant'; text: string }[]>([])
  */
 const aside = ref('')
 const busy = ref(false)
-const level = ref(0)
 const handsFree = ref(false)
 const readiness = ref<CallReadiness | null>(null)
 const board = ref<VoiceBoard | null>(null)
 const log = ref<HTMLElement | null>(null)
 
-let frame = 0
 let watchdog = 0
 let alive = true
 
@@ -218,10 +213,9 @@ const talkLabel = computed(() => (phase.value === 'listening' ? '松手发送' :
  * 说话时用**播放**的电平而不是录音的：用户看着屏幕想知道的是"她还在说吗"，
  * 而不是"麦克风多响"。听的时候反过来。
  */
-const coreStyle = computed(() => {
-  const glow = 0.35 + level.value * 0.65
-  return { '--call-glow': String(glow), '--call-scale': String(1 + level.value * 0.12) }
-})
+const portraitMood = computed<PortraitMood>(() => phase.value === 'speaking' ? 'speaking'
+  : phase.value === 'thinking' ? 'thinking' : phase.value === 'listening' ? 'listening' : 'idle')
+const readPlayback = () => ({ rms: callAudio.playbackLevel(), talking: callAudio.speaking })
 
 function note(text: string): void {
   turns.value = [...turns.value, { role: 'assistant', text }]
@@ -271,21 +265,9 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   alive = false
-  window.clearInterval(frame)
   window.clearInterval(watchdog)
   callAudio.hush()
   callAudio.abort()
-})
-
-watch(phase, (now) => {
-  window.clearInterval(frame)
-  if (now === 'listening') {
-    frame = window.setInterval(() => {
-      level.value = callAudio.level()
-    }, 60)
-  } else {
-    level.value = now === 'speaking' ? 0.5 : 0
-  }
 })
 
 async function talkStart(): Promise<void> {
@@ -507,75 +489,6 @@ defineExpose({ audition })
   justify-content: center;
   gap: 26px;
   min-height: 0;
-}
-
-.call__orb {
-  position: relative;
-  width: 190px;
-  height: 190px;
-  display: grid;
-  place-items: center;
-}
-
-.call__core {
-  width: 108px;
-  height: 108px;
-  border-radius: 50%;
-  background: radial-gradient(circle at 34% 30%, var(--xy-accent), color-mix(in srgb, var(--xy-accent) 40%, #05101c));
-  box-shadow: 0 0 48px var(--xy-accent-line);
-  transform: scale(var(--call-scale, 1));
-  opacity: var(--call-glow, 0.5);
-  transition: transform 90ms linear, opacity 90ms linear;
-}
-
-.call__ring {
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  border: 1px solid var(--xy-accent-line);
-  opacity: 0;
-}
-
-/* 只在真的有人说话/她在说的时候扩散。静止的脉动是假的。 */
-.call--live .call__ring--1 {
-  animation: call-pulse 1.8s ease-out infinite;
-}
-.call--live .call__ring--2 {
-  animation: call-pulse 1.8s ease-out 0.6s infinite;
-}
-.call--live .call__ring--3 {
-  animation: call-pulse 1.8s ease-out 1.2s infinite;
-}
-
-@keyframes call-pulse {
-  0% {
-    transform: scale(0.62);
-    opacity: 0.55;
-  }
-  100% {
-    transform: scale(1.05);
-    opacity: 0;
-  }
-}
-
-.call__orb--thinking .call__core {
-  animation: call-breathe 1.4s ease-in-out infinite;
-}
-
-@keyframes call-breathe {
-  0%,
-  100% {
-    transform: scale(0.94);
-  }
-  50% {
-    transform: scale(1.04);
-  }
-}
-
-.call__orb--blocked .call__core {
-  background: var(--xy-card-2);
-  box-shadow: none;
-  opacity: 0.5;
 }
 
 .call__hint {

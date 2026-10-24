@@ -17,6 +17,14 @@ SOURCE_PATTERNS = (
     "frontend/src/**/*.ts",
     "frontend/src/**/*.vue",
     "frontend/src/**/*.css",
+    "frontend/src/assets/brand/*",
+    "assets-src/brand/*",
+    "packaging/app.ico",
+    "packaging/licenses/*",
+    "requirements*.txt",
+    "frontend/public/favicon.png",
+    "frontend/mobile/favicon.png",
+    "frontend/android/app/src/main/res/**/*",
     "frontend/package*.json",
     "frontend/vite*.ts",
     "frontend/capacitor.config.ts",
@@ -51,9 +59,17 @@ def source_fingerprint(root: Path) -> str:
     for path in sorted(paths, key=lambda item: item.relative_to(root).as_posix()):
         digest.update(path.relative_to(root).as_posix().encode("utf-8") + b"\0")
         # Git may check out CRLF; line endings do not change these text programs.
-        digest.update(path.read_bytes().replace(b"\r\n", b"\n"))
+        digest.update(fingerprint_content(path))
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def fingerprint_content(path: Path) -> bytes:
+    """Normalize text checkouts, but keep logo/model artwork bytes exact."""
+    content = path.read_bytes()
+    if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".ico"}:
+        return content
+    return content.replace(b"\r\n", b"\n")
 
 
 def round_from(*hints: object) -> str:
@@ -127,6 +143,10 @@ def write_json(path: Path, value: dict[str, Any]) -> None:
 
 
 MOBILE_PATTERNS = (
+    "frontend/src/avatar/MoonPortrait.vue",
+    "frontend/src/avatar/portraitMotion.ts",
+    "frontend/src/assets/brand/*",
+    "frontend/src/styles/moon.css",
     "frontend/src/mobile/**/*",
     "frontend/src/mobile-main.ts",
     "frontend/src/theme.ts",
@@ -137,7 +157,7 @@ MOBILE_PATTERNS = (
     "frontend/package*.json",
     "frontend/android/app/src/main/**/*.java",
     "frontend/android/app/src/main/AndroidManifest.xml",
-    "frontend/android/app/src/main/res/**/*.xml",
+    "frontend/android/app/src/main/res/**/*",
     "frontend/android/app/build.gradle",
     "frontend/android/build.gradle",
     "frontend/android/variables.gradle",
@@ -149,5 +169,5 @@ def mobile_fingerprint(root: Path) -> str:
     digest = hashlib.sha256()
     for path in sorted(paths, key=lambda item: item.relative_to(root).as_posix()):
         digest.update(path.relative_to(root).as_posix().encode("utf-8") + b"\0")
-        digest.update(path.read_bytes().replace(b"\r\n", b"\n") + b"\0")
+        digest.update(fingerprint_content(path) + b"\0")
     return digest.hexdigest()

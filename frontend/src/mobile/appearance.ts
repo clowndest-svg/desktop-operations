@@ -29,7 +29,7 @@ export const appearance = ref<Appearance>(stored())
 /** 地址栏配色得跟着外观走，否则浅色页面顶着一圈深色状态栏。 */
 function syncBrowserChrome(): void {
   const meta = document.querySelector('meta[name="theme-color"]')
-  if (meta) meta.setAttribute('content', appearance.value === 'light' ? '#f1f4f8' : '#070d15')
+  if (meta) meta.setAttribute('content', appearance.value === 'light' ? '#f1f4f8' : '#15121c')
 }
 
 export function applyAppearance(): void {

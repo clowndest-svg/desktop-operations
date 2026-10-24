@@ -28,21 +28,19 @@
     </aside>
 
     <div class="chat__main">
+      <div class="chat__toolbar">
+        <span class="chat__heading">对话</span>
+        <button class="chat__model-label" type="button" title="选择模型与对话选项" :aria-expanded="optionsOpen" @click="optionsOpen = !optionsOpen">{{ models.find(entry => entry.id === model)?.label || '选择模型' }} <span aria-hidden="true">⌄</span></button>
+        <button class="chat__simple" type="button" :disabled="working" @click="addTab">新对话</button>
+        <button class="chat__simple" type="button" @click="sessionsOpen = true">历史</button>
+        <button class="chat__simple" type="button" aria-label="对话选项" :aria-expanded="optionsOpen" aria-controls="chat-options" @click="optionsOpen = !optionsOpen">···</button>
+      </div>
+      <div v-show="optionsOpen" id="chat-options" class="chat__options" aria-label="对话选项">
       <header class="hud-title">
-        对话 · CONSOLE
-        <button
-          class="hud-btn chat__talk"
-          type="button"
-          :disabled="!canTalk"
-          :title="talkTitle"
-          @click="talk"
-        >
-          {{ listening ? '聆听中…' : '按一下说' }}
-        </button>
+        对话选项
         <button class="hud-btn chat__clear" type="button" :disabled="busy || lines.length === 0" @click="clear">
           清空
         </button>
-        <button class="hud-btn chat__sessions" type="button" @click="sessionsOpen = true">历史</button>
         <!-- 用量放在对话区而不是设置里：它是"这场对话花了多少"，不是"机器配置"。 -->
         <button class="hud-btn chat__usage" type="button" @click="emit('usage')">用量</button>
         <button
@@ -159,6 +157,7 @@
           <option v-for="key in MODE_ORDER" :key="key" :value="key">{{ MODE_LABELS[key] }}</option>
         </select>
       </header>
+      </div>
 
       <!--
         放大态的关闭放在右上角 —— 和其余十三扇弹窗同一个位置、同一个词。
@@ -222,7 +221,7 @@
         list ever came up with a single card. Packaged builds start with two cards, so
         this was a latent trap rather than something a customer hit.
       -->
-      <nav class="chat__tabs" aria-label="对话列表">
+      <nav v-show="tabs.length > 1" class="chat__tabs" aria-label="对话列表">
         <button
           v-for="tab in tabs"
           :key="tab.id"
@@ -244,7 +243,7 @@
 
       <div ref="listRef" class="chat__log" @scroll.passive="onLogScroll">
         <p v-if="lines.length === 0" class="hud-label chat__empty">
-          打一句话即可开始。随包本地模型无需 Key；开启工具后也可联网查询。语音请点「启用语音」。
+          想聊什么，直接告诉我。也可以点下方的语音按钮。
         </p>
         <div v-for="(line, index) in lines" :key="index" class="chat__turn" :class="`chat__turn--${line.role}`">
           <div class="chat__bubble" @contextmenu.prevent="textMenu($event, index, line.text)">
@@ -484,7 +483,7 @@
         <button class="hud-btn" type="button" @click="editing = null">取消修改</button>
       </p>
       <form class="chat__form" @submit.prevent="send">
-        <button class="hud-btn" type="button" title="附加图片 / 视频 / 文件" @click="openFiles">附件</button>
+        <button class="hud-btn chat__attachment" type="button" aria-label="添加附件" title="添加图片、视频或文件" @click="openFiles">＋</button>
         <input ref="fileRef" type="file" multiple hidden @change="onFiles" />
         <!--
           Not disabled while she thinks. That was the single-conversation assumption
@@ -497,10 +496,11 @@
           v-model="draft"
           class="hud-field chat__input"
           type="text"
-          placeholder="问点什么…（Enter 发送）"
+            placeholder="和小夜聊聊…"
           maxlength="2000"
           @paste="onPaste"
         />
+          <button class="hud-btn chat__talk" type="button" :disabled="voice.loading || busy" :title="talkTitle" @click="talk">{{ voice.loading ? '准备中' : listening ? '聆听中…' : '语音' }}</button>
         <button v-if="runningTask" class="hud-btn hud-btn--warn" type="button" title="掐掉这一轮" @click="stop">
           停止
         </button>
@@ -1040,6 +1040,7 @@ async function loadCurrent(): Promise<void> {
  * windows start disagreeing about what was said. One component, one state, two sizes.
  */
 const expanded = ref(false)
+const optionsOpen = ref(false)
 const sessions = ref<SessionInfo[]>([])
 const activeSession = ref('')
 const railError = ref('')
@@ -1568,7 +1569,6 @@ const loaderKind = computed(() => {
   const wanted = String(voice.thinkingLoader || 'dots')
   return LOADER_KINDS.includes(wanted) ? wanted : 'dots'
 })
-const canTalk = computed(() => voice.enabled && !busy.value)
 
 /** The answer still arriving in this tab, or null for a tab that is only thinking. */
 const streamed = computed(() => {
@@ -1699,6 +1699,10 @@ watch(logExtent, () => {
 })
 
 async function talk(): Promise<void> {
+  if (!voice.enabled) {
+    await voice.enable()
+    if (!voice.enabled) return
+  }
   await voice.talk()
   await scrollToEnd()
 }

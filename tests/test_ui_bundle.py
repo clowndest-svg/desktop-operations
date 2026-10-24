@@ -441,7 +441,7 @@ class TestTheAlertChipIsReachable:
     def test_the_chip_is_a_button_that_emits(self) -> None:
         bar = _page("components/TopBar.vue")
         assert "@click=\"emit('alerts')\"" in bar, "顶栏那颗 chip 又变回不能点的 span 了"
-        assert "(e: 'alerts'): void" in bar, "没声明的事件名，Vue 只会静默丢掉"
+        assert "'alerts'" in bar.split("type Feature =")[1].split("type Entry")[0]
 
     def test_the_shell_mounts_the_popup_it_opens(self) -> None:
         app = _page("App.vue")
@@ -552,9 +552,9 @@ class TestTheImagePanelIsReachable:
 
     def test_the_top_bar_has_a_door_and_the_shell_opens_the_popup(self) -> None:
         bar = _page("components/TopBar.vue")
-        assert "@click=\"emit('images')\"" in bar, "顶栏那颗按钮点了没事件"
-        assert "(e: 'images'): void" in bar, "没声明的事件名，Vue 只会静默丢掉"
-        assert "生图" in bar
+        assert "label: '画图'" in bar and "event: 'images'" in bar
+        assert "choose(item.event)" in bar and "emit(event)" in bar
+        assert "'images'" in bar.split("type Feature =")[1].split("type Entry")[0]
         app = _page("App.vue")
         assert '@images="imagesOpen = true"' in app, "事件发出来了，没人接"
         assert '<ImagePopup :open="imagesOpen"' in app, "接了，但没有那张弹窗"

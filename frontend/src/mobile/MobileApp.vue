@@ -1,10 +1,11 @@
 <template>
-  <div class="app" :class="{ 'app--kb': keyboardOpen }">
+  <div class="app" :class="{ 'app--kb': keyboardOpen, 'app--large': workspace.reading.fontSize === 'large', 'app--compact': workspace.reading.compact }">
+    <div class="mobile-portrait-backdrop" aria-hidden="true"><MoonPortrait /></div>
     <div v-if="drawer" class="scrim" @click="drawer = false" />
 
     <aside class="drawer" :class="{ 'drawer--on': drawer }">
       <div class="drawer__head">
-        <span class="drawer__brand">小夜</span>
+        <span class="drawer__brand"><img :src="brandLogo" alt="小夜" width="42" height="42" />小夜</span>
         <button class="icon" type="button" aria-label="关闭" @click="drawer = false">
           <svg viewBox="0 0 24 24" width="18" height="18">
             <path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
@@ -12,16 +13,24 @@
         </button>
       </div>
 
-      <button class="drawer__new" type="button" :disabled="!link || busy" @click="newSession">
+      <button class="drawer__new" type="button" :disabled="!ready || busy" @click="newSession">
         <svg viewBox="0 0 24 24" width="16" height="16">
           <path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
         </svg>
         开一段新的
       </button>
 
-      <p v-if="!link" class="drawer__empty">
-        会话存在电脑上。连上电脑之后，这里会列出你和她聊过的每一段。
-      </p>
+      <template v-if="!link">
+        <input v-model="sessionQuery" class="local-search" type="search" aria-label="搜索手机会话" placeholder="搜索标题和聊天内容" />
+        <div class="session-filters"><button type="button" :aria-pressed="!showArchive" @click="showArchive = false">最近会话</button><button type="button" :aria-pressed="showArchive" @click="showArchive = true">归档 {{ workspace.sessions.filter(s => s.archived).length }}</button></div>
+        <ul class="drawer__list">
+          <li v-for="row in localSessions" :key="row.id" class="local-session">
+            <button type="button" :disabled="busy" :class="{ 'is-on': row.id === workspace.active }" @click="openLocalSession(row.id)"><span class="drawer__title">{{ row.pinned ? '置顶 · ' : '' }}{{ row.title }}</span><span class="drawer__meta">{{ row.turns.length }} 条 · {{ presetName(row.preset) }}</span></button>
+            <div class="local-session__tools"><button type="button" :disabled="busy" @click="pinSession(row.id)">{{ row.pinned ? '取消置顶' : '置顶' }}</button><button type="button" :disabled="busy" @click="renameSession(row.id)">重命名</button><button type="button" :disabled="busy" @click="archiveSession(row.id)">{{ row.archived ? '移出归档' : '归档' }}</button><button type="button" :disabled="busy" @click="deleteSession(row.id)">删除</button></div>
+          </li>
+          <li v-if="!localSessions.length" class="drawer__empty">没有找到匹配的手机会话</li>
+        </ul>
+      </template>
       <ul v-else class="drawer__list">
         <li v-for="row in sessions" :key="row.id">
           <button
@@ -37,6 +46,8 @@
       </ul>
 
       <div class="drawer__foot">
+        <button class="ghost" type="button" @click="drawer = false; chatSearch = !chatSearch">搜索本段聊天</button>
+        <button class="ghost" type="button" @click="drawer = false; workbench = true">AI 工作台 · 收藏与备份</button>
         <button v-if="!link" class="ghost" type="button" @click="drawer = false; sheet = 'connect'">
           连电脑
         </button>
@@ -55,6 +66,7 @@
       </button>
 
       <div class="top__mid">
+        <img class="top__logo" :src="brandLogo" alt="小夜 AI 语音助手" width="36" height="36" />
         <strong class="top__name">{{ title }}</strong>
         <span class="top__sub" :class="{ 'top__sub--live': link }">{{ subtitle }}</span>
       </div>
@@ -108,10 +120,11 @@
          那两个入口又因为没连电脑而不显示 —— 结果是"装上了但找不到语音"。
          一句话里说清，再给一个直达配对的入口，比让人自己翻设置强。 -->
     <button v-if="!link" class="banner" type="button" @click="sheet = 'connect'">
-      独立模式只能打字聊天。<strong>语音通话和音色也要连上电脑</strong>才能用 ——
+      独立模式支持聊天、拍照和 AI 工作台。<strong>语音通话和音色要连上电脑</strong>才能用 ——
       手机和电脑连同一个 Wi-Fi，在电脑上打开「手机接入」。<em>点这里去连接</em>
     </button>
 
+    <div v-if="chatSearch" class="chat-search" role="search" aria-label="搜索本段聊天"><input v-model="messageQuery" type="search" aria-label="聊天关键词" placeholder="在本段聊天中查找" /><span aria-live="polite">{{ matches.length ? matchCursor + 1 : 0 }}/{{ matches.length }}</span><button type="button" :disabled="!matches.length" aria-label="上一个结果" @click="jumpMatch(-1)">↑</button><button type="button" :disabled="!matches.length" aria-label="下一个结果" @click="jumpMatch(1)">↓</button><button type="button" aria-label="关闭聊天搜索" @click="chatSearch = false; messageQuery = ''">×</button></div>
     <main ref="scroller" class="stream" @scroll.passive="onScroll">
       <section v-if="!turns.length" class="hello">
         <div class="hello__orb" aria-hidden="true" />
@@ -124,6 +137,7 @@
           }}
         </p>
         <div class="hello__ideas">
+          <button type="button" :disabled="busy || !ready" @click="workbench = true">✦ 打开 AI 工作台</button>
           <button v-for="idea in ideas" :key="idea" type="button" :disabled="busy" @click="ask(idea)">
             {{ idea }}
           </button>
@@ -136,10 +150,22 @@
         :turn="shown(turn, index)"
         :streaming="index === streaming"
         :can-regenerate="!busy && turn.role === 'assistant' && hasAskBefore(index)"
+        :disabled="busy"
+        :data-message-index="index"
+        :class="{ 'search-match': chatSearch && matches[matchCursor] === index }"
+        :saved="workspace.saved.some(item => item.text === turn.text)"
         @skip="reveal.skip()"
         @speak="speakTurn(index)"
         @regenerate="regenerate(index)"
         @remove="drop(index)"
+        @save="saveAnswer(index)"
+        @followup="followup(index)"
+        @edit="editQuestion(index)"
+        @quote="quoteTurn(index)"
+        @branch="branchTurn(index)"
+        @note="noteFromTurn(index)"
+        @shorten="transformTurn(index, 'shorten')"
+        @checklist="transformTurn(index, 'checklist')"
       />
 
       <p v-if="busy && streaming < 0" class="thinking">
@@ -169,6 +195,8 @@
       </svg>
     </button>
 
+    <div v-if="pendingDocument" class="document-attach"><span>资料 · {{ pendingDocument.name }} · {{ pendingDocument.text.length.toLocaleString() }} 字</span><button type="button" @click="pendingDocument = null">移除</button></div>
+    <input ref="documentInput" type="file" class="hidden-file" accept=".txt,.md,.csv,.json,.log,.ts,.js,.py,.html,.css" @change="readDocument" />
     <div v-if="pending" class="attach">
       <img :src="pending.data" alt="要一起发出去的照片" />
       <span>会跟着下一句一起发出去</span>
@@ -177,6 +205,8 @@
 
     <footer class="dock">
       <div v-if="tray" class="tray">
+        <button type="button" :disabled="busy || !ready" @click="workbench = true; tray = false">✦ AI 工作台</button>
+        <button type="button" :disabled="busy || !ready" @click="chooseDocument">▤ 读文件</button>
         <button type="button" :disabled="busy" @click="shoot('camera')">
           <svg viewBox="0 0 24 24" width="20" height="20">
             <path d="M4 8.5h3l1.5-2h7L17 8.5h3v10H4z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" />
@@ -227,6 +257,7 @@
           v-model="draft"
           class="dock__input"
           rows="1"
+          maxlength="40000"
           enterkeyhint="send"
           :placeholder="busy ? '等她答完这一句' : '想问什么'"
           @input="grow"
@@ -249,10 +280,10 @@
           停止
         </button>
         <button
-          v-else-if="draft.trim() || pending"
+          v-else-if="draft.trim() || pending || pendingDocument"
           class="dock__send"
           type="button"
-          :disabled="busy"
+          :disabled="busy || !ready"
           aria-label="发送"
           @click="submit"
         >
@@ -287,6 +318,11 @@
         {{ toast.text }}
       </p>
     </Transition>
+
+    <WorkspacePanel v-if="workbench" :workspace="workspace" :busy="busy || !ready" :connected="Boolean(link)" :current-instruction="activeLocal.instruction" @close="workbench = false" @assistant="startAssistant" @instruction="saveInstruction" @reuse="reuseSaved" @unsave="unsaveAnswer" @export-answer="exportAnswer" @export-chat="exportChat" @backup="exportBackup" @restore="restoreBackup" @document="chooseDocument" @save-prompt="savePrompt" @remove-prompt="removePrompt" @save-note="saveNote" @remove-note="removeNote" @attach-note="attachNote" @export-note="exportNote" @reading="saveReading" />
+
+    <div v-if="renaming" class="scrim scrim--solid" @click="renaming = ''" />
+    <form v-if="renaming" class="gate" role="dialog" aria-modal="true" aria-label="重命名会话" @submit.prevent="finishRename"><label class="field"><span>会话名称</span><input v-model="renameText" maxlength="80" aria-label="会话名称" /></label><div class="gate__row"><button class="ghost" type="button" @click="renaming = ''">取消</button><button class="gate__go" type="submit" :disabled="!renameText.trim()">保存名称</button></div></form>
 
     <!-- 两块整屏。通话垫在最前（它是"正在发生的事"），音色在它下面。 -->
     <VoicePanel v-if="link && stage === 'voice'" :link="link" @close="stage = ''" @changed="onVoiceChanged" />
@@ -493,7 +529,8 @@
 
         <div class="card">
           <h3>对话</h3>
-          <button class="wide wide--bad" type="button" @click="clearHistory">清空这台手机上的对话</button>
+          <button class="wide" type="button" @click="sheet = ''; workbench = true">AI 工作台、收藏与备份</button>
+          <button class="wide wide--bad" type="button" :disabled="busy" @click="clearHistory">清空当前显示的对话</button>
           <p class="hint">清的是手机本机那一份。电脑上的历史要回电脑上删。</p>
         </div>
 
@@ -561,6 +598,8 @@
 </template>
 
 <script setup lang="ts">
+import brandLogo from '@/assets/brand/logo.webp'
+import MoonPortrait from '@/avatar/MoonPortrait.vue'
 /**
  * 手机版的主界面：一列、拇指够得着、说话键在右下角。
  *
@@ -615,8 +654,194 @@ import { XySpeech, speakable } from './speech'
 import { useReveal } from './typewriter'
 import { dismissKeyboard, installViewport, keyboardOpen } from './viewport'
 import VoicePanel from './VoicePanel.vue'
+import WorkspacePanel from './WorkspacePanel.vue'
+import { Preferences } from '@capacitor/preferences'
+import { saveText } from './files'
+import { PRESETS, MAX_SESSIONS, MAX_SAVED, MAX_BACKUP_BYTES, MAX_DOCUMENT_BYTES, MAX_TEXT, uid, createSession, forkSession, emptyWorkspace, parseWorkspace, backupWorkspace, searchSessions, sessionMarkdown, documentText, questionWithDocument, type Workspace, type SavedAnswer } from './workspace'
+import { MAX_NOTES, MAX_PROMPTS, matchingMessages, type NotebookEntry, type PromptTemplate, type ReadingPreferences } from './productivity'
 
 const HISTORY_CAP = 60
+const WORKSPACE_KEY = 'xiaoye.workspace.v1'
+const workspace = ref<Workspace>(emptyWorkspace())
+const ready = ref(false)
+const workbench = ref(false)
+const sessionQuery = ref('')
+const showArchive = ref(false)
+const activeLocal = computed(() => workspace.value.sessions.find(s => s.id === workspace.value.active)!)
+const localSessions = computed(() => searchSessions(workspace.value.sessions.filter(s => s.archived === showArchive.value), sessionQuery.value))
+const documentInput = ref<HTMLInputElement | null>(null)
+const pendingDocument = ref<{ name: string; text: string } | null>(null)
+const renaming = ref(''), renameText = ref('')
+let writes: Promise<boolean> = Promise.resolve(true)
+function persistWorkspace(): Promise<boolean> {
+  let value: string
+  try { value = backupWorkspace(workspace.value) }
+  catch (error) { note(`手机工作区没有保存：${String(error)}。请导出当前对话并清理较早内容`, true); return Promise.resolve(false) }
+  writes = writes.then(async () => { await Preferences.set({ key: WORKSPACE_KEY, value }); return true }).catch(error => { note(`手机内容未保存，请导出备份：${String(error)}`, true); return false })
+  return writes
+}
+async function persistHistory(): Promise<void> {
+  if (link.value) { try { await appendHistory(turns.value) } catch (error) { note(`手机历史缓存没有保存：${String(error)}`, true) }; return }
+  activeLocal.value.turns = turns.value.map(t => ({ ...t }))
+  if (activeLocal.value.title === '新的对话') activeLocal.value.title = turns.value.find(t => t.role === 'user')?.text.slice(0, 36) || '新的对话'
+  activeLocal.value.updated = Date.now()
+  await persistWorkspace()
+}
+function presetName(id: string): string { return PRESETS.find(p => p.id === id)?.name || '日常助手' }
+async function savePrompt(prompt: PromptTemplate): Promise<void> {
+  if (busy.value || !ready.value) return
+  if (!prompt.id && workspace.value.prompts.length >= MAX_PROMPTS) { note('自建提示词最多 50 条', true); return }
+  const next = { ...prompt, id: prompt.id || uid() }
+  const index = workspace.value.prompts.findIndex(p => p.id === next.id)
+  if (index < 0) workspace.value.prompts.unshift(next); else workspace.value.prompts[index] = next
+  if (await persistWorkspace()) note('提示词已保存')
+}
+async function removePrompt(id: string): Promise<void> {
+  if (busy.value || !await approve('删除这条自建提示词？')) return
+  workspace.value.prompts = workspace.value.prompts.filter(p => p.id !== id); await persistWorkspace()
+}
+async function saveNote(entry: NotebookEntry): Promise<void> {
+  if (busy.value || !ready.value) return
+  if (!entry.id && workspace.value.notes.length >= MAX_NOTES) { note('笔记和待办最多 100 条', true); return }
+  const next = { ...entry, id: entry.id || uid(), updated: Date.now() }
+  const index = workspace.value.notes.findIndex(n => n.id === next.id)
+  if (index < 0) workspace.value.notes.unshift(next); else workspace.value.notes[index] = next
+  if (await persistWorkspace()) note('笔记已保存')
+}
+async function removeNote(id: string): Promise<void> {
+  if (busy.value || !await approve('删除这条笔记或待办？请先导出需要保留的内容。')) return
+  workspace.value.notes = workspace.value.notes.filter(n => n.id !== id); await persistWorkspace()
+}
+function attachNote(entry: NotebookEntry): void {
+  if (busy.value) return
+  pendingDocument.value = { name: `${entry.title}.md`, text: entry.text || entry.title }
+  workbench.value = false; note('笔记已作为资料添加，发送时才交给模型')
+}
+function exportNote(entry: NotebookEntry): void { void exportFile(`小夜-${entry.title.replace(/[<>:"/\\|?*\r\n]/g, '_')}.md`, `# ${entry.title}\n\n${entry.text}\n\n标签：${entry.tags}\n`, 'text/markdown') }
+async function saveReading(reading: ReadingPreferences): Promise<void> { if (!busy.value && ready.value) { workspace.value.reading = reading; await persistWorkspace() } }
+const chatSearch = ref(false), messageQuery = ref(''), matchCursor = ref(0)
+const matches = computed(() => matchingMessages(turns.value, messageQuery.value))
+async function jumpMatch(direction = 0): Promise<void> {
+  if (!matches.value.length) return
+  matchCursor.value = (matchCursor.value + direction + matches.value.length) % matches.value.length
+  await nextTick()
+  scroller.value?.querySelector(`[data-message-index="${matches.value[matchCursor.value]}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+}
+watch(messageQuery, () => { matchCursor.value = 0; void jumpMatch() })
+async function archiveSession(id: string): Promise<void> { if (busy.value) return; const s = workspace.value.sessions.find(s => s.id === id); if (s) { s.archived = !s.archived; await persistWorkspace() } }
+async function branchTurn(index: number): Promise<boolean> {
+  if (busy.value || !ready.value) return false
+  if (link.value) { note('分支保存在手机本地，请先断开电脑再使用', true); return false }
+  if (workspace.value.sessions.length >= MAX_SESSIONS) { note('最多保留 100 段会话，请先备份整理', true); return false }
+  const next = forkSession(activeLocal.value, index)
+  workspace.value.sessions.push(next); await openLocalSession(next.id); note('已创建独立分支，原会话仍保留'); return true
+}
+function quoteTurn(index: number): void { const turn = turns.value[index]; if (turn && !busy.value) reuseSaved(`引用：\n${turn.text.slice(0, 12000).split('\n').map(line => `> ${line}`).join('\n')}\n\n我的问题：`) }
+function transformTurn(index: number, kind: 'shorten' | 'checklist'): void { const turn = turns.value[index]; if (turn && !busy.value) reuseSaved(`${kind === 'shorten' ? '请用三句话概括以下内容，保留重要事实：' : '请把以下内容转为可执行的行动清单，不补充未知的负责人和时间：'}\n\n${turn.text.slice(0, 24000)}`) }
+async function noteFromTurn(index: number): Promise<void> {
+  const turn = turns.value[index]; if (!turn || busy.value) return
+  if (turn.text.length > 24000) { note('回答超过笔记 24000 字限制，请先导出或分段保存', true); return }
+  await saveNote({ id: '', title: turn.text.replace(/\s+/g, ' ').slice(0, 40) || '聊天笔记', text: turn.text, tags: '来自聊天', kind: 'note', done: false, pinned: false, updated: 0 })
+}
+async function openLocalSession(id: string): Promise<void> {
+  if (busy.value || link.value || !ready.value) return
+  const next = workspace.value.sessions.find(s => s.id === id)
+  if (!next) return
+  workspace.value.active = id
+  turns.value = next.turns.map(t => ({ ...t }))
+  draft.value = next.draft; pending.value = null; pendingDocument.value = null
+  chatSearch.value = false; messageQuery.value = ''
+  drawer.value = false
+  await persistWorkspace(); await nextTick(); grow(); await scroll()
+}
+async function startAssistant(preset = 'general'): Promise<void> {
+  if (busy.value || link.value || !ready.value) return
+  if (workspace.value.sessions.length >= MAX_SESSIONS) { note('最多保留 100 段手机会话，请先备份并删除不需要的会话', true); return }
+  const next = createSession(preset)
+  workspace.value.sessions.push(next)
+  await openLocalSession(next.id)
+  workbench.value = false
+  draft.value = PRESETS.find(p => p.id === preset)?.starter || ''
+  await nextTick(); grow()
+}
+async function pinSession(id: string): Promise<void> {
+  if (busy.value) return
+  const s = workspace.value.sessions.find(s => s.id === id)
+  if (s) { s.pinned = !s.pinned; await persistWorkspace() }
+}
+function renameSession(id: string): void {
+  if (busy.value) return
+  renaming.value = id
+  renameText.value = workspace.value.sessions.find(s => s.id === id)?.title || ''
+}
+async function finishRename(): Promise<void> {
+  const s = workspace.value.sessions.find(s => s.id === renaming.value)
+  if (s && renameText.value.trim()) { s.title = renameText.value.trim().slice(0, 80); await persistWorkspace() }
+  renaming.value = ''
+}
+async function deleteSession(id: string): Promise<void> {
+  if (busy.value || !await approve('删除这段手机会话？这一步无法撤销，已收藏的回答会保留。')) return
+  workspace.value.sessions = workspace.value.sessions.filter(s => s.id !== id)
+  if (!workspace.value.sessions.length) workspace.value.sessions.push(createSession())
+  if (workspace.value.active === id) { workspace.value.active = workspace.value.sessions[0]!.id; turns.value = activeLocal.value.turns.map(t => ({ ...t })); draft.value = activeLocal.value.draft; pending.value = null; pendingDocument.value = null }
+  await persistWorkspace()
+}
+async function saveInstruction(text: string): Promise<void> {
+  if (busy.value || link.value) return
+  activeLocal.value.instruction = text.slice(0, 2000)
+  if (await persistWorkspace()) note('当前会话指令已保存，下一条消息生效')
+}
+async function saveAnswer(index: number): Promise<void> {
+  if (busy.value) return
+  const turn = turns.value[index]
+  if (!turn || !turn.text || workspace.value.saved.some(s => s.text === turn.text)) return
+  if (workspace.value.saved.length >= MAX_SAVED) { note('最多收藏 200 条，请先导出或移除部分收藏', true); return }
+  const question = turns.value.slice(0, index).reverse().find(t => t.role === 'user')?.text || ''
+  workspace.value.saved.unshift({ id: uid(), text: turn.text.slice(0, MAX_TEXT), question: question.slice(0, MAX_TEXT), source: title.value.slice(0, 80), at: Date.now() })
+  if (await persistWorkspace()) note('已加入工作台收藏')
+}
+async function unsaveAnswer(id: string): Promise<void> { workspace.value.saved = workspace.value.saved.filter(s => s.id !== id); await persistWorkspace() }
+function reuseSaved(text: string): void { if (busy.value) return; draft.value = text; workbench.value = false; sheet.value = ''; void nextTick().then(grow) }
+function editQuestion(index: number): void { const turn = turns.value[index]; if (!turn || busy.value) return; reuseSaved(turn.text.replace(/\s*📷$/, '')); note('已放入输入框，修改后会作为新问题发送') }
+function followup(index: number): void { const turn = turns.value[index]; if (!turn || busy.value) return; reuseSaved(`针对这段回答，请进一步解释并举例：\n\n${turn.text.slice(0, 4000)}`) }
+function chooseDocument(): void { if (busy.value) return; workbench.value = false; tray.value = false; sheet.value = ''; documentInput.value?.click() }
+async function readDocument(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement, file = input.files?.[0]
+  input.value = ''
+  if (!file || busy.value) return
+  try {
+    if (file.size > MAX_DOCUMENT_BYTES) throw new Error('资料最多 128 KB，请拆成小段')
+    pendingDocument.value = documentText(file.name, file.size, await file.text())
+    note('资料已添加，发送问题时才交给模型阅读')
+  } catch (error) { note(error instanceof Error ? error.message : String(error), true) }
+}
+async function exportFile(name: string, text: string, mime: string): Promise<void> {
+  try { note(await saveText(name, text, mime) ? '导出已完成' : '已取消保存') }
+  catch (error) { note(error instanceof Error ? error.message : String(error), true) }
+}
+function exportChat(): void { if (!busy.value) void exportFile('小夜-对话.md', sessionMarkdown({ title: title.value, turns: turns.value }), 'text/markdown') }
+function exportAnswer(answer: SavedAnswer): void { void exportFile('小夜-收藏.md', `# ${answer.source}\n\n${answer.question}\n\n${answer.text}\n`, 'text/markdown') }
+function exportBackup(): void {
+  if (busy.value) return
+  try { void exportFile('小夜-手机备份.json', backupWorkspace(workspace.value), 'application/json') }
+  catch (error) { note(error instanceof Error ? error.message : String(error), true) }
+}
+async function restoreBackup(file: File): Promise<void> {
+  if (busy.value || link.value) return
+  try {
+    if (file.size > MAX_BACKUP_BYTES) throw new Error('备份不能超过 8 MB')
+    const restored = parseWorkspace(await file.text())
+    if (!await approve(`已检查备份：${restored.sessions.length} 段会话、${restored.saved.length} 条收藏、${restored.notes.length} 条笔记、${restored.prompts.length} 条提示词。恢复将替换当前手机内容，确定继续？`)) return
+    if (busy.value || link.value) return
+    await writes
+    await Preferences.set({ key: WORKSPACE_KEY, value: JSON.stringify(restored) })
+    workspace.value = restored
+    ready.value = true
+    turns.value = activeLocal.value.turns.map(t => ({ ...t }))
+    pendingDocument.value = null; pending.value = null; draft.value = activeLocal.value.draft
+    note('手机内容已恢复'); await scroll()
+  } catch (error) { note(error instanceof Error ? error.message : String(error), true) }
+}
 
 const turns = ref<Turn[]>([])
 const draft = ref('')
@@ -836,7 +1061,9 @@ function onStreamDelta(delta: Delta): void {
 /** 收尾：以最终文本为准（取消时就是已经吐出来的那半句）。 */
 async function endLive(reply: string): Promise<void> {
   const at = live.value
-  const text = reply || liveText.value
+  const fullText = reply || liveText.value
+  const text = fullText.slice(0, MAX_TEXT)
+  if (fullText.length > MAX_TEXT) note('回答超过 40000 字，本机保留前 40000 字，请拆成小问题继续', true)
   live.value = -1
   streaming.value = -1
   if (at >= 0 && at < turns.value.length) {
@@ -844,7 +1071,7 @@ async function endLive(reply: string): Promise<void> {
   } else if (text) {
     turns.value = withTurn(turns.value, { role: 'assistant', text, at: Date.now() })
   }
-  await appendHistory(turns.value)
+  await persistHistory()
   await scroll()
 }
 
@@ -864,7 +1091,7 @@ const IDEAS_PC = ['这台电脑现在怎么样', '提醒我 10 分钟后喝水',
 const ideas = computed(() => (link.value ? IDEAS_PC : IDEAS_CHAT))
 
 const title = computed(() => {
-  if (!link.value) return '小夜'
+  if (!link.value) return activeLocal.value.title === '新的对话' ? presetName(activeLocal.value.preset) : activeLocal.value.title
   const row = sessions.value.find((item) => item.id === currentSession.value)
   return row?.title || '小夜'
 })
@@ -933,10 +1160,10 @@ function withTurn(list: Turn[], turn: Turn): Turn[] {
   return [...list, turn].slice(-HISTORY_CAP)
 }
 
-async function push(role: Turn['role'], text: string, withPhoto = false): Promise<void> {
+async function push(role: Turn['role'], text: string, withPhoto = false, context?: string): Promise<void> {
   const body = withPhoto ? `${text} 📷` : text
-  turns.value = withTurn(turns.value, { role, text: body, at: Date.now() })
-  await appendHistory(turns.value)
+  turns.value = withTurn(turns.value, { role, text: body, at: Date.now(), ...(context ? { context } : {}) })
+  await persistHistory()
   await scroll()
 }
 
@@ -953,28 +1180,34 @@ async function answer(text: string, attachments: Attachment[]): Promise<string> 
   // 独立模式走工具环：她在这台手机上能动的那些事，只有这一条路能真正落到原生层。
   // 遥控模式**不带**工具环——电脑上的那个 agent 够不到这台手机，把工具清单发过去
   // 只会让她答应做一件做不到的事（"我帮你把手机音量调大了"然后什么都没发生）。
-  return askAgent(requestHistory(turns.value, text), cfg.value, attachments, approve, {
+  const instruction = [PRESETS.find(p => p.id === activeLocal.value.preset)?.instruction, activeLocal.value.instruction].filter(Boolean).join('\n\n')
+  return askAgent(requestHistory(turns.value, text, workspace.value.reading.context), cfg.value, attachments, approve, {
     onAction: record,
     onNote: (message) => note(message),
     onDelta: live.value >= 0 ? onStreamDelta : undefined,
-  })
+    toolsEnabled: workspace.value.reading.tools,
+  }, instruction)
 }
 
 /** 一条她的回答上屏：先挂空壳，再逐字填，最后落历史。 */
 async function show(reply: string): Promise<void> {
+  if (reply.length > MAX_TEXT) { note('回答超过 40000 字，本机保留前 40000 字，请拆成小问题继续', true); reply = reply.slice(0, MAX_TEXT) }
   turns.value = withTurn(turns.value, { role: 'assistant', text: reply, at: Date.now() })
   streaming.value = turns.value.length - 1
   await scroll()
   await reveal.start(reply)
   streaming.value = -1
-  await appendHistory(turns.value)
+  await persistHistory()
   await scroll()
 }
 
 async function submit(): Promise<void> {
   const typed = draft.value.trim()
   const shot = pending.value
-  if ((!typed && !shot) || busy.value) return
+  const document = pendingDocument.value
+  if ((!typed && !shot && !document) || busy.value || !ready.value) return
+  const question = questionWithDocument(typed || (shot ? '这张图里是什么？说重点。' : ''), document)
+  if (question.length > MAX_TEXT) { note('问题和资料合计不能超过 40000 字，请缩短后重试', true); return }
   // busy 必须**同步**置位。原来那句 `await nextTick()` 夹在"检查 busy"和"置 busy"之间，
   // 而只要让出一次执行权，快速双击（或者推荐问题＋回车）就能两次都通过检查——
   // 两条并发的问答会往同一个气泡里写字，看起来就是"她的回答串了"。
@@ -988,11 +1221,13 @@ async function submit(): Promise<void> {
   const attachments: Attachment[] = shot ? [shot] : []
   draft.value = ''
   pending.value = null
+  pendingDocument.value = null
   tray.value = false
   await nextTick()
   grow()
   // 图不进历史：一张 300 KB 的 data URL 存 60 条就是 18 MB，而手机上根本不需要重放它。
-  await push('user', typed || '（看这张图）', Boolean(attachments.length))
+  const display = document ? `${typed || '请总结这份资料的重点。'}\n\n📄 ${document.name}` : question
+  await push('user', display, Boolean(attachments.length), document ? question : undefined)
   // 只有独立模式挂空气泡：遥控模式下答案在电脑上整段生成，这边挂个空壳
   // 只会得到一个"她在慢慢说"的假象——那是最骗人的一种等待。
   if (!link.value) beginLive()
@@ -1000,7 +1235,7 @@ async function submit(): Promise<void> {
   let problem = ''
   startStall()
   try {
-    reply = await answer(typed || '这张图里是什么？说重点。', attachments)
+    reply = await answer(question, attachments)
   } catch (err) {
     problem = err instanceof Error ? err.message : String(err)
   }
@@ -1046,7 +1281,7 @@ async function speakTurn(index: number): Promise<void> {
 }
 
 /**
- * 重来：把这条答案连同它之后的全砍掉，拿同一个问题再问一次。
+ * 独立模式重问会创建分支，保留原会话；电脑模式只追加一次提问。
  *
  * 连电脑时这一问会**真的再问一次**，电脑那边也就真的多记一轮 —— 这是实话，
  * 手机上不假装"我帮你把电脑上那条撤回了"（`chat_delete` 不在白名单里，
@@ -1057,20 +1292,25 @@ async function regenerate(index: number): Promise<void> {
   let askText = ''
   for (let i = index - 1; i >= 0; i -= 1) {
     if (turns.value[i].role === 'user') {
-      askText = turns.value[i].text.replace(/\s*📷$/, '')
+      askText = turns.value[i].context || turns.value[i].text.replace(/\s*📷$/, '')
       break
     }
   }
   if (!askText) return
+  if (/📷\s*$/.test(turns.value.slice(0, index).reverse().find(t => t.role === 'user')?.text || '')) { note('图片不保留在历史中，请重新选图后发送，才能再次看图回答', true); return }
   reveal.cancel()
   streaming.value = -1
-  turns.value = turns.value.slice(0, index)
-  await appendHistory(turns.value)
+  if (!link.value) { if (!await branchTurn(index - 1)) return }
+  else if (!await approve('将在电脑当前会话中重新提问，电脑原记录会保留。继续？')) return
   busy.value = true
   try {
+    await persistHistory()
+    if (!link.value) beginLive()
     const reply = await answer(askText, [])
-    await show(reply)
+    if (live.value >= 0) await endLive(reply)
+    else await show(reply)
   } catch (err) {
+    if (live.value >= 0) await endLive('')
     note(err instanceof Error ? err.message : String(err), true)
   } finally {
     busy.value = false
@@ -1078,12 +1318,14 @@ async function regenerate(index: number): Promise<void> {
 }
 
 async function drop(index: number): Promise<void> {
+  if (busy.value) return
+  if (!await approve(link.value ? '仅从手机当前视图移除这条消息，电脑记录仍保留。继续？' : '删除这条手机消息？此操作无法撤销。')) return
   if (index === streaming.value) {
     reveal.cancel()
     streaming.value = -1
   }
   turns.value = turns.value.filter((_, i) => i !== index)
-  await appendHistory(turns.value)
+  await persistHistory()
   note('删掉了这一条')
 }
 
@@ -1131,7 +1373,9 @@ async function openSession(id: string): Promise<void> {
 
 async function newSession(): Promise<void> {
   const bound = link.value
-  if (!bound || busy.value) return
+  if (busy.value || !ready.value) return
+  if (!bound) { await startAssistant('general'); draft.value = ''; await nextTick(); grow(); return }
+  busy.value = true
   try {
     await pcCall<PcSessionList>(bound, 'chat_new_session')
     turns.value = []
@@ -1141,6 +1385,8 @@ async function newSession(): Promise<void> {
     note('已开一段新的（电脑那边那几段还在）')
   } catch (err) {
     note(err instanceof Error ? err.message : String(err), true)
+  } finally {
+    busy.value = false
   }
 }
 
@@ -1262,10 +1508,11 @@ async function tryModel(): Promise<void> {
 }
 
 async function clearHistory(): Promise<void> {
+  if (busy.value || !await approve('清空当前显示的对话？手机独立会话会清空，电脑原始历史不会被删除。')) return
   reveal.cancel()
   streaming.value = -1
   turns.value = []
-  await appendHistory([])
+  await persistHistory()
   note('这台手机上的对话已清空')
 }
 
@@ -1306,10 +1553,16 @@ async function pair(): Promise<void> {
       device: pcForm.device || '手机',
     })
     link.value = bound
+    turns.value = []
+    pending.value = null; pendingDocument.value = null; draft.value = ''
     await savePc(bound)
     sheet.value = ''
     note(`连上了 ${bound.name}`)
     await loadSessions()
+    if (currentSession.value) {
+      busy.value = false
+      await openSession(currentSession.value)
+    }
   } catch (err) {
     note(err instanceof Error ? err.message : String(err), true)
   } finally {
@@ -1318,9 +1571,12 @@ async function pair(): Promise<void> {
 }
 
 async function unlink(): Promise<void> {
+  if (busy.value) return
   link.value = null
   sessions.value = []
   currentSession.value = ''
+  turns.value = activeLocal.value.turns.map(t => ({ ...t }))
+  draft.value = activeLocal.value.draft; pending.value = null; pendingDocument.value = null
   await savePc(null)
   sheet.value = ''
   note('已断开这台电脑，回到独立模式')
@@ -1335,6 +1591,14 @@ watch([handsFree, speakBack], async ([free, back]) => {
 watch(drawer, (open) => {
   if (open && link.value) void loadSessions()
 })
+let draftTimer: ReturnType<typeof setTimeout> | undefined
+watch(draft, (text) => {
+  if (!ready.value || link.value) return
+  activeLocal.value.draft = text.slice(0, MAX_TEXT)
+  clearTimeout(draftTimer)
+  draftTimer = setTimeout(() => { void persistWorkspace() }, 350)
+}, { flush: 'sync' })
+function flushDraft(): void { clearTimeout(draftTimer); if (ready.value) void persistWorkspace() }
 
 /**
  * 打开通话页。
@@ -1380,6 +1644,7 @@ onMounted(async () => {
   teardown = installViewport()
   window.addEventListener('online', onNetBack)
   window.addEventListener('offline', onNetGone)
+  window.addEventListener('pagehide', flushDraft)
   applyAppearance()
   const startupWarnings: string[] = []
   try { cfg.value = await loadModel() }
@@ -1387,15 +1652,28 @@ onMounted(async () => {
   Object.assign(form, cfg.value)
   try { link.value = await loadPc() }
   catch (error) { startupWarnings.push(error instanceof Error ? error.message : '电脑配对配置读取失败') }
+  try {
+    const stored = (await Preferences.get({ key: WORKSPACE_KEY })).value
+    workspace.value = stored ? parseWorkspace(stored) : emptyWorkspace(link.value ? [] : await loadHistory())
+    if (!stored) await Preferences.set({ key: WORKSPACE_KEY, value: backupWorkspace(workspace.value) })
+  } catch (error) {
+    startupWarnings.push(`手机工作区未能读取，原记录仍保留：${String(error)}`)
+    for (const warning of startupWarnings) note(warning, true)
+    return
+  }
   if (link.value) {
     Object.assign(pcForm, {
       host: link.value.host,
       port: link.value.port,
       pin: link.value.pin,
     })
-    void loadSessions()
+    await loadSessions()
+    if (currentSession.value) await openSession(currentSession.value)
+  } else {
+    turns.value = activeLocal.value.turns.map(t => ({ ...t }))
+    draft.value = activeLocal.value.draft
   }
-  turns.value = await loadHistory()
+  ready.value = true
   for (const warning of startupWarnings) note(warning, true)
   ledger.value = await loadLedger()
   const wanted = await loadVoiceFlags()
@@ -1407,6 +1685,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  flushDraft()
   if (gate.value) answerGate(false)
   void cancelChat()
   teardown?.()
@@ -1414,11 +1693,23 @@ onBeforeUnmount(() => {
   stopStall()
   window.removeEventListener('online', onNetBack)
   window.removeEventListener('offline', onNetGone)
+  window.removeEventListener('pagehide', flushDraft)
 })
 </script>
 
 <style scoped>
+.session-filters { display:flex; gap:8px; margin:0 16px 8px; } .session-filters button { min-height:40px; padding:8px 12px; color:var(--xy-text-2); font-size:12px; border:1px solid var(--xy-line); border-radius:10px; } .session-filters button[aria-pressed=true] { color:var(--xy-accent); background:var(--xy-accent-soft); }
+.chat-search { display:flex; gap:6px; align-items:center; padding:8px 12px; border-bottom:1px solid var(--xy-line); flex-shrink:0; } .chat-search input { min-width:0; flex:1; padding:10px; border:1px solid var(--xy-line-2); border-radius:10px; background:var(--xy-card); color:var(--xy-text); font:inherit; } .chat-search button { min-width:36px; min-height:44px; color:var(--xy-accent); } .chat-search span { font-size:12px; color:var(--xy-text-2); white-space:nowrap; } .search-match { outline:2px solid var(--xy-accent); border-radius:12px; outline-offset:2px; }
+.app--large :deep(.bubble) { font-size:19px; line-height:1.85; } .app--compact :deep(.acts) { display:none; } .app--compact :deep(.turn:focus-within .acts),.app--compact :deep(.turn--expanded .acts) { display:flex; }
+.hidden-file { display: none; }
+.document-attach { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; padding: 8px 16px; font-size: 12px; color: var(--xy-text-2); background: var(--xy-card); }
+.document-attach span { flex: 1; overflow-wrap: anywhere; }
+.document-attach button { min-height: 44px; color: var(--xy-accent); }
+.local-search { margin: 8px 16px; padding: 12px; min-height: 44px; border: 1px solid var(--xy-line-2); border-radius: 12px; background: var(--xy-card); color: var(--xy-text); width: calc(100% - 32px); box-sizing: border-box; }
+.local-session__tools { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 12px 8px; }
+.local-session__tools button { min-height: 36px; padding: 6px 8px; font-size: 11px; color: var(--xy-text-2); }
 .app {
+  isolation: isolate;
   /* 钉在视口上，用 `bottom` 把键盘那块让出来。
    *
    * 为什么是 fixed 而不是 `height: calc(100% - ...)`：在设置面板里点一个靠底部的
@@ -1744,6 +2035,7 @@ onBeforeUnmount(() => {
 }
 
 .tray {
+  flex-wrap: wrap;
   display: flex;
   gap: 8px;
   padding: 2px 0 10px;
@@ -1870,7 +2162,7 @@ onBeforeUnmount(() => {
   font-size: 13px;
   line-height: 1.5;
   color: var(--xy-text);
-  z-index: 8;
+  z-index: 30;
 }
 
 .toast--bad {
@@ -2006,6 +2298,7 @@ onBeforeUnmount(() => {
 
 .drawer__foot {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 8px;

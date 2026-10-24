@@ -119,12 +119,14 @@ class TestRendering:
         alphas = {rgba[index * 4 + 3] for index in range(64 * 64)}
         assert any(0 < alpha < 255 for alpha in alphas)
 
-    def test_the_mark_is_cyan(self) -> None:
+    def test_the_mark_comes_from_the_supplied_logo(self) -> None:
         rgba = ICON.render_rgba(64)
+        from PIL import Image
+
+        with Image.open(ICON.SOURCE) as source:
+            expected = source.convert("RGBA").resize((64, 64), Image.Resampling.LANCZOS)
         middle = (32 * 64 + 32) * 4
-        red, blue = rgba[middle], rgba[middle + 2]
-        assert blue > red, "the core is a cool light, not a warm one"
-        assert blue > 200 and red < 220
+        assert rgba[middle : middle + 3] == expected.tobytes()[middle : middle + 3]
 
     def test_no_colour_bleeds_into_transparent_pixels(self) -> None:
         """Premultiplied averaging; without it the antialiased rim picks up the

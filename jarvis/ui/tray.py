@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger("jarvis.ui.tray")
@@ -108,6 +109,19 @@ def draw_icon(status: str, *, pixels: int = ICON_PIXELS) -> Any:
     from PIL import Image, ImageDraw
 
     ring_ink, core_ink, hot = _INK.get(status, _INK[STATUS_OFF])
+    logo = Path(__file__).parent / "web" / "favicon.png"
+    if logo.is_file():
+        with Image.open(logo) as source:
+            image = source.convert("RGBA").resize((pixels, pixels), Image.Resampling.LANCZOS)
+        pen = ImageDraw.Draw(image)
+        radius = max(2, pixels // 7)
+        pen.ellipse(
+            (pixels - radius * 2 - 1, pixels - radius * 2 - 1, pixels - 1, pixels - 1),
+            fill=core_ink if hot else ring_ink,
+            outline=(16, 14, 24, 255),
+            width=1,
+        )
+        return image
     image = Image.new("RGBA", (pixels, pixels), (0, 0, 0, 0))
     pen = ImageDraw.Draw(image)
     pen.rounded_rectangle(

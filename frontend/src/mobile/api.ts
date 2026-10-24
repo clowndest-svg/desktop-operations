@@ -53,6 +53,8 @@ export interface ModelConfig {
 export interface Turn {
   role: 'user' | 'assistant'
   text: string
+  /** User-selected document context; displayed as a filename, replayed to the model. */
+  context?: string
   /**
    * 这一轮发生的时间（毫秒）。老记录里没有这个字段，所以是可选的：
    * 缺了就不显示时间，而不是拿 `Date.now()` 补一个假的时间戳 —— 屏幕上写着
@@ -149,7 +151,7 @@ const XyNet = registerPlugin<XyNetPlugin>('XyNet', {
 /** 这一版 App 的版本。必须和 `android/app/build.gradle` 的 versionName 一致，
  * 由 `tests/test_mobile_frontend.py` 盯着：手机上出问题第一句就是"你装的是哪一版"，
  * 而 APK 的图标底下不写这个。 */
-export const APP_VERSION = '0.4.2'
+export const APP_VERSION = '0.6.0'
 
 export const DEFAULT_MODEL: ModelConfig = {
   baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',

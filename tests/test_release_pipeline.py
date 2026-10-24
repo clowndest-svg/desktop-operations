@@ -85,6 +85,19 @@ def test_source_fingerprint_ignores_timestamp_but_not_content(tmp_path: Path) ->
     assert source_fingerprint(tmp_path) != before
 
 
+def test_brand_assets_are_exact_release_inputs(tmp_path: Path) -> None:
+    from scripts.release_manifest import mobile_fingerprint
+
+    image = tmp_path / "frontend/src/assets/brand/portrait.webp"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"RIFF\r\nimage")
+    desktop = source_fingerprint(tmp_path)
+    mobile = mobile_fingerprint(tmp_path)
+    image.write_bytes(b"RIFF\nimage")
+    assert source_fingerprint(tmp_path) != desktop
+    assert mobile_fingerprint(tmp_path) != mobile
+
+
 @pytest.fixture()
 def package_tree(
     tmp_path: Path, delivery: ModuleType, monkeypatch: pytest.MonkeyPatch
