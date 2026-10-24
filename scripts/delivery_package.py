@@ -680,6 +680,8 @@ def sync_buyer_commands(round_name: str) -> None:
     """Update executable hash-check examples, not historical performance notes."""
     valid_round(round_name)
     for name in (*BUYER_DOCS, "03-怎么发给买家.md", "README.md"):
+        if Path(name).suffix != ".md":
+            continue
         path = ROOT / name
         if not path.is_file():
             continue

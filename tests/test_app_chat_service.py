@@ -82,6 +82,24 @@ class TestLifecycle:
 
 
 class TestTurns:
+    @pytest.mark.parametrize("evidence", ["免Key搜索暂不可用：连接失败", "没有搜到结果"])
+    def test_failed_search_is_not_rewritten_as_a_success(
+        self, evidence: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = FakeLlmClient("我查过了，已经确认。")
+        service = _service(client)
+        monkeypatch.setattr(
+            service,
+            "_tool_schemas",
+            lambda *_args: ([{"type": "function", "function": {"name": "search_web"}}], "network"),
+        )
+        monkeypatch.setattr(service, "_invoke", lambda *_args: evidence)
+        reply = service.ask("Please search the web: 美国大学排名和榜单年份")
+        assert "未取得可核对的资料" in reply.answer
+        assert evidence in reply.answer
+        assert "已经确认" not in reply.answer
+        assert client.calls == []
+
     def test_a_question_gets_the_canned_answer(self) -> None:
         client = FakeLlmClient("今天是星期六")
         service = _service(client)

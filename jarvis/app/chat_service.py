@@ -1150,6 +1150,14 @@ class ChatService:
                         text="按你限定的知识库范围，本次检索未命中相关片段。请换更具体的关键词，或先导入相关资料。",
                         cancelled=bool(should_stop and should_stop()),
                     )
+                elif web_evidence and not web_evidence.startswith("联网搜索"):
+                    turn = _Turn(
+                        text=(
+                            "本次联网检索未取得可核对的资料，暂时不能确认最新信息。"
+                            "请换个关键词，或提供具体网页让我读取。\n\n" + web_evidence[:1200]
+                        ),
+                        cancelled=bool(should_stop and should_stop()),
+                    )
                 elif web_evidence.startswith("联网搜索") and tiny_local:
                     turn = _Turn(text=web_evidence, cancelled=bool(should_stop and should_stop()))
                 elif (

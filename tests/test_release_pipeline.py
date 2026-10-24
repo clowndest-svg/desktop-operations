@@ -374,7 +374,10 @@ def test_buyer_commands_follow_the_release_but_history_is_preserved(
         "certutil -hashfile 小夜-电脑+手机-r86.zip SHA256\n历史 r77 速度 3 tok/s\n",
         encoding="utf-8",
     )
+    image = tmp_path / "小夜logo.webp"
+    image.write_bytes(b"RIFF\x90\xffimage")
     delivery.sync_buyer_commands("r87")
+    assert image.read_bytes() == b"RIFF\x90\xffimage"
     text = guide.read_text(encoding="utf-8")
     assert "小夜-电脑+手机-r87.zip" in text
     assert "r86.zip" not in text
