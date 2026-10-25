@@ -35,7 +35,7 @@ import { useSystemStore } from '@/stores/system'
 import { useVoiceStore } from '@/stores/voice'
 
 type Feature = 'settings' | 'activity' | 'alerts' | 'access' | 'phone' | 'mirror'
-  | 'images' | 'videos' | 'assistant' | 'extensions' | 'skin' | 'systems' | 'voiceControls'
+  | 'images' | 'videos' | 'assistant' | 'extensions' | 'skin' | 'systems' | 'voiceControls' | 'portraits'
 type Entry = { label: string; hint: string; event?: Feature; action?: () => Promise<unknown> }
 const emit = defineEmits<{ (event: Feature): void }>()
 const store = useSystemStore()
@@ -61,6 +61,7 @@ const groups: { name: string; items: Entry[] }[] = [
     { label: '系统与工具', hint: '资源、进程、磁盘与清理', event: 'systems' },
   ] },
   { name: '个性与设置', items: [
+    { label: '形象与声音', hint: '20 个写实形象，搭配喜欢的音色', event: 'portraits' },
     { label: '语音控制', hint: '麦克风、朗读与音频状态', event: 'voiceControls' },
     { label: '外观', hint: '选择界面配色', event: 'skin' },
     { label: '桌面宠物', hint: '显示或收起桌面小伙伴', action: togglePet },

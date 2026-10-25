@@ -40,7 +40,6 @@ try {
   const spoken = await preview
   assert.ok(spoken.ok, JSON.stringify(spoken))
   checks.push('packaged Python TTS -> bridge -> speaker analyser -> portrait, interruption closes mouth')
-  await page.getByRole('button', { name: '关闭语音控制', exact: true }).click()
   await page.getByRole('button', { name: '对话选项', exact: true }).click()
   await page.getByRole('button', { name: '放大', exact: true }).click()
   const expanded = await page.locator('.chat--max').boundingBox()

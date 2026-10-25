@@ -21,7 +21,7 @@
     </header>
 
     <div class="call__stage">
-      <MoonPortrait class="call__portrait" :mood="portraitMood" :read-audio="readPlayback" />
+      <MoonPortrait class="call__portrait" :mood="portraitMood" :read-audio="readPlayback" :character="mobilePortrait.character" :gaze="false" :emotion="replyEmotion([...turns].reverse().find(row=>row.role==='assistant')?.text || '')" />
       <p class="call__hint">{{ aside || hint }}</p>
     </div>
 
@@ -115,6 +115,8 @@
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import MoonPortrait from '@/avatar/MoonPortrait.vue'
+import { mobilePortrait, readMobilePortrait } from './portrait'
+import { replyEmotion } from '@/avatar/portraitEmotion'
 import type { PortraitMood } from '@/avatar/portraitMotion'
 import {
   pcCallReadiness,
@@ -228,6 +230,7 @@ async function scroll(): Promise<void> {
 }
 
 onMounted(async () => {
+  await readMobilePortrait()
   const mic = recorderAvailable()
   if (!mic.ok) {
     phase.value = 'blocked'

@@ -838,7 +838,7 @@ class TestTheFailureLineIsWrittenForTheOperator:
         assert "const hasVoiceEngine = computed(" in core
         toggle = core[core.index("async function toggleReading") :]
         assert "voice.speaksTyped && !hasVoiceEngine.value" in toggle
-        assert "启用语音" in toggle, "提示要说清还缺点什么"
+        assert "聆听" in toggle and "加载语音" in toggle, "提示要指向主页实际可点击的聆听按钮"
         # 耳朵关掉（muted）嗓子还在：这句不该把释放麦克风当成没引擎。
         assert "voice.phase === 'running' || voice.phase === 'muted'" in core
 

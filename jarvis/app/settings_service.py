@@ -349,6 +349,7 @@ class SettingsService:
             "overrides_active": self._override_summary(),
             "voice_auto_arm": self._prefs.flag(VOICE_AUTO_ARM, default=False),
             "auto_speak_typed": self._prefs.flag(VOICE_AUTO_SPEAK_TYPED, default=True),
+            "portrait_preferences": self._portrait_preferences(),
             "telemetry_interval_ms": self._prefs.number(TELEMETRY_INTERVAL_MS, default=1500),
             "thinking_enabled": pair["thinking_enabled"],
             "thinking_budget": pair["thinking_tokens"],
@@ -921,6 +922,16 @@ class SettingsService:
         self._prefs.set(SETTINGS_AI_EDITED, kept)
 
     def _apply_one(self, key: str, value: Any) -> str | None:
+        if key == "portrait_preferences":
+            from jarvis.app.portrait_preferences import portrait_preferences
+
+            if not isinstance(value, dict):
+                return "形象设置格式不正确"
+            return (
+                None
+                if self._prefs.set("ui.portrait", portrait_preferences(value))
+                else "形象设置未能保存"
+            )
         """Save one non-secret field. Returns a reason string, or None on success."""
         if key == "provider":
             return self._set_provider(value)
@@ -1007,6 +1018,11 @@ class SettingsService:
         )
         local_server.configure(dial)
         return dial
+
+    def _portrait_preferences(self) -> dict[str, Any]:
+        from jarvis.app.portrait_preferences import portrait_preferences
+
+        return portrait_preferences(self._prefs.get("ui.portrait"))
 
     def _choice(self, key: str, tiers: tuple[int, ...], fallback: int) -> int:
         """A stored tier, or the shipped one when what is stored is not a tier."""

@@ -89,5 +89,5 @@ jarvis/vendor/
 /.r[0-9]*/
 /.audit/
 
-# Private commercial materials are excluded from the public repository.
+# Private commercial documents remain local.
 commercial/

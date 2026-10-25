@@ -1,7 +1,7 @@
 <template>
   <section class="vn">
     <header class="vn__head">
-      <h2>音色</h2>
+      <h2>形象与声音</h2>
       <button class="vn__x" type="button" aria-label="关闭" @click="emit('close')">
         <svg viewBox="0 0 24 24" width="18" height="18">
           <path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
@@ -12,6 +12,10 @@
     <div class="vn__body">
       <p v-if="error" class="vn__bad">{{ error }}</p>
       <p v-else-if="note" class="vn__ok">{{ note }}</p>
+      <section class="vn__card">
+        <h3>选择陪伴形象</h3><p class="vn__why">选择形象时带上记住的音色；首次采用推荐声音。形象保存在本手机，音色在连接的电脑上生效。</p>
+        <div class="vn__portraits"><button v-for="person in characters" :key="person.id" :aria-pressed="mobilePortrait.character===person.id" :disabled="busy" @click="choosePortrait(person)"><img :src="portraitAsset(person.id,'thumb')" alt="" loading="lazy" /><span>{{ person.name }}</span></button></div>
+      </section>
 
       <!-- 录自己的声音 -->
       <div class="vn__card">
@@ -127,6 +131,8 @@
  * 一只手按着屏幕是做不到的。
  */
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { characters, portraitAsset, type Character } from '@/avatar/portraitCatalog'
+import { mobilePortrait, readMobilePortrait, saveMobilePortrait } from './portrait'
 import {
   pcAddClone,
   pcCloneVoices,
@@ -220,6 +226,7 @@ async function load(): Promise<void> {
 }
 
 onMounted(() => {
+  void readMobilePortrait()
   const mic = recorderAvailable()
   if (!mic.ok) note.value = mic.reason
   void load()
@@ -315,6 +322,19 @@ async function save(): Promise<void> {
   }
 }
 
+async function choosePortrait(person: Character): Promise<void> {
+  if (busy.value) return
+  busy.value=true; error.value=''
+  try {
+    const desired=mobilePortrait.bindings[person.id] || person.voice
+    if(!board.choices.some(row=>row.id===desired))throw new Error('当前电脑不提供该推荐音色，请先选择可用声音。')
+    const next=await pcPickVoice(props.link,desired);Object.assign(board,next)
+    if(next.error || next.current!==desired)throw new Error(next.error || '音色未切换')
+    await saveMobilePortrait(person.id,next.current)
+    note.value='形象与声音已保存。';emit('changed')
+  } catch(err){error.value=err instanceof Error?err.message:String(err)}finally{busy.value=false}
+}
+
 async function pick(voiceId: string): Promise<void> {
   busy.value = true
   error.value = ''
@@ -322,7 +342,7 @@ async function pick(voiceId: string): Promise<void> {
     const next = await pcPickVoice(props.link, voiceId)
     Object.assign(board, next)
     if (next.error) error.value = next.error
-    else note.value = '换好了，下一句就用这个声音。'
+      else { await saveMobilePortrait(mobilePortrait.character,next.current); note.value = '换好了，已为当前形象记住这个声音。' }
     emit('changed')
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
@@ -373,6 +393,8 @@ function decode(encoded: string): Uint8Array {
 </script>
 
 <style scoped>
+.vn__portraits{grid-auto-rows:max-content}.vn__portraits button{position:relative;min-height:90px}.vn__portraits span{position:absolute;bottom:0;left:0;right:0;padding:4px 0;background:#17111ed9;color:#f0e8f4;font-size:11px;line-height:1.2}
+.vn__portraits{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;max-height:360px;overflow:auto}.vn__portraits button{border:1px solid #b4a5c533;border-radius:10px;background:#211b2b;color:inherit;overflow:hidden;padding:0 0 6px;font:inherit;font-size:12px}.vn__portraits button[aria-pressed=true]{border-color:#c9b5e0}.vn__portraits img{width:100%;aspect-ratio:1;object-fit:cover;display:block;margin-bottom:6px}
 .vn {
   position: fixed;
   inset: 0;

@@ -1,5 +1,5 @@
 <template>
-  <div class="moon-portrait" :data-mood="mood">
+  <div class="moon-portrait" :data-mood="mood" :data-character="character" :data-emotion="emotion">
     <div class="moon-portrait__moon" aria-hidden="true" />
     <canvas ref="canvas" class="moon-portrait__figure" role="img" aria-label="小夜写实动态形象" />
     <span v-if="failed" class="moon-portrait__failure">形象暂未加载</span>
@@ -8,17 +8,23 @@
 </template>
 
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import portraitUrl from '@/assets/brand/portrait.webp'
 import speakingUrl from '@/assets/brand/speaking.webp'
 import blinkUrl from '@/assets/brand/blink.webp'
 import { mouthEnvelope, type PortraitMood } from './portraitMotion'
+import { portraitAsset } from './portraitCatalog'
+import rigs from '@/assets/portraits/rigs.json'
+import type { PortraitEmotion } from './portraitEmotion'
 
 const props = withDefaults(defineProps<{
   mood?: PortraitMood
   label?: string
   readAudio?: () => { rms: number; talking: boolean }
-}>(), { mood: 'idle', label: '' })
+  character?: string
+  emotion?: PortraitEmotion
+  gaze?: boolean
+}>(), { mood: 'idle', label: '', character: 'p01', emotion: 'neutral', gaze: true })
 
 const canvas = ref<HTMLCanvasElement | null>(null)
 const failed = ref(false)
@@ -31,7 +37,54 @@ let mouth = 0
 let nextBlink = 3200
 let blinkUntil = 0
 let calm: MediaQueryList | undefined
-const images: HTMLImageElement[] = []
+let images: HTMLImageElement[] = []
+let generation = 0
+let gazeX = 0, gazeY = 0, targetX = 0, targetY = 0, lastPointer = 0
+let activeEmotion: PortraitEmotion = 'neutral'
+let expression = 0
+type Rig = { face: number[]; eyes: number[][]; mouth: number[] }
+let rig: Rig | undefined
+const patches = new Map<string, HTMLCanvasElement>()
+
+async function changeCharacter(): Promise<void> {
+  const token = ++generation
+  failed.value = false
+  try {
+    const urls = Array.from({ length: 6 }, (_, i) => portraitAsset(props.character, i))
+    const loaded = await Promise.all(urls.every(Boolean) ? urls.map(load)
+      : [portraitUrl, speakingUrl, blinkUrl].map(load))
+    if (!alive || token !== generation) return
+    images = loaded
+    rig = (rigs as Record<string, Rig>)[props.character]
+    patches.clear()
+    mouth = expression = 0
+    if (canvas.value) canvas.value.dataset.loadedCharacter=props.character
+    frame()
+  } catch { if (alive && token === generation) failed.value = true }
+}
+
+function pointer(event: PointerEvent): void {
+  if (event.pointerType === 'touch' || calm?.matches || !props.gaze) return
+  const box = canvas.value?.getBoundingClientRect()
+  if (!box) return
+  targetX = Math.max(-1, Math.min(1, (event.clientX - box.left - box.width / 2) / (innerWidth * .45)))
+  targetY = Math.max(-1, Math.min(1, (event.clientY - box.top - box.height * .4) / (innerHeight * .5)))
+  lastPointer = performance.now()
+}
+
+function gazeEye(ctx: CanvasRenderingContext2D, image: HTMLImageElement, box: number[]): void {
+  const [x, y, w, h] = box as [number, number, number, number]
+  // A small texture warp moves the original iris; eyelid corners remain anchored.
+  ctx.save()
+  ctx.beginPath(); ctx.ellipse(x+w/2, y+h/2, w*.46, h*.44, 0, 0, Math.PI*2); ctx.clip()
+  for (let row=0; row<6; row++) for (let col=0; col<12; col++) {
+    const weight = Math.sin(Math.PI*(col+.5)/12)*Math.sin(Math.PI*(row+.5)/6)
+    const dx=gazeX*w*.095*weight, dy=gazeY*h*.11*weight
+    ctx.drawImage(image, (x+col*w/12-dx)*image.width, (y+row*h/6-dy)*image.height,
+      w/12*image.width, h/6*image.height, x+col*w/12, y+row*h/6, w/12+.0004, h/6+.0004)
+  }
+  ctx.restore()
+}
 
 function load(url: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -48,25 +101,37 @@ function patch(ctx: CanvasRenderingContext2D, image: HTMLImageElement,
                box: number[], alpha: number): void {
   if (alpha < 0.01) return
   const [x, y, width, height] = box as [number, number, number, number]
-  ctx.save()
-  ctx.globalAlpha = alpha
-  ctx.beginPath()
-  ctx.ellipse(x + width / 2, y + height / 2, width / 2, height / 2, 0, 0, Math.PI * 2)
-  ctx.clip()
-  ctx.drawImage(image, x * image.width, y * image.height, width * image.width,
-    height * image.height, x, y, width, height)
-  ctx.restore()
+  const key = image.src + box.join(',')
+  let layer = patches.get(key)
+  if (!layer) {
+    layer = document.createElement('canvas'); layer.width = 256; layer.height = 256
+    const part = layer.getContext('2d')!
+    part.drawImage(image, x*image.width, y*image.height, width*image.width, height*image.height, 0, 0, 256, 256)
+    part.globalCompositeOperation = 'destination-in'
+    const fade = part.createRadialGradient(128, 128, 85, 128, 128, 128)
+    fade.addColorStop(0, '#fff'); fade.addColorStop(1, '#fff0')
+    part.fillStyle=fade; part.fillRect(0, 0, 256, 256)
+    patches.set(key, layer)
+  }
+  ctx.save(); ctx.globalAlpha=alpha; ctx.drawImage(layer, x,y,width,height); ctx.restore()
 }
 
 function frame(): void {
   clearTimeout(timer)
-  if (!alive || !visible || document.hidden || images.length !== 3) return
+  if (!alive || !visible || document.hidden || images.length < 3) return
   const view = canvas.value
   const ctx = view?.getContext('2d')
   if (!view || !ctx) return
   const now = performance.now()
   const delta = Math.min(0.2, (now - (previous || now)) / 1000)
   previous = now
+  if (now-lastPointer > 3500 || !props.gaze || calm?.matches) targetX=targetY=0
+  gazeX += (targetX-gazeX)*Math.min(1,delta*8)
+  gazeY += (targetY-gazeY)*Math.min(1,delta*8)
+  if (activeEmotion !== props.emotion) {
+    expression = Math.max(0, expression-delta*4)
+    if (!expression) activeEmotion=props.emotion
+  } else expression=Math.min(1,expression+delta*3)
   const audio = props.readAudio?.() ?? { rms: 0, talking: false }
   mouth = mouthEnvelope(mouth, audio.rms, audio.talking, delta)
   if (!calm?.matches && now > nextBlink) {
@@ -79,17 +144,25 @@ function frame(): void {
   if (!calm?.matches) {
     const tilt = props.mood === 'listening' ? -0.016 : props.mood === 'thinking' ? 0.014 : 0
     ctx.translate(0.5, 0.7)
-    ctx.rotate(tilt + Math.sin(now / 3400) * 0.004)
+    ctx.rotate(tilt + Math.sin(now / 3400) * 0.004 + gazeX*.008)
     ctx.translate(-0.5, -0.7 + Math.sin(now / 2200) * 0.002)
   }
   ctx.drawImage(images[0]!, 0, 0, 1, 1)
-  patch(ctx, images[1]!, [0.475, 0.493, 0.14, 0.08], mouth)
+  const emotionIndex = { neutral: 0, happy: 3, pout: 4, soft: 5 }[activeEmotion]
+  const face = rig?.face
+  if (face && images[emotionIndex] && emotionIndex) {
+    patch(ctx, images[emotionIndex]!, [face[0]!-.025,face[1]!-.015,face[2]!+.05,face[3]!+.05], expression)
+  }
+  patch(ctx, images[1]!, rig?.mouth ?? [0.475, 0.493, 0.14, 0.08], mouth)
   if (now < blinkUntil && !calm?.matches) {
-    patch(ctx, images[2]!, [0.404, 0.323, 0.105, 0.067], 1)
-    patch(ctx, images[2]!, [0.575, 0.315, 0.095, 0.068], 1)
+    for (const eye of rig?.eyes ?? [[0.404,0.323,0.105,0.067],[0.575,0.315,0.095,0.068]]) patch(ctx, images[2]!, eye, 1)
+  } else if (rig && Math.abs(gazeX)+Math.abs(gazeY)>.01) {
+    const source=images[emotionIndex] ?? images[0]!
+    for (const eye of rig.eyes) gazeEye(ctx, source, eye)
   }
   view.dataset.mouth = mouth.toFixed(3)
   view.dataset.playing = String(audio.talking)
+  view.dataset.gazeX=gazeX.toFixed(3); view.dataset.gazeY=gazeY.toFixed(3)
   timer = setTimeout(frame, audio.talking || now < blinkUntil ? 33 : 100)
 }
 
@@ -99,25 +172,24 @@ onMounted(async () => {
   view.width = 640
   view.height = 630
   document.addEventListener('visibilitychange', frame)
+  window.addEventListener('pointermove', pointer, { passive: true })
   observer = new IntersectionObserver(([entry]) => {
     visible = entry?.isIntersecting ?? true
     frame()
   })
   observer.observe(view)
-  try {
-    const loaded = await Promise.all([load(portraitUrl), load(speakingUrl), load(blinkUrl)])
-    if (!alive) return
-    images.push(...loaded)
-    nextBlink += performance.now()
-    frame()
-  } catch { if (alive) failed.value = true }
+  nextBlink += performance.now()
+  await changeCharacter()
 })
+watch(() => props.character, changeCharacter)
 
 onBeforeUnmount(() => {
   alive = false
   clearTimeout(timer)
   observer?.disconnect()
   document.removeEventListener('visibilitychange', frame)
+  window.removeEventListener('pointermove', pointer)
+  patches.clear()
 })
 </script>
 

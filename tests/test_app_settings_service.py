@@ -39,6 +39,23 @@ from jarvis.llm.service import LlmService
 SECRET = "sk-DO-NOT-LEAK-9f2c"
 
 
+def test_portrait_settings_survive_service_restart(prefs: Preferences, env: dict[str, str]) -> None:
+    service, _, _ = _service(prefs, env)
+    result = service.apply(
+        {
+            "portrait_preferences": {
+                "character": "p17",
+                "gaze": False,
+                "bindings": {"p17": "zh-CN-XiaoyiNeural"},
+            }
+        }
+    )
+    assert result["error"] == ""
+    restarted, _, _ = _service(prefs, env)
+    assert restarted.snapshot()["portrait_preferences"]["character"] == "p17"
+    assert restarted.snapshot()["portrait_preferences"]["bindings"]["p17"] == "zh-CN-XiaoyiNeural"
+
+
 def _section(**overrides: Any) -> LlmSection:
     base = {
         "default_provider": "alpha",

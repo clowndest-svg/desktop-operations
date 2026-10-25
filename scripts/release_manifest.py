@@ -19,6 +19,8 @@ SOURCE_PATTERNS = (
     "frontend/src/**/*.css",
     "frontend/src/assets/brand/*",
     "assets-src/brand/*",
+    "assets-src/portraits/*",
+    "frontend/src/assets/portraits/*",
     "packaging/app.ico",
     "packaging/licenses/*",
     "requirements*.txt",
@@ -145,6 +147,9 @@ def write_json(path: Path, value: dict[str, Any]) -> None:
 MOBILE_PATTERNS = (
     "frontend/src/avatar/MoonPortrait.vue",
     "frontend/src/avatar/portraitMotion.ts",
+    "frontend/src/avatar/portraitCatalog.ts",
+    "frontend/src/avatar/portraitEmotion.ts",
+    "frontend/src/assets/portraits/*",
     "frontend/src/assets/brand/*",
     "frontend/src/styles/moon.css",
     "frontend/src/mobile/**/*",

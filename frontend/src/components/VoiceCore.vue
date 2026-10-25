@@ -228,7 +228,7 @@ async function toggleReading(): Promise<void> {
       // The switch is a preference; the engine is the thing that can obey it. A lit
       // 「朗读」 with no stack behind it reads as a broken feature while the backend is
       // correctly refusing -- so say which of the two this is.
-      switchProblem.value = '朗读已经记下了，但语音引擎还没装好：先点「启用语音」（加载约 30 秒），之后打字的答案才会念出来'
+      switchProblem.value = '朗读已开启。点击旁边的「聆听」加载语音后，打字的回答也会念出来。'
     }
   } catch (err) {
     switchProblem.value = err instanceof Error ? err.message : String(err)
@@ -358,7 +358,7 @@ function draw(now: number): void {
     )
     body.addColorStop(0, `rgba(${red}, ${green}, ${blue}, 0.5)`)
     body.addColorStop(0.65, `rgba(${red}, ${green}, ${blue}, 0.13)`)
-    body.addColorStop(1, 'rgba(4, 10, 18, 0.85)')
+    body.addColorStop(1, `rgba(${red}, ${green}, ${blue}, 0.06)`)
     cached = { key: gradientKey, halo, body }
   }
 
@@ -366,102 +366,24 @@ function draw(now: number): void {
   context.fillRect(0, 0, width, height)
   context.lineCap = 'round'
 
-  const spin = (clock * spec.spin * Math.PI) / 180
-  const outer = centre * 0.92
-  const gap = 0.075
-  const step = TAU / 12
-  context.lineWidth = 1.5
-  for (let index = 0; index < 12; index += 1) {
-    const start = spin + index * step
-    context.beginPath()
-    context.arc(cx, cy, outer, start + gap / 2, start + step - gap / 2)
-    context.strokeStyle =
-      index < spec.segments
-        ? `rgba(${red}, ${green}, ${blue}, 0.55)`
-        : `rgba(${red}, ${green}, ${blue}, 0.12)`
-    context.stroke()
+  // Soft overlapping volumes make a cloud, while only actual output RMS drives speech.
+  context.save()
+  context.beginPath(); context.arc(cx,cy,centre*.82,0,TAU); context.clip()
+  context.fillStyle=cached.body; context.fillRect(0,0,width,height)
+  context.globalCompositeOperation='screen'
+  const energy=Math.min(1,sample.rms/.09)
+  for(let index=0;index<7;index++) {
+    const angle=clock*(.22+index*.018)+index*2.399
+    const orbit=base*(.28+.12*Math.sin(clock*.6+index))
+    const px=cx+Math.cos(angle)*orbit, py=cy+Math.sin(angle*1.17)*orbit
+    const radius=base*(.95+energy*.32+.09*Math.sin(clock+index))
+    const mist=context.createRadialGradient(px,py,0,px,py,radius)
+    mist.addColorStop(0,`rgba(${Math.min(255,red+45)},${Math.min(255,green+35)},${Math.min(255,blue+20)},${.25+energy*.2})`)
+    mist.addColorStop(.55,`rgba(${red},${green},${blue},.10)`)
+    mist.addColorStop(1,'rgba(0,0,0,0)')
+    context.fillStyle=mist;context.fillRect(cx-centre,cy-centre,centre*2,centre*2)
   }
-
-  context.lineWidth = 2
-  for (const [factor, direction, span] of [
-    [0.78, 1, 0.5],
-    [0.63, -1, 0.34],
-  ] as const) {
-    const start = direction * spin
-    const radius = centre * factor
-    context.beginPath()
-    context.ellipse(cx, cy, radius, radius * spec.tilt, 0, start, start + TAU * span)
-    context.strokeStyle = `rgba(${red}, ${green}, ${blue}, ${direction === 1 ? 0.7 : 0.34})`
-    context.stroke()
-  }
-
-  context.beginPath()
-  context.arc(cx, cy, base, 0, TAU)
-  context.fillStyle = cached.body
-  context.fill()
-  context.lineWidth = 1
-  context.strokeStyle = `rgba(${red}, ${green}, ${blue}, 0.8)`
-  context.stroke()
-
-  if (driven) drawSpectrum(context, cx, cy, base, sample, red, green, blue)
-}
-
-/**
- * The spectrum crown: five measured bands, mirrored around the core.
- *
- * Mirrored because a voice is not stereo, and an asymmetric ring reads as a graph
- * that lost half its data. The band edges are the pitch ranges a vowel actually
- * occupies, so the shape of the crown follows the shape of the syllable -- which is
- * the same measurement the 3D avatar will use for its mouth, and the reason the two
- * will move together rather than each inventing a rhythm.
- */
-function drawSpectrum(
-  context: CanvasRenderingContext2D,
-  cx: number,
-  cy: number,
-  base: number,
-  sample: { rms: number; peak: number; bands: number[] },
-  red: number,
-  green: number,
-  blue: number,
-): void {
-  const spokes = 44
-  const inner = base * 1.04
-  /**
-   * Loudness sets the reach, the bands set its shape.
-   *
-   * The scale is calibrated to measured speech, not to full-scale audio: an
-   * edge-tts utterance sits around 0.02--0.08 RMS, so a reach proportional to the
-   * raw number produces a crown a few pixels tall on a voice that is plainly
-   * shouting. Dividing by a typical level makes "quiet", "talking" and "loud" three
-   * visibly different pictures, which is the entire point of drawing it.
-   */
-  const loud = Math.min(1, sample.rms / 0.09)
-  const reach = 0.1 + 0.3 * loud
-  context.lineCap = 'round'
-  for (let index = 0; index < spokes; index += 1) {
-    const around = (index / spokes) * TAU
-    // 0 → 1 → 0 across the circle, so the left half mirrors the right.
-    const position = Math.abs(Math.sin((index / spokes) * Math.PI))
-    const value = bandAt(sample.bands, position)
-    const length = inner + reach * base * (0.3 + 0.7 * value)
-    context.beginPath()
-    context.moveTo(cx + Math.cos(around) * inner, cy + Math.sin(around) * inner)
-    context.lineTo(cx + Math.cos(around) * length, cy + Math.sin(around) * length)
-    context.lineWidth = 2
-    context.strokeStyle = `rgba(${red}, ${green}, ${blue}, ${0.25 + value * 0.6})`
-    context.stroke()
-  }
-}
-
-/** Interpolated lookup so five measured bands make a smooth 44-spoke outline. */
-function bandAt(bands: number[], position: number): number {
-  if (bands.length === 0) return 0
-  const scaled = Math.min(0.999, Math.max(0, position)) * (bands.length - 1)
-  const from = Math.floor(scaled)
-  const weight = scaled - from
-  const next = bands[from + 1] ?? bands[from]
-  return bands[from] * (1 - weight) + next * weight
+  context.restore()
 }
 
 function isAnimated(): boolean {

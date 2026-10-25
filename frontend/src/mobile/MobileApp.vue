@@ -1,6 +1,6 @@
 <template>
   <div class="app" :class="{ 'app--kb': keyboardOpen, 'app--large': workspace.reading.fontSize === 'large', 'app--compact': workspace.reading.compact }">
-    <div class="mobile-portrait-backdrop" aria-hidden="true"><MoonPortrait /></div>
+    <div class="mobile-portrait-backdrop" aria-hidden="true"><MoonPortrait :character="mobilePortrait.character" :gaze="false" /></div>
     <div v-if="drawer" class="scrim" @click="drawer = false" />
 
     <aside class="drawer" :class="{ 'drawer--on': drawer }">
@@ -241,7 +241,7 @@
             <path d="M12 4v10M8.5 13.5a3.5 3.5 0 007 0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" />
             <path d="M6 18h12M9 21h6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" />
           </svg>
-          音色
+          形象与声音
         </button>
       </div>
 
@@ -600,6 +600,8 @@
 <script setup lang="ts">
 import brandLogo from '@/assets/brand/logo.webp'
 import MoonPortrait from '@/avatar/MoonPortrait.vue'
+import { mobilePortrait, readMobilePortrait } from './portrait'
+void readMobilePortrait()
 /**
  * 手机版的主界面：一列、拇指够得着、说话键在右下角。
  *

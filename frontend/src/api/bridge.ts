@@ -1450,6 +1450,7 @@ export interface HiddenRow {
 }
 
 export interface SettingsSnapshot {
+  portrait_preferences?: { character: string; gaze: boolean; emotions: boolean; bindings: Record<string, string> }
   error: string
   providers: string[]
   models: ModelRow[]
@@ -4954,6 +4955,7 @@ function mockModels(): ModelList {
 /** Preview-only settings object so the dialog can be exercised in a browser.
  *  Mirrors the real shape, including the rule that no key value is ever present. */
 const mockSettings: SettingsSnapshot = {
+  portrait_preferences: { character: 'p01', gaze: true, emotions: true, bindings: {} },
   error: '',
   providers: ['qwenai', 'wkapi'],
   models: [

@@ -37,6 +37,34 @@ try {
   assert.equal(await face.getAttribute('data-mouth'), '0.000')
   checks.push('new logo loaded, moon theme and silent closed mouth')
   await page.screenshot({ path: path.join(output, 'desktop.png') })
+  await page.getByRole('button', { name: '形象与声音', exact: true }).click()
+  const gallery=page.getByRole('dialog',{name:'形象与声音',exact:true})
+  await gallery.getByRole('button',{name:'完成',exact:true}).waitFor()
+  await page.waitForFunction(()=>document.querySelectorAll('.portraits__grid button:not(:disabled)').length===20)
+  assert.equal(await gallery.locator('.portraits__grid button').count(),20)
+  await page.screenshot({path:path.join(output,'gallery.png')})
+  for(let i=1;i<=20;i++){
+    const id=`p${String(i).padStart(2,'0')}`
+    await gallery.locator(`button[data-character="${id}"]`).click()
+    await page.waitForFunction(id=>document.querySelector('.app__portrait canvas')?.dataset.loadedCharacter===id,id)
+    await page.waitForFunction(()=>document.querySelectorAll('.portraits__grid button:not(:disabled)').length===20)
+  }
+  await gallery.locator('button[data-character="p01"]').click()
+  await page.waitForFunction(()=>document.querySelector('.app__portrait canvas')?.dataset.loadedCharacter==='p01')
+  await gallery.getByRole('button',{name:'完成',exact:true}).click()
+  checks.push('all 20 independent character assets load and select without console errors')
+  await page.mouse.move(20,150)
+  await page.waitForFunction(()=>Number(document.querySelector('.app__portrait canvas')?.dataset.gazeX)<-.3)
+  await page.mouse.move(1420,650)
+  await page.waitForFunction(()=>Number(document.querySelector('.app__portrait canvas')?.dataset.gazeX)>.15)
+  checks.push('gaze follows mouse in both directions')
+  for(const [text,emotion] of [['太好了，恭喜你！😊','happy'],['哼，我生气了，气鼓鼓。','pout'],['很抱歉听到你伤心的消息。','soft'],['别生气，我们一起解决。','neutral']]){
+    await page.evaluate(text=>window.__jarvisState({voice_state:'idle',voice:'off',voice_detail:'',history:[{role:'assistant',text}],last_event:'',interrupted:false}),text)
+    await page.waitForFunction(emotion=>document.querySelector('.app__portrait')?.dataset.emotion===emotion,emotion)
+    await page.waitForTimeout(550)
+    await page.screenshot({path:path.join(output,`expression-${emotion}.png`)})
+  }
+  checks.push('assistant reply drives happy, pout, soft and negated neutral expressions')
   assert.ok(await page.locator('.bar__actions > button').count() <= 3)
   assert.equal(await page.locator('.chat__options').isVisible(), false)
   await page.getByRole('button', { name: '功能', exact: true }).click()
@@ -49,7 +77,6 @@ try {
   await page.getByRole('button', { name: '停下', exact: true }).click()
   await page.waitForFunction(() => document.querySelector('.app__portrait canvas')?.dataset.mouth === '0.000')
   checks.push('actual PCM analyser opens mouth; stop closes it')
-  await page.getByRole('button', { name: '关闭语音控制', exact: true }).click()
   await page.getByRole('button', { name: '功能', exact: true }).click()
   await page.getByRole('textbox', { name: '搜索功能' }).fill('系统')
   await page.getByRole('button', { name: '系统与工具', exact: false }).click()
@@ -121,6 +148,30 @@ try {
   await phone.getByRole('button', { name: '会话', exact: true }).click()
   await phone.screenshot({ path: path.join(output, 'mobile-drawer.png') })
   checks.push('mobile logo, portrait and session drawer render')
+  let mobileVoice='zh-CN-XiaoxiaoNeural'
+  const voiceIds=['zh-CN-XiaoxiaoNeural','zh-CN-XiaoyiNeural','zh-TW-HsiaoChenNeural','zh-TW-HsiaoYuNeural']
+  await phone.route('https://pc.example.test:8737/**',async route=>{
+    const method=new URL(route.request().url()).pathname.split('/').at(-1)
+    if(method==='tts_pick')mobileVoice=route.request().postDataJSON().voice
+    const data=method==='tts_voices' || method==='tts_pick'
+      ? {error:'',engine:'edge_tts',current:mobileVoice,choices:voiceIds.map(id=>({id,label:id,current:id===mobileVoice,kind:'builtin'})),speed:1,volume:1,speed_min:.5,speed_max:1.5,volume_min:0,volume_max:1,cloning:{available:false,reason:'QA 不录音',min_ms:3000,comfortable_ms:10000,max_ms:30000,max_voices:20}}
+      : method==='voice_clone_list' ? {error:'',voices:[],cloning:{available:false,reason:'QA 不录音',min_ms:3000,comfortable_ms:10000,max_ms:30000,max_voices:20}}
+      : method==='chat_sessions' ? {sessions:[],current:''} : method==='chat_messages' ? {messages:[]} : {}
+    await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(data)})
+  })
+  await phone.evaluate(()=>localStorage.setItem('CapacitorStorage.xiaoye.pc',JSON.stringify({host:'pc.example.test',port:8737,pin:'sha256:'+'a'.repeat(64),token:'qa-only',name:'QA电脑',methods:[]})))
+  await phone.reload()
+  await phone.getByRole('button',{name:'更多',exact:true}).click()
+  await phone.getByRole('button',{name:'形象与声音',exact:true}).click()
+  assert.equal(await phone.locator('.vn__portraits button').count(),20)
+  await phone.locator('.vn__portraits button').nth(18).click()
+  await phone.waitForFunction(()=>JSON.parse(localStorage.getItem('CapacitorStorage.xiaoye.portrait.v1') || '{}').character==='p19')
+  assert.equal(mobileVoice,'zh-TW-HsiaoChenNeural')
+  await phone.screenshot({path:path.join(output,'mobile-gallery.png')})
+  await phone.locator('.vn__x').click()
+  await phone.reload()
+  await phone.waitForFunction(()=>document.querySelector('.mobile-portrait-backdrop canvas')?.dataset.loadedCharacter==='p19')
+  checks.push('mobile 20-character gallery applies paired voice RPC and restores local character after reload (QA transport)')
   assert.deepEqual(errors, [])
 } finally {
   await browser.close()

@@ -463,6 +463,7 @@ operator chose a size on this monitor, which a window that always opens at
 """
 
 PREFERENCE_TYPES: dict[str, type] = {
+    "ui.portrait": dict,
     VOICE_AUTO_ARM: bool,
     VOICE_AUTO_SPEAK_TYPED: bool,
     LLM_PROVIDER: str,

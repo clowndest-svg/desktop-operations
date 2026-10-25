@@ -14,6 +14,7 @@
 :root[data-skin='moon'] .bar__name { text-shadow: none; color: #eee8f0; }
 :root[data-skin='moon'] .hud-title { color: #c9bdcf; }
 .app__voice-close { position:absolute; right:10px; top:8px; z-index:2; font-size:11px; color:#c7bdcc; border:0; background:transparent; cursor:pointer; }
+.app__character { display:flex; justify-content:space-between; width:100%; padding:3px 4px 9px; background:none; border:0; color:#c5b9cd; cursor:pointer; font:inherit; font-size:12px; }
 .chat__toolbar { display:flex; align-items:center; gap:8px; min-height:38px; flex:none; }
 .chat__heading { font-size:14px; font-weight:600; color:var(--hud-text); margin-right:6px; }
 .chat__model-label { max-width:46%; margin-right:auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }

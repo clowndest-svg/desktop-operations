@@ -1,0 +1,14 @@
+{
+  "tool": "OpenAI built-in imagegen",
+  "commonPrompt": "Production PHOTOREALISTIC animation sprite sheet for an AI assistant. EXACT 2 COLUMNS x 3 ROWS, six equal SQUARE cells, high resolution. Actual transparent background, no panels or labels. Each cell shows the SAME ONE ADULT woman near-FRONT-FACING, head and upper shoulders, identical position, scale, lighting and hair across all cells; no hair cut by cell edges. Natural skin texture, tasteful minimal makeup, desaturated calm photographic studio lighting. Row-major six poses: NEUTRAL eyes open closed lips; SPEAKING gently open small mouth visible upper teeth; BLINK both eyes fully closed closed lips; HAPPY warm smile raised cheeks slightly smiling OPEN eyes; playful ANGRY PUFFED CHEEKS and pout and subtly furrowed brows; SOFT SAD thoughtful gentle expression closed lips. Only expressions change. No text, gridlines, borders, props, neon, saturated colors, anime, celebrities. ",
+  "frames": [
+    "neutral",
+    "speaking",
+    "blink",
+    "happy",
+    "pout",
+    "soft"
+  ],
+  "characterCatalog": "frontend/src/avatar/portraitCatalog.ts",
+  "referenceForP01": "assets-src/brand/portrait.png"
+}

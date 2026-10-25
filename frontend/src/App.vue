@@ -15,7 +15,8 @@
       @extensions="extensionsOpen = true"
       @skin="skinOpen = true"
       @systems="systemsOpen = true"
-      @voice-controls="voicePanelOpen = !voicePanelOpen"
+      @voice-controls="voicePanelOpen = true"
+      @portraits="portraitsOpen = true"
       />
 
     <p v-if="store.error" class="app__error">{{ store.error }}</p>
@@ -25,8 +26,8 @@
       <DesktopPortrait class="app__portrait" />
       <div class="app__shade" aria-hidden="true" />
       <div class="app__intro"><span>小夜 · 与你此刻相伴</span><small>每一句，都认真听。</small></div>
-      <ChatPanel class="app__chat" @usage="usageOpen = true" @voice="voiceOpen = true" />
-      <div v-show="voicePanelOpen" class="app__voice"><button class="app__voice-close" type="button" aria-label="关闭语音控制" @click="voicePanelOpen = false">关闭</button><VoiceCore /></div>
+      <ChatPanel class="app__chat" @usage="usageOpen = true" @voice="portraitsOpen = true" />
+      <div v-show="voicePanelOpen" class="app__voice"><button class="app__character" type="button" @click="portraitsOpen = true">形象与声音 <span aria-hidden="true">›</span></button><VoiceCore /></div>
     </main>
     <section v-if="systemsOpen" id="system-drawer" class="app__diagnostics" aria-label="系统与工具">
       <header class="app__diagnostics-head"><strong>系统与工具</strong><button class="hud-btn" type="button" @click="systemsOpen = false">关闭</button></header>
@@ -117,7 +118,7 @@
       :voice-closed="voiceClosed"
       @close="settingsOpen = false"
       @saved="onSettingsSaved"
-      @voice="voiceOpen = true"
+      @voice="portraitsOpen = true"
       @pet="petOpen = true"
       @alerts="alertsOpen = true"
       :pet-closed="petClosed"
@@ -129,6 +130,7 @@
       but not reach is the failure this window has already been billed for once.
     -->
     <VoicePickerPopup :open="voiceOpen" @close="closeVoicePicker" />
+    <PortraitPicker :open="portraitsOpen" @close="portraitsOpen = false" @advanced="portraitsOpen = false; voiceOpen = true" />
     <!--
       Same reason as the voice picker: this one is opened from 设置 too, so it has to
       be mounted after that dialog and not inside it.
@@ -221,6 +223,9 @@ import SettingsPanel from '@/components/SettingsPanel.vue'
 import TopBar from '@/components/TopBar.vue'
 import UsagePopup from '@/components/UsagePopup.vue'
 import VoicePickerPopup from '@/components/VoicePickerPopup.vue'
+import PortraitPicker from '@/components/PortraitPicker.vue'
+import { portraitState, savePortraitPreferences } from '@/avatar/portraitState'
+import { fetchVoices } from '@/api/bridge'
 import PetForgePopup from '@/components/PetForgePopup.vue'
 const TrendPanel = defineAsyncComponent(() => import('@/components/TrendPanel.vue'))
 import VoiceCore from '@/components/VoiceCore.vue'
@@ -234,7 +239,8 @@ const store = useSystemStore()
 const voice = useVoiceStore()
 const settingsOpen = ref(false)
 const systemsOpen = ref(false)
-const voicePanelOpen = ref(false)
+const voicePanelOpen = ref(true)
+const portraitsOpen = ref(false)
 
 /**
  * A save must be visible without a restart, in the two places a restart used to be
@@ -271,9 +277,13 @@ const petClosed = ref(0)
 const voiceClosed = ref(0)
 
 /** Closing the picker is also the signal that the in-force voice may have changed. */
-function closeVoicePicker(): void {
+async function closeVoicePicker(): Promise<void> {
   voiceOpen.value = false
   voiceClosed.value += 1
+  try {
+    const answer=await fetchVoices()
+    if(!answer.error && answer.current) await savePortraitPreferences({...portraitState,bindings:{...portraitState.bindings,[portraitState.character]:answer.current}})
+  } catch(error) { store.error='音色已更改，但形象绑定未能保存：'+String(error) }
 }
 
 /** Same bargain as the voice picker: the row in 设置 has to say what the panel changed. */
