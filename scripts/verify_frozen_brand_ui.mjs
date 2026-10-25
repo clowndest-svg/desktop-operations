@@ -21,7 +21,7 @@ try {
   assert.equal(await page.locator('.app__mock').count(), 0)
   assert.ok(await page.locator('.bar__mark').evaluate(image => image.complete && image.naturalWidth > 0))
   await page.screenshot({ path: path.join(output, 'home.png') })
-  checks.push('actual r124 exe renders new logo, portrait and uncluttered home')
+  checks.push('actual packaged exe renders new logo, portrait and uncluttered home')
   await page.getByRole('button', { name: '功能', exact: true }).click()
   await page.getByRole('textbox', { name: '搜索功能' }).fill('系统')
   await page.locator('.feature-menu__groups button').first().click()
