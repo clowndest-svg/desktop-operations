@@ -76,6 +76,7 @@ BUYER_DOCS = (
     "05-第三方许可清单.md",
     "06-接本地大模型.md",
     "07-新版界面与功能入口.md",
+    "08-完整包功能与环境条件.md",
     "小夜logo.webp",
 )
 
@@ -234,9 +235,9 @@ def freshness_warnings(source: Path, exe: Path) -> list[str]:
         if info.get("source_sha256") != source_fingerprint(REPO_ROOT):
             notes.append("PC 包的源码内容指纹与当前工作区不一致；必须重新构建")
         if info.get("edition") == "buyer":
-            for relative in ("运行库/WebView2/msedgewebview2.exe",):
-                if not (source / relative).is_file():
-                    notes.append(f"买家包缺少离线必备资源：{relative}")
+            from jarvis.config.full_bundle import full_bundle_problems
+
+            notes.extend(full_bundle_problems(source))
     except (OSError, ValueError):
         notes.append("PC 包缺少可核对的源码指纹，不能作为本轮交付")
     built = source / WEB_ASSETS
@@ -477,10 +478,13 @@ def buyer_first_page(round_name: str, apk: Path | None, weights: list[Path], zip
             "",
             "买家版数据在 小夜\\用户数据\\（旧版为 数据\\），设置中可查看实际目录。升级请保留用户数据。",
             "本地模型无需Key即可聊天、调用允许的工具与免Key联网检索。云端服务可选，需买家自己的账号。",
+            "完整买家版附带网页运行库、Python、生图/视频引擎和模型、离线语音识别权重；不用另装 Python 或先下载识别模型。",
+            "本地生图/视频需要兼容的 NVIDIA 显卡和驱动。本轮在 GTX 1650 4GB 上实测；低配请从默认短视频档开始。",
+            "Edge 朗读音色需要联网；云端聊天、生图、视频及云端复刻需要购买者自己的服务账号，包内不含账号或额度。",
             "详细的（语音、宠物、告警、手机遥控、边界说明）在 文档\\04-买家安装与使用说明.md，那份才是完整的。",
             "",
             f"校验你拿到的是原包：certutil -hashfile {zip_name} SHA256   （值在压缩包外的清单与发货记录里）",
-            "本份授权：一台机器自用；不得转售、不得二次分发成品或源码。第三方许可见 小夜\\第三方许可清单.txt。",
+            "小夜自行开发部分按作者与购买者约定授权，默认一台机器自用；第三方组件和模型保留各自许可及其授予的权利。见 小夜\\第三方许可清单.txt。",
             "发这份包的人：有问题带上「哪一步 + 屏幕上的红字原文」来问，比一句「打不开」快十倍。",
         ]
         + (
@@ -499,7 +503,11 @@ def add_file(archive: zipfile.ZipFile, path: Path, arcname: str, stats: list[int
     if path.suffix.lower() == ".gguf":
         archive.write(path, arcname, zipfile.ZIP_STORED)
     else:
-        archive.write(path, arcname, zipfile.ZIP_DEFLATED, compresslevel=6)
+        # CUDA libraries and full precision weights dominate the complete bundle.
+        # Fast deflate avoids spending minutes per binary for marginal size gains;
+        # CRC and independent read-back still cover every uncompressed byte.
+        level = 1 if path.stat().st_size >= 64 * 1024 * 1024 else 6
+        archive.write(path, arcname, zipfile.ZIP_DEFLATED, compresslevel=level)
     stats[0] += path.stat().st_size
     if stats[0] - stats[1] >= (512 << 20):
         stats[1] = stats[0]
@@ -534,7 +542,8 @@ def build_package(
             "小夜/授权.txt",
             (
                 f"小夜 桌面 AI 语音助手 · 构建 {round_name}\n"
-                "本份授权：一台机器自用；不得转售、不得二次分发成品或源码。\n"
+                "小夜自行开发部分按作者与购买者约定授权，默认一台机器自用。\n"
+                "第三方开源组件和模型保留各自许可；相关许可授予的使用、修改、再分发权利不受本说明限制。\n"
                 "第三方库按其各自许可随包分发，声明见 第三方许可清单.txt；"
                 "随包大模型的许可与来源见 模型/许可与来源.txt。\n"
             ).encode(),
@@ -551,6 +560,23 @@ def build_package(
     if bad:
         raise RuntimeError("临时交付包校验失败，旧文件未替换：" + "; ".join(bad))
     zip_path.replace(final_path)
+
+
+def model_config_path(name: str) -> bool:
+    """The recognition weights ship their own architecture config.yaml.
+
+    ``config.yaml`` is also the name of the app's private configuration, so the
+    privacy gate must distinguish the two by path: only
+    ``小夜/语音模型/<model>/config.yaml`` is a model card, never a file directly
+    under ``小夜/``.
+    """
+    parts = name.replace("\\", "/").split("/")
+    return (
+        len(parts) == 4
+        and parts[0] == PC_DIR
+        and parts[1] == "语音模型"
+        and parts[3] == "config.yaml"
+    )
 
 
 def read_back(
@@ -627,6 +653,7 @@ def read_back(
                     Path(name).name == "config.yaml"
                     and name.startswith(f"{PC_DIR}/_internal/hydra/test_utils/configs/")
                 )
+                and not model_config_path(name)
             )
             or (Path(name).suffix in FORBIDDEN_SUFFIXES and not _scipy_test_audio(name))
         ]
@@ -1034,7 +1061,7 @@ def main() -> int:
             archive.write(ROOT / "04-买家安装与使用说明.md", "小夜/买家安装与使用说明.md")
             archive.writestr(
                 "小夜/授权.txt",
-                f"小夜 · 构建 {round_name}\n一台机器自用；不得转售或二次分发。\n".encode(),
+                f"小夜 · 构建 {round_name}\n自行开发部分默认一台机器自用，第三方组件与模型保留各自许可授予的权利。\n".encode(),
             )
             archive.write(ROOT / "05-第三方许可清单.md", "小夜/第三方许可清单.txt")
             archive.writestr(f"小夜/{MODEL_DIRNAME}/许可与来源.txt", notice)

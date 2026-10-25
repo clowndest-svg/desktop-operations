@@ -6,4 +6,6 @@
 
 `scripts/prepare_portraits.py` 负责等比例切图、WebP、缩略图与面部位置校准。构建工具使用 Pillow、NumPy、OpenCV 4.13；OpenCV 仅用于素材制作，未加入应用运行依赖。输出在 frontend/src/assets/portraits/，每次只解码选中的 6 张表情，缩略图按需加载。原图保留便于后续重新制作。
 
+r126 修正：原始图集的姿态位置并不完全相同，不能按同一坐标直接裁切嘴部。制作阶段使用 [OpenCV YuNet](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) 检测眼睛、鼻尖和嘴角，先统一人物大小与位置，再对齐每张表情；说话帧额外固定嘴角中点。缩放后的原始画布边缘统一羽化，避免肩部矩形截断。YuNet 只作构建工具，不进入运行依赖；其 MIT 许可收在 packaging/licenses/。构建模型 SHA-256 固定在脚本内，配准报告与 20 角色最大开口渲染截图进入本轮验收。
+
 20 个形象共享部分可用音色，并非 20 个不同语音模型。推荐包含普通话和明确标注的台湾国语；允许改配现有内置或用户录制音色。桌面设置由 Python 持久化，手机形象偏好保存在本手机，手机语音使用已配对电脑提供的实际引擎。

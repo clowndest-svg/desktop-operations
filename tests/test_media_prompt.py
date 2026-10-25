@@ -45,6 +45,14 @@ def test_english_input_never_touches_the_network() -> None:
     assert "未联网" in result.note
 
 
+def test_short_english_description_with_on_needs_no_provider() -> None:
+    def refuse(request: Any, timeout: float) -> io.BytesIO:
+        raise AssertionError("English descriptions must not require translation credentials")
+
+    text = "A small red bird sitting on a branch, green leaves, daylight"
+    assert PromptTranslator(refuse, {}).translate(text).english == text
+
+
 def test_unaccented_foreign_is_not_skipped() -> None:
     assert not _looks_english("Dos gatos negros")
     assert not _looks_english("Un chat orange court dans la neige")

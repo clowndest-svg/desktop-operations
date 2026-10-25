@@ -52,6 +52,13 @@ BAIDU_KEY_ENV: Final = "BAIDU_TRANSLATE_KEY"
 # 只放几乎不可能是法/西/德等语言的高频英文虚词：命中一个才当作"已是英文"、跳过联网。
 _ENGLISH_MARKERS: frozenset[str] = frozenset(
     {
+        "a",
+        "in",
+        "on",
+        "at",
+        "of",
+        "to",
+        "for",
         "the",
         "an",
         "and",

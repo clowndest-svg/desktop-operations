@@ -104,7 +104,7 @@ def test_bridge_and_chat_use_the_same_translation_and_mp4(tmp_path: Path, monkey
     )
     assert result["ok"] and Path(result["path"]).is_file()
     assert sent["2"]["inputs"]["text"] == result["prompt"]
-    assert sent["4"]["inputs"]["batch_size"] == 16
+    assert sent["13"]["inputs"]["amount"] == 16
     assert str(bridge.artifact_video(result["path"])["data_url"]).startswith(
         "data:video/mp4;base64,"
     )
@@ -202,8 +202,14 @@ def test_workflow_carries_size_fps_and_frames() -> None:
     graph = build_video_workflow(
         "sd15.safetensors", "a cat", 7, 64, 16, width=384, height=384, fps=12
     )
-    assert graph["4"]["inputs"]["width"] == 384
-    assert graph["4"]["inputs"]["batch_size"] == 64
+    assert graph["4"]["inputs"] == {"width": 512, "height": 512, "batch_size": 1}
+    assert graph["12"]["inputs"]["model"] == ["1", 0]
+    assert graph["12"]["inputs"]["denoise"] == 1.0
+    assert graph["16"]["inputs"]["width"] == 384
+    assert graph["13"]["inputs"] == {"samples": ["16", 0], "amount": 64}
+    assert graph["5"]["inputs"]["latent_image"] == ["13", 0]
+    assert graph["5"]["inputs"]["model"] == ["10", 0]
+    assert graph["5"]["inputs"]["denoise"] == 0.35
     assert graph["7"]["inputs"]["frame_rate"] == 12
 
 
@@ -215,7 +221,7 @@ def test_generate_uses_plan_and_reports_actual_shape(tmp_path: Path, monkeypatch
     assert answer["ok"] is True
     assert answer["frames"] == 32 and answer["fps"] == 8 and answer["size"] == "256x256"
     assert answer["duration"] == 4.0 and answer["capped"] is False
-    assert sent["4"]["inputs"]["batch_size"] == 32
+    assert sent["13"]["inputs"]["amount"] == 32
     assert sent["7"]["inputs"]["frame_rate"] == 8
 
 
@@ -223,7 +229,7 @@ def test_legacy_frames_still_maps_to_a_plan(tmp_path: Path, monkeypatch: Any) ->
     video, _, sent = _service(tmp_path, monkeypatch)
     answer = video.generate("猫", frames=24, steps=16)
     assert answer["ok"] is True and answer["frames"] == 24
-    assert sent["4"]["inputs"]["batch_size"] == 24
+    assert sent["13"]["inputs"]["amount"] == 24
 
 
 def test_setters_validate_and_roundtrip(tmp_path: Path, monkeypatch: Any) -> None:
@@ -265,7 +271,7 @@ def test_chat_tool_carry_size_and_seconds(tmp_path: Path, monkeypatch: Any) -> N
         {"prompt": "一只猫", "size": "256x256", "fps": 8, "seconds": 4, "steps": 12}
     )
     assert "存在：" in words and "4.0 秒" in words
-    assert sent["4"]["inputs"]["batch_size"] == 32
+    assert sent["13"]["inputs"]["amount"] == 32
     assert sent["5"]["inputs"]["steps"] == 12
 
 
@@ -275,6 +281,7 @@ def test_chat_tool_carry_size_and_seconds(tmp_path: Path, monkeypatch: Any) -> N
 class _Resp:
     def __init__(self, payload: bytes) -> None:
         self._payload = payload
+        self._offset = 0
 
     def __enter__(self) -> _Resp:
         return self
@@ -282,8 +289,12 @@ class _Resp:
     def __exit__(self, *args: object) -> None:
         return None
 
-    def read(self, _size: int = -1) -> bytes:
-        return self._payload
+    def read(self, size: int = -1) -> bytes:
+        if size is None or size < 0:
+            size = len(self._payload) - self._offset
+        chunk = self._payload[self._offset : self._offset + size]
+        self._offset += len(chunk)
+        return chunk
 
 
 def _fake_opener(responses: list[bytes]) -> tuple[Any, list[str]]:

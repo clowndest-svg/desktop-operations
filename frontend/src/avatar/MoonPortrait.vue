@@ -13,7 +13,7 @@ import portraitUrl from '@/assets/brand/portrait.webp'
 import speakingUrl from '@/assets/brand/speaking.webp'
 import blinkUrl from '@/assets/brand/blink.webp'
 import { mouthEnvelope, type PortraitMood } from './portraitMotion'
-import { portraitAsset } from './portraitCatalog'
+import { hasPortraitHd, portraitAsset, portraitHdAsset } from './portraitCatalog'
 import rigs from '@/assets/portraits/rigs.json'
 import type { PortraitEmotion } from './portraitEmotion'
 
@@ -24,7 +24,8 @@ const props = withDefaults(defineProps<{
   character?: string
   emotion?: PortraitEmotion
   gaze?: boolean
-}>(), { mood: 'idle', label: '', character: 'p01', emotion: 'neutral', gaze: true })
+  hd?: boolean
+}>(), { mood: 'idle', label: '', character: 'p01', emotion: 'neutral', gaze: true, hd: false })
 
 const canvas = ref<HTMLCanvasElement | null>(null)
 const failed = ref(false)
@@ -32,6 +33,7 @@ let timer: ReturnType<typeof setTimeout> | undefined
 let alive = true
 let visible = true
 let observer: IntersectionObserver | undefined
+let resizer: ResizeObserver | undefined
 let previous = 0
 let mouth = 0
 let nextBlink = 3200
@@ -50,9 +52,17 @@ async function changeCharacter(): Promise<void> {
   const token = ++generation
   failed.value = false
   try {
-    const urls = Array.from({ length: 6 }, (_, i) => portraitAsset(props.character, i))
-    const loaded = await Promise.all(urls.every(Boolean) ? urls.map(load)
-      : [portraitUrl, speakingUrl, blinkUrl].map(load))
+    const standard = Array.from({ length: 6 }, (_, i) => portraitAsset(props.character, i))
+    const fallback = standard.every(Boolean) ? standard : [portraitUrl, speakingUrl, blinkUrl]
+    const hd = props.hd && hasPortraitHd(props.character)
+      ? Array.from({ length: 6 }, (_, i) => portraitHdAsset(props.character, i)) : []
+    let loaded: HTMLImageElement[]
+    try {
+      loaded = await Promise.all((hd.length ? hd : fallback).map(load))
+    } catch (error) {
+      if (!hd.length) throw error
+      loaded = await Promise.all(fallback.map(load))
+    }
     if (!alive || token !== generation) return
     images = loaded
     rig = (rigs as Record<string, Rig>)[props.character]
@@ -104,13 +114,14 @@ function patch(ctx: CanvasRenderingContext2D, image: HTMLImageElement,
   const key = image.src + box.join(',')
   let layer = patches.get(key)
   if (!layer) {
-    layer = document.createElement('canvas'); layer.width = 256; layer.height = 256
+    layer = document.createElement('canvas'); layer.width = 512; layer.height = 512
     const part = layer.getContext('2d')!
-    part.drawImage(image, x*image.width, y*image.height, width*image.width, height*image.height, 0, 0, 256, 256)
+    part.imageSmoothingQuality = 'high'
+    part.drawImage(image, x*image.width, y*image.height, width*image.width, height*image.height, 0, 0, 512, 512)
     part.globalCompositeOperation = 'destination-in'
-    const fade = part.createRadialGradient(128, 128, 85, 128, 128, 128)
+    const fade = part.createRadialGradient(256, 256, 170, 256, 256, 256)
     fade.addColorStop(0, '#fff'); fade.addColorStop(1, '#fff0')
-    part.fillStyle=fade; part.fillRect(0, 0, 256, 256)
+    part.fillStyle=fade; part.fillRect(0, 0, 512, 512)
     patches.set(key, layer)
   }
   ctx.save(); ctx.globalAlpha=alpha; ctx.drawImage(layer, x,y,width,height); ctx.restore()
@@ -140,7 +151,13 @@ function frame(): void {
   }
   ctx.setTransform(1, 0, 0, 1, 0, 0)
   ctx.clearRect(0, 0, view.width, view.height)
-  ctx.scale(view.width, view.height)
+  ctx.imageSmoothingEnabled = true
+  ctx.imageSmoothingQuality = 'high'
+  // The canvas box is wider than it is tall on the desktop. Draw the square
+  // portrait inside it instead of stretching the face horizontally.
+  const side = Math.min(view.width, view.height)
+  ctx.translate(view.width - side, view.height - side)
+  ctx.scale(side, side)
   if (!calm?.matches) {
     const tilt = props.mood === 'listening' ? -0.016 : props.mood === 'thinking' ? 0.014 : 0
     ctx.translate(0.5, 0.7)
@@ -166,18 +183,34 @@ function frame(): void {
   timer = setTimeout(frame, audio.talking || now < blinkUntil ? 33 : 100)
 }
 
+function resizeCanvas(): void {
+  const view = canvas.value
+  if (!view) return
+  const box = view.getBoundingClientRect()
+  if (!box.width || !box.height) return
+  const ratio = Math.min(2, Math.max(1, window.devicePixelRatio || 1))
+  const width = Math.min(2048, Math.max(256, Math.round(box.width * ratio)))
+  const height = Math.min(2048, Math.max(256, Math.round(box.height * ratio)))
+  if (view.width !== width || view.height !== height) {
+    view.width = width
+    view.height = height
+  }
+}
+
 onMounted(async () => {
   calm = matchMedia('(prefers-reduced-motion: reduce)')
   const view = canvas.value!
-  view.width = 640
-  view.height = 630
+  resizeCanvas()
   document.addEventListener('visibilitychange', frame)
   window.addEventListener('pointermove', pointer, { passive: true })
+  window.addEventListener('resize', resizeCanvas)
   observer = new IntersectionObserver(([entry]) => {
     visible = entry?.isIntersecting ?? true
     frame()
   })
   observer.observe(view)
+  resizer = new ResizeObserver(() => { resizeCanvas(); frame() })
+  resizer.observe(view)
   nextBlink += performance.now()
   await changeCharacter()
 })
@@ -187,8 +220,10 @@ onBeforeUnmount(() => {
   alive = false
   clearTimeout(timer)
   observer?.disconnect()
+  resizer?.disconnect()
   document.removeEventListener('visibilitychange', frame)
   window.removeEventListener('pointermove', pointer)
+  window.removeEventListener('resize', resizeCanvas)
   patches.clear()
 })
 </script>

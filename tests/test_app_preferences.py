@@ -17,6 +17,7 @@ import pytest
 from jarvis.app.preferences import (
     MIRROR_MODE,
     SHELL_TIER,
+    VIDEO_CLOUD_MODEL,
     VOICE_AUTO_ARM,
     Preferences,
 )
@@ -203,3 +204,24 @@ class TestPersistenceIsHonestAboutItself:
         assert prefs.retry_unsaved() == []
         saved = json.loads(file.read_text(encoding="utf-8"))
         assert saved[SHELL_TIER] == 1 and saved[MIRROR_MODE] == "scan"
+
+    def test_unset_removes_the_key_so_defaults_apply_after_a_restart(self, tmp_path: Path) -> None:
+        file = tmp_path / "preferences.json"
+        prefs = Preferences(file)
+        assert prefs.set(VIDEO_CLOUD_MODEL, "kling-v1")
+        assert prefs.text(VIDEO_CLOUD_MODEL, default="wanx") == "kling-v1"
+        assert prefs.unset(VIDEO_CLOUD_MODEL) is True
+        assert prefs.unsaved() == []
+        assert VIDEO_CLOUD_MODEL not in json.loads(file.read_text(encoding="utf-8"))
+        assert Preferences(file).text(VIDEO_CLOUD_MODEL, default="wanx") == "wanx"
+
+    def test_an_explicit_empty_string_is_not_the_same_as_unset(self, tmp_path: Path) -> None:
+        file = tmp_path / "preferences.json"
+        prefs = Preferences(file)
+        assert prefs.set(VIDEO_CLOUD_MODEL, "")
+        assert prefs.text(VIDEO_CLOUD_MODEL, default="wanx") == ""
+        assert prefs.unset("not.a.real.key") is False
+
+    def test_unset_still_succeeds_when_the_key_was_never_stored(self, tmp_path: Path) -> None:
+        prefs = Preferences(tmp_path / "preferences.json")
+        assert prefs.unset(VIDEO_CLOUD_MODEL) is True

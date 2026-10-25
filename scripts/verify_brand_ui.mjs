@@ -48,6 +48,23 @@ try {
     await gallery.locator(`button[data-character="${id}"]`).click()
     await page.waitForFunction(id=>document.querySelector('.app__portrait canvas')?.dataset.loadedCharacter===id,id)
     await page.waitForFunction(()=>document.querySelectorAll('.portraits__grid button:not(:disabled)').length===20)
+    if(process.argv.includes('--stress-portraits')){
+      await gallery.getByRole('button',{name:'完成',exact:true}).click()
+      await page.evaluate(()=>{
+        window.__jarvisAudio({flush:true})
+        const pcm=new Int16Array(24000)
+        for(let j=0;j<pcm.length;j++)pcm[j]=Math.sin(j/24000*Math.PI*2*220)*10000
+        const bytes=new Uint8Array(pcm.buffer)
+        let raw='';for(const byte of bytes)raw+=String.fromCharCode(byte)
+        window.__jarvisAudio({seq:0,sample_rate:24000,channels:1,format:'pcm_s16le',final:true,pcm:btoa(raw)})
+      })
+      await page.waitForFunction(()=>Number(document.querySelector('.app__portrait canvas')?.dataset.mouth)>.8)
+      await page.locator('.app__portrait').screenshot({path:path.join(output,`mouth-max-${id}.png`)})
+      await page.evaluate(()=>window.__jarvisAudio({flush:true}))
+      await page.waitForFunction(()=>document.querySelector('.app__portrait canvas')?.dataset.mouth==='0.000')
+      await page.getByRole('button',{name:'形象与声音',exact:true}).click()
+      await page.waitForFunction(()=>document.querySelectorAll('.portraits__grid button:not(:disabled)').length===20)
+    }
   }
   await gallery.locator('button[data-character="p01"]').click()
   await page.waitForFunction(()=>document.querySelector('.app__portrait canvas')?.dataset.loadedCharacter==='p01')

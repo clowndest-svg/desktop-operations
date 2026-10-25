@@ -721,6 +721,32 @@ class Preferences:
             self._unsaved.discard(key)
         return True
 
+    def unset(self, key: str) -> bool:
+        """Remove a stored choice so readers see their default again.
+
+        Explicit empty strings are meaningful for the cloud-video fields (they
+        disable a header or a poll step), so "reset" cannot be implemented by
+        writing empty strings.  Removing the key is the only representation of
+        "not set" that survives a restart.
+        """
+        if key not in PREFERENCE_TYPES:
+            return False
+        with self._lock:
+            values = self._read()
+            if key not in values:
+                self._unsaved.discard(key)
+                return True
+            values.pop(key)
+            self._values = values
+            try:
+                self._write(values)
+            except Exception:
+                logger.exception("could not remove preference %s from %s", key, self._path)
+                self._unsaved.add(key)
+                return False
+            self._unsaved.discard(key)
+        return True
+
     def unsaved(self) -> list[str]:
         """Keys held in memory but not on disk.
 

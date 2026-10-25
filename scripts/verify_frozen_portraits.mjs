@@ -14,9 +14,22 @@ page.on('pageerror',e=>errors.push(e.message))
 const api=(method,...args)=>page.evaluate(async({method,args})=>window.pywebview.api[method](...args),{method,args})
 try{
   await page.waitForFunction(()=>document.querySelector('.app__portrait canvas')?.dataset.loadedCharacter)
+  if(mode!=='restart'){
+    const hd=await page.evaluate(()=>{
+      const entry=[...performance.getEntriesByType('resource')].find(row=>row.name.includes('portraits-hd/p01-0.webp'))
+      const canvas=document.querySelector('.app__portrait canvas')
+      const box=canvas?.getBoundingClientRect()
+      return {found:!!entry,bytes:entry?.transferSize||0,character:canvas?.dataset.loadedCharacter,backing:[canvas?.width,canvas?.height],box:box?[box.width,box.height]:[]}
+    })
+    assert.equal(hd.character,'p01')
+    assert.ok(hd.found && hd.bytes>500000,'the default portrait must load the 4K copy, not the 512 fallback')
+    assert.ok(Math.min(...hd.backing)>=512,'the canvas must not stay at the 512-era backing size')
+    checks.push('default portrait loads the 4K asset and an adaptive canvas backing')
+  }
   if(mode==='restart'){
     const prefs=(await api('settings_get')).portrait_preferences
     assert.equal(prefs.character,'p20');assert.equal(prefs.gaze,false);assert.equal(prefs.bindings.p20,'zh-CN-XiaoyiNeural')
+    assert.ok(prefs.favorites.includes('p01'),'favorites survive a process restart')
     assert.equal(await page.locator('.app__portrait').getAttribute('data-character'),'p20')
     assert.equal((await api('tts_voices')).current,'zh-CN-XiaoyiNeural')
     await page.mouse.move(30,30)
@@ -26,6 +39,11 @@ try{
     await page.getByRole('button',{name:'形象与声音',exact:true}).click()
     const gallery=page.getByRole('dialog',{name:'形象与声音',exact:true})
     await page.waitForFunction(()=>document.querySelectorAll('.portraits__grid button:not(:disabled)').length===20)
+    await gallery.getByRole('button',{name:/收藏当前形象/}).click()
+    await gallery.getByRole('button',{name:/取消收藏/}).waitFor()
+    const savedFavorites=(await api('settings_get')).portrait_preferences.favorites
+    assert.ok(savedFavorites.includes('p01'),'favorite is saved through Python, not only in page memory')
+    checks.push('portrait favorite is persisted through the backend')
     // Refuse the voice call at the boundary; prove the UI does not commit a character.
     await page.evaluate(()=>{
       const api=window.pywebview.api; window.__portraitOriginalPick=api.tts_pick
@@ -63,6 +81,12 @@ try{
     await gallery.locator('button[data-character="p20"]').click()
     await page.waitForFunction(()=>document.querySelector('.app__portrait canvas')?.dataset.loadedCharacter==='p20')
     assert.equal((await api('tts_voices')).current,'zh-CN-XiaoyiNeural')
+    const beforeRandom=(await api('settings_get')).portrait_preferences.character
+    await gallery.getByRole('button',{name:'随机换一位'}).click()
+    await page.waitForFunction(before=>document.querySelector('.app__portrait canvas')?.dataset.loadedCharacter!==before,beforeRandom)
+    checks.push('random portrait changes the active character')
+    await gallery.locator('button[data-character="p20"]').click()
+    await page.waitForFunction(()=>document.querySelector('.app__portrait canvas')?.dataset.loadedCharacter==='p20')
     await gallery.getByRole('checkbox',{name:'眼神跟随鼠标'}).uncheck()
     await page.waitForFunction(()=>!document.querySelector('.portraits__dialog select').disabled)
     await page.screenshot({path:path.join(output,'gallery.png')})

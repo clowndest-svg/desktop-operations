@@ -8,13 +8,14 @@ param(
     [string]$BuildRoot = 'E:\DaiMa\XiaoYeBuild\buyer',
     [string]$MobileRoot = 'E:\DaiMa\XiaoYeBuild\mobile',
     [string]$EngineRoot = 'D:\AI\XiaoYe\engine',
+    [string]$VoiceModelsRoot = 'E:\BianChengGongJu\JarvisData\models\modelscope',
     [string]$Out = '',
     [switch]$DryRun,
     [switch]$Force
 )
 $ErrorActionPreference = 'Stop'
 
-$DefaultOut = 'D:\AI\闲鱼展示文档'
+$DefaultOut = Join-Path $Repo '闲鱼展示内容\交付包'
 if (-not $Out) {
     $Out = $DefaultOut
 }
@@ -78,7 +79,7 @@ if ($LASTEXITCODE -ne 0 -or $pending.Count -gt 0 -or $newFiles.Count -gt 0) { th
 & $python (Join-Path $PSScriptRoot 'run_gates.py') --frontend --out (Join-Path $BuildRoot ('gates-'+$round+'.json'))
 if ($LASTEXITCODE -ne 0) { throw '质量门禁未通过，没有开始买家构建' }
 & (Join-Path $PSScriptRoot 'setup_webview_runtime.ps1')
-& $deliver -Round $round -Root $BuildRoot -MobileRoot $MobileRoot -Out $Out -MediaEngineRoot $EngineRoot -Edition buyer -Build
+& $deliver -Round $round -Root $BuildRoot -MobileRoot $MobileRoot -Out $Out -MediaEngineRoot $EngineRoot -VoiceModelsRoot $VoiceModelsRoot -Edition buyer -Build
 $code = $LASTEXITCODE
 if ($code -ne 0) { Bad ("打包失败，退出码 " + $code + "（交付目录里不会留下半成品 zip）"); exit $code }
 

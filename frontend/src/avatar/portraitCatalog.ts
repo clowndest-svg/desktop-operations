@@ -28,3 +28,13 @@ const assets = import.meta.glob('../assets/portraits/*.webp', { eager: true, que
 export function portraitAsset(id: string, frame: number | 'thumb'): string {
   return assets[`../assets/portraits/${id}-${frame}.webp`] ?? ''
 }
+// The desktop build copies public/ and the mobile build sets publicDir:false,
+// so these 4K copies never inflate the APK.
+const hdCharacters = new Set(['p01'])
+export function hasPortraitHd(id: string): boolean {
+  return hdCharacters.has(id)
+}
+export function portraitHdAsset(id: string, frame: number): string {
+  if (!hdCharacters.has(id) || typeof document === 'undefined') return ''
+  return new URL(`portraits-hd/${id}-${frame}.webp`, document.baseURI).href
+}

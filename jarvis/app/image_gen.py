@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any, Final, Protocol, TypedDict
 
 from jarvis import is_buyer
+from jarvis.app.media_download import IMAGE_MAX_BYTES, read_media
 from jarvis.app.media_prompt import PromptTranslator, TranslationError, Translator
 from jarvis.app.preferences import (
     IMAGE_CLOUD_BASE,
@@ -55,6 +56,7 @@ from jarvis.app.preferences import (
     Preferences,
 )
 from jarvis.config.paths import AppPaths
+from jarvis.core.child_process import clean_external_path, external_dll_search
 from jarvis.llm import local_server
 from jarvis.llm.transport import open_request
 
@@ -1266,13 +1268,13 @@ class ImageService:
             with self._opener(
                 urllib.request.Request(url, headers={"User-Agent": _user_agent()}), timeout
             ) as reply:
-                blob = bytes(reply.read(40 * 1024 * 1024))
+                blob = read_media(reply, limit=IMAGE_MAX_BYTES)
         except urllib.error.HTTPError as exc:
             raise _EngineError(f"取 {url[:80]} 回了 HTTP {exc.code}") from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise _EngineError(_network_words(url, exc)) from exc
-        if not blob:
-            raise _EngineError(f"{url[:80]} 回了 0 字节")
+        except ValueError as exc:
+            raise _EngineError(f"取 {url[:80]} 失败：{exc}") from exc
         return blob
 
     def _request(self, request: urllib.request.Request, timeout: float) -> object:
@@ -1413,6 +1415,7 @@ def vendored_engine_dir() -> Path | None:
 def _engine_python(root: Path, environ: Mapping[str, str]) -> Path | None:
     """ComfyUI 目录旁边那个 python。找不到就回 None，由界面说"指个目录"。"""
     for candidate in (
+        root.parent / "python" / "python.exe",
         root.parent / "venv" / "Scripts" / "python.exe",
         root / "venv" / "Scripts" / "python.exe",
         root / "python_embeded" / "python.exe",
@@ -1429,6 +1432,10 @@ def _default_spawn(argv: list[str], cwd: Path) -> subprocess.Popen[bytes]:
     temporary = cwd.parent / "tmp"
     temporary.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
+    env.pop("PYTHONHOME", None)
+    bundle = str(getattr(sys, "_MEIPASS", ""))
+    if bundle:
+        env["PATH"] = clean_external_path(env.get("PATH", ""), bundle)
     portable_python = cwd.parent / "python" / "python.exe"
     portable_packages = cwd.parent / "venv" / "Lib" / "site-packages"
     if portable_python.is_file() and portable_packages.is_dir():
@@ -1448,15 +1455,16 @@ def _default_spawn(argv: list[str], cwd: Path) -> subprocess.Popen[bytes]:
         NUMBA_CACHE_DIR=str(cache / "numba"),
         MPLCONFIGDIR=str(cache / "matplotlib"),
     )
-    return subprocess.Popen(
-        argv,
-        cwd=str(cwd),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        shell=False,
-        env=env,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
+    with external_dll_search():
+        return subprocess.Popen(
+            argv,
+            cwd=str(cwd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            shell=False,
+            env=env,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
 
 
 def as_opener(func: Callable[..., Any]) -> Opener:

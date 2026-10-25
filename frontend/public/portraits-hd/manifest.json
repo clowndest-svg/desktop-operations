@@ -1,0 +1,60 @@
+{
+  "model": "RealESRGAN_x4plus.pth",
+  "scale": 4,
+  "frames": [
+    {
+      "source": "p01-0.webp",
+      "target": "p01-0.webp",
+      "size": [
+        4096,
+        4096
+      ],
+      "bytes": 1046896
+    },
+    {
+      "source": "p01-1.webp",
+      "target": "p01-1.webp",
+      "size": [
+        2048,
+        2048
+      ],
+      "bytes": 478210
+    },
+    {
+      "source": "p01-2.webp",
+      "target": "p01-2.webp",
+      "size": [
+        2048,
+        2048
+      ],
+      "bytes": 516566
+    },
+    {
+      "source": "p01-3.webp",
+      "target": "p01-3.webp",
+      "size": [
+        2048,
+        2048
+      ],
+      "bytes": 483946
+    },
+    {
+      "source": "p01-4.webp",
+      "target": "p01-4.webp",
+      "size": [
+        2048,
+        2048
+      ],
+      "bytes": 491466
+    },
+    {
+      "source": "p01-5.webp",
+      "target": "p01-5.webp",
+      "size": [
+        2048,
+        2048
+      ],
+      "bytes": 487432
+    }
+  ]
+}

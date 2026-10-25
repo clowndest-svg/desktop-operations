@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import logging
 import re
+import sys
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from jarvis.asr.types import (
@@ -26,6 +28,21 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from jarvis.vad.types import SpeechSegment
 
 logger = logging.getLogger("jarvis.asr.engines")
+
+
+def _bundled_voice_model(model: str) -> str:
+    """Prefer shipped immutable weights; never require a first-run model download."""
+    names = {
+        "iic/SenseVoiceSmall": "SenseVoiceSmall",
+        "fsmn-vad": "fsmn-vad",
+    }
+    name = names.get(model)
+    if name:
+        folder = Path(sys.executable).resolve().parent / "语音模型" / name
+        if (folder / "model.pt").is_file() and (folder / "config.yaml").is_file():
+            return str(folder)
+    return model
+
 
 _SENSEVOICE_TAG = re.compile(r"<\|[^|]*\|>")
 """SenseVoice rich-transcription control tokens (language / emotion / itn flags)."""
@@ -103,8 +120,8 @@ class SenseVoiceAsrEngine:
         self._torch = torch
         try:
             self._model = AutoModel(
-                model=section.model,
-                vad_model="fsmn-vad",
+                model=_bundled_voice_model(section.model),
+                vad_model=_bundled_voice_model("fsmn-vad"),
                 # ct-punc is a second ~850 MB model. SenseVoice already emits
                 # well-segmented text, so it stays opt-in via ``asr.punctuation``.
                 punc_model="ct-punc" if section.punctuation else None,

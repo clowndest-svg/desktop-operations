@@ -991,19 +991,37 @@ class _ChunkPump:
         self._queue: queue.Queue[tuple[str, BaseException | StreamChunk | None]] = queue.Queue(
             maxsize=1
         )
+        self._closed = threading.Event()
+        self._produced = threading.Event()
         self._thread = threading.Thread(target=self._run, name="llm-stream-pump", daemon=True)
         self._thread.start()
 
+    def _offer(self, item: tuple[str, BaseException | StreamChunk | None]) -> bool:
+        while not self._closed.is_set():
+            try:
+                self._queue.put(item, timeout=_STOP_POLL_SECONDS)
+                return True
+            except queue.Full:
+                continue
+        return False
+
     def _run(self) -> None:
         try:
-            for chunk in self._source:
-                self._queue.put(("chunk", chunk))
+            while not self._closed.is_set():
+                try:
+                    chunk = next(self._source)
+                except StopIteration:
+                    self._offer(("done", None))
+                    break
+                if not self._offer(("chunk", chunk)):
+                    break
+                self._produced.set()
         except BaseException as exc:  # relayed to the consumer verbatim, then re-raised
-            self._queue.put(("error", exc))
-        else:
-            self._queue.put(("done", None))
+            self._offer(("error", exc))
         finally:
-            with suppress(Exception):  # may be mid-read in this very thread's generator
+            # A managed request may hold an RLock across yields. Only its owning
+            # producer thread may close the generator and release that lock.
+            with suppress(Exception):
                 self._source.close()
 
     def take(self, wait: float) -> tuple[str, BaseException | StreamChunk | None]:
@@ -1014,9 +1032,20 @@ class _ChunkPump:
             return ("pending", None)
 
     def close(self) -> None:
-        """Ask the source to finish; never raise on the way out of a cancelled turn."""
-        with suppress(Exception):
-            self._source.close()
+        """Stop queueing and give the producer a bounded chance to close its source.
+
+        The source must be closed on the producer thread: a managed local request
+        can hold an RLock across yields, and releasing it from the consumer would
+        be a cross-thread unlock.  A source blocked in a socket read cannot be
+        interrupted here; the producer closes it when that read returns.
+        """
+        self._closed.set()
+        # Before the first token the producer is usually blocked in the first
+        # socket read; waiting here would hide the stop button for no benefit
+        # (nothing has been read yet). After output exists, the bounded join
+        # lets a list-backed source record its close on the producer thread.
+        if self._produced.is_set() and self._thread is not threading.current_thread():
+            self._thread.join(timeout=0.5)
 
 
 _STOP_POLL_SECONDS: float = 0.1

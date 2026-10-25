@@ -295,14 +295,43 @@ def build_video_workflow(
     height: int = 256,
     fps: int = 8,
 ) -> dict[str, Any]:
-    """256px + 八帧上下文是 4 GB 卡上实测过的形状；更大的组合按显存上限截过才进来。"""
+    """先生成 512px 关键帧，再以低重绘强度生成动作；八帧上下文限制显存。"""
     return {
         "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": checkpoint}},
         "2": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["1", 1]}},
         "3": {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["1", 1]}},
         "4": {
             "class_type": "EmptyLatentImage",
-            "inputs": {"width": width, "height": height, "batch_size": frames},
+            "inputs": {"width": 512, "height": 512, "batch_size": 1},
+        },
+        "12": {
+            "class_type": "KSampler",
+            "inputs": {
+                "model": ["1", 0],
+                "positive": ["2", 0],
+                "negative": ["3", 0],
+                "latent_image": ["4", 0],
+                "seed": seed,
+                "steps": max(20, steps),
+                "cfg": 7.0,
+                "sampler_name": "euler",
+                "scheduler": "normal",
+                "denoise": 1.0,
+            },
+        },
+        "16": {
+            "class_type": "LatentUpscale",
+            "inputs": {
+                "samples": ["12", 0],
+                "upscale_method": "bilinear",
+                "width": width,
+                "height": height,
+                "crop": "disabled",
+            },
+        },
+        "13": {
+            "class_type": "RepeatLatentBatch",
+            "inputs": {"samples": ["16", 0], "amount": frames},
         },
         "9": {
             "class_type": "ADE_StandardUniformContextOptions",
@@ -321,7 +350,7 @@ def build_video_workflow(
             "inputs": {
                 "model": ["1", 0],
                 "model_name": MOTION_MODEL,
-                "beta_schedule": "sqrt_linear (AnimateDiff)",
+                "beta_schedule": "linear (HotshotXL/default)",
                 "context_options": ["9", 0],
             },
         },
@@ -331,13 +360,13 @@ def build_video_workflow(
                 "model": ["10", 0],
                 "positive": ["2", 0],
                 "negative": ["3", 0],
-                "latent_image": ["4", 0],
+                "latent_image": ["13", 0],
                 "seed": seed,
                 "steps": steps,
-                "cfg": 7.5,
+                "cfg": 3.0,
                 "sampler_name": "euler",
                 "scheduler": "normal",
-                "denoise": 1.0,
+                "denoise": 0.35,
             },
         },
         "6": {
@@ -521,12 +550,16 @@ class VideoService:
         self._prefs.set(VIDEO_ENGINE, raw)
         return ""
 
+    def reset_cloud(self) -> None:
+        """Forget every cloud-video field; readers fall back to the factory default."""
+        for key in _CLOUD_DEFAULTS:
+            self._prefs.unset(key)
+
     def _cloud_config(self) -> CloudVideoConfig:
-        """把偏好里的云端各格拼成一份契约。空＝用出厂默认（通义万相那套）。"""
+        """未保存的格子用出厂默认；显式空值可关闭轮询或额外请求头。"""
 
         def value(key: str) -> str:
-            stored = self._prefs.text(key).strip()
-            return stored if stored else _CLOUD_DEFAULTS[key]
+            return self._prefs.text(key, default=_CLOUD_DEFAULTS[key]).strip()
 
         return CloudVideoConfig(
             submit_url=value(VIDEO_CLOUD_SUBMIT),

@@ -3,16 +3,29 @@
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
-from jarvis.asr.engines import BufferedAsrStream, SenseVoiceAsrEngine
+from jarvis.asr.engines import BufferedAsrStream, SenseVoiceAsrEngine, _bundled_voice_model
 from jarvis.asr.types import AsrResultType, AsrStream, RecognitionResult, SpeechRecognizer
 from jarvis.config.loader import load_defaults
 from jarvis.config.schema import AsrSection
 from jarvis.core.exceptions import AsrError
 from jarvis.vad.types import SpeechSegment
+
+
+def test_portable_voice_models_override_only_builtin_ids(tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "小夜.exe"))
+    folder = tmp_path / "语音模型/SenseVoiceSmall"
+    folder.mkdir(parents=True)
+    (folder / "model.pt").write_bytes(b"fixture")
+    assert _bundled_voice_model("iic/SenseVoiceSmall") == "iic/SenseVoiceSmall"
+    (folder / "config.yaml").write_text("model: fixture", encoding="utf-8")
+    assert _bundled_voice_model("iic/SenseVoiceSmall") == str(folder)
+    assert _bundled_voice_model("custom/model") == "custom/model"
 
 
 def asr_section(**overrides: object) -> AsrSection:

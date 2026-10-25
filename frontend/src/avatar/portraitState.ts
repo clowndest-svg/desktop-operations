@@ -6,8 +6,9 @@ export interface PortraitPreferences {
   gaze: boolean
   emotions: boolean
   bindings: Record<string, string>
+  favorites: string[]
 }
-export const portraitState = reactive<PortraitPreferences>({ character: 'p01', gaze: true, emotions: true, bindings: {} })
+export const portraitState = reactive<PortraitPreferences>({ character: 'p01', gaze: true, emotions: true, bindings: {}, favorites: [] })
 let pending: Promise<void> | undefined
 export function loadPortraitPreferences(): Promise<void> {
   return pending ??= fetchSettings().then(answer => {

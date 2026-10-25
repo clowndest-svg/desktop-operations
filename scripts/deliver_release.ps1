@@ -5,6 +5,7 @@ param(
     [string]$Root='E:\DaiMa\XiaoYeBuild',
     [string]$Out='',
     [string]$MediaEngineRoot='',
+    [string]$VoiceModelsRoot='E:\BianChengGongJu\JarvisData\models\modelscope',
     [string]$MobileRoot='',
     [string]$ReleaseNotes='免Key本地联网、带来源的知识库自学、多语言画面描述和历史提问修改。',
     [ValidateSet('author','buyer')][string]$Edition='author',
@@ -58,6 +59,8 @@ if ($Build) {
         if ($LASTEXITCODE -ne 0) { throw '本地图片/视频引擎没有完整落位' }
     }
     if ($Edition -eq 'buyer') {
+        & $python (Join-Path $PSScriptRoot 'place_voice_models.py') --source $VoiceModelsRoot --app-dir (Split-Path -Parent $exe)
+        if ($LASTEXITCODE -ne 0) { throw '离线语音权重没有完整落位' }
         $runtimeManifest='D:\AI\XiaoYe\resources\webview2\runtime.json'
         if (-not (Test-Path -LiteralPath $runtimeManifest)) { throw 'Missing fixed WebView2; run setup_webview_runtime.ps1' }
         $runtime=Get-Content -LiteralPath $runtimeManifest -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -108,6 +111,7 @@ $process.Refresh()
 if (-not (Test-Path -LiteralPath $probePath)) { throw '新 exe 未生成自检报告' }
 $probe = Get-Content -LiteralPath $probePath -Raw -Encoding UTF8 | ConvertFrom-Json
 if ($probe.ok -ne $true -or $probe.frozen -ne $true) { throw '新 exe 自检未通过' }
+if ($probe.build.edition -ne $Edition) { throw "交付身份不一致：程序为 $($probe.build.edition)，请求为 $Edition；禁止混用作者版和买家版" }
 Copy-Item -LiteralPath $probePath -Destination (Join-Path $qa 'self-check.json') -Force
 # 这一版 exe 还得**知道自己是不是这一轮**。`check_update` 拿这一个数回答买家「我这版旧不旧」，
 # 而它是打包时从 --distpath 里认出来的：spec 少写一行、或者 --distpath 和 -Round 指到两处，

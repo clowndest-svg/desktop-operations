@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from typing import Any, Final, Protocol, cast
 
 from jarvis.app.image_gen import _EngineError
+from jarvis.app.media_download import VIDEO_MAX_BYTES, read_media
 
 USER_AGENT: Final = "JarvisDesktop/1.0 (+local-video)"
 
@@ -213,25 +214,14 @@ class CloudVideoClient:
         request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
         try:
             with self._opener(request, 120.0) as reply:
-                chunks: list[bytes] = []
-                total = 0
-                while True:
-                    if should_stop and should_stop():
-                        raise _EngineError("已停止等待云端视频；服务商任务可能仍在执行")
-                    chunk = bytes(reply.read(512 * 1024))
-                    total += len(chunk)
-                    if total > 400 * 1024 * 1024:
-                        raise _EngineError("云端视频超过400MB限制，未保存残缺文件")
-                    if chunk:
-                        chunks.append(chunk)
-                    if len(chunk) < 512 * 1024:
-                        break
-                blob = b"".join(chunks)
+                blob = read_media(reply, limit=VIDEO_MAX_BYTES, should_stop=should_stop)
         except urllib.error.HTTPError as exc:
             raise _EngineError(f"取云端视频回了 HTTP {exc.code}") from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             reason = getattr(exc, "reason", exc)
             raise _EngineError(f"取云端视频失败：{reason}") from exc
+        except ValueError as exc:
+            raise _EngineError(f"取云端视频失败：{exc}") from exc
         if len(blob) < 32 or blob[4:8] != b"ftyp":
             raise _EngineError("云端下的文件不是有效 MP4（没有 ftyp 头）。")
         return blob

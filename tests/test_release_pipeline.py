@@ -168,6 +168,21 @@ def test_failed_packaging_preserves_the_previous_file(
     assert package_tree["zip_path"].read_bytes() == b"previous release"
 
 
+def test_model_architecture_config_is_not_mistaken_for_the_app_config(
+    delivery: ModuleType,
+) -> None:
+    """ASR weights carry ``config.yaml``; that is a model card, not the private app config."""
+    assert delivery.model_config_path("小夜/语音模型/fsmn-vad/config.yaml")
+    assert delivery.model_config_path("小夜/语音模型/SenseVoiceSmall/config.yaml")
+    for name in (
+        "小夜/config.yaml",
+        "小夜/语音模型/config.yaml",
+        "小夜/语音模型/fsmn-vad/other.yaml",
+        "小夜/语音模型/fsmn-vad/config.yaml.bak",
+    ):
+        assert not delivery.model_config_path(name), name
+
+
 def test_readback_detects_same_size_exe_or_document_changes(
     delivery: ModuleType, package_tree: dict[str, Any]
 ) -> None:

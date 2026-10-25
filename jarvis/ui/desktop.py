@@ -3496,21 +3496,7 @@ class HudBridge:
         """把云端各格清空＝退回出厂默认（通义万相那套）。清的是存值，不是钥匙值。"""
         if self._videos is None:
             return {"phase": "off", "error": "没有接本地视频服务", "last_path": ""}
-        for field in (
-            "submit_url",
-            "key_env",
-            "model",
-            "body",
-            "headers",
-            "task_path",
-            "poll_url",
-            "video_path",
-            "status_path",
-            "succeeded",
-            "running",
-            "failed",
-        ):
-            self._videos.set_cloud({field: ""})
+        self._videos.reset_cloud()
         return self._videos.status()
 
     def artifact_video(self, path: object) -> dict[str, object]:

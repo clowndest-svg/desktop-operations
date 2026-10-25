@@ -89,5 +89,5 @@ jarvis/vendor/
 /.r[0-9]*/
 /.audit/
 
-# Private commercial documents remain local.
+# 商业材料永不进公开分支。
 commercial/

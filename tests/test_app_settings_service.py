@@ -47,6 +47,7 @@ def test_portrait_settings_survive_service_restart(prefs: Preferences, env: dict
                 "character": "p17",
                 "gaze": False,
                 "bindings": {"p17": "zh-CN-XiaoyiNeural"},
+                "favorites": ["p03", "p17", "p03"],
             }
         }
     )
@@ -54,6 +55,7 @@ def test_portrait_settings_survive_service_restart(prefs: Preferences, env: dict
     restarted, _, _ = _service(prefs, env)
     assert restarted.snapshot()["portrait_preferences"]["character"] == "p17"
     assert restarted.snapshot()["portrait_preferences"]["bindings"]["p17"] == "zh-CN-XiaoyiNeural"
+    assert restarted.snapshot()["portrait_preferences"]["favorites"] == ["p03", "p17"]
 
 
 def _section(**overrides: Any) -> LlmSection:
