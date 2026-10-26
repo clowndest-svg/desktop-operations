@@ -50,6 +50,41 @@ def test_default_character_has_a_complete_4k_set() -> None:
             assert image.mode == "RGBA", path
 
 
+def test_feature_patches_cover_every_character_and_mouth_level() -> None:
+    folder = STANDARD / "patches"
+    manifest = json.loads((folder / "patches.json").read_text(encoding="utf-8"))
+    files = 0
+    total = 0
+    for number in range(1, 21):
+        character = f"p{number:02}"
+        entry = manifest["characters"][character]
+        patches = entry["patches"]
+        assert set(patches) == {
+            "blink",
+            "cavity",
+            "speaking",
+            "happy",
+            "pout",
+            "soft",
+            "pout-brows",
+            "mouth",
+        }, character
+        assert set(patches["mouth"]) == {"25", "50", "75", "100"}
+        for item in [*patches.values(), *patches["mouth"].values()]:
+            if not isinstance(item, dict) or "file" not in item:
+                continue
+            path = folder / item["file"]
+            assert path.is_file(), path
+            with Image.open(path) as image:
+                image.load()
+                assert image.mode == "RGBA", path
+                assert image.size == (item["width"], item["height"]), path
+            files += 1
+            total += path.stat().st_size
+    assert files == 220
+    assert total < 20 * 1024 * 1024
+
+
 def test_face_registration_still_lands_inside_the_4k_frame() -> None:
     rigs = json.loads((STANDARD / "rigs.json").read_text(encoding="utf-8"))
     face = rigs["p01"]["face"]

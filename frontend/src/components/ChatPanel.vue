@@ -41,6 +41,9 @@
         <button class="hud-btn chat__clear" type="button" :disabled="busy || lines.length === 0" @click="clear">
           清空
         </button>
+        <button class="hud-btn chat__export" type="button" :disabled="busy || lines.length === 0" @click="exportChat">
+          导出
+        </button>
         <!-- 用量放在对话区而不是设置里：它是"这场对话花了多少"，不是"机器配置"。 -->
         <button class="hud-btn chat__usage" type="button" @click="emit('usage')">用量</button>
         <button
@@ -575,6 +578,7 @@ import {
   chatCollaborate,
   copyImage,
   copyTextViaBridge,
+  exportConversation,
   fetchModels,
   fetchSessionMessages,
   fetchSessions,
@@ -1920,9 +1924,26 @@ async function addTab(): Promise<void> {
     overlay.value = null
     localError.value = ''
     await voice.pullSnapshot()
+    // chat_new only pushes the conversation list. The history snapshot can still
+    // hold the previous tab, so an empty new tab would render the old answers
+    // until the next switch. Reload the now-active (empty) conversation.
+    await loadCurrent()
     await scrollToEnd()
   } catch (err) {
     localError.value = err instanceof Error ? err.message : String(err)
+  }
+}
+
+async function exportChat(): Promise<void> {
+  const conversation = activeTab.value?.id || activeSession.value
+  if (!conversation) return
+  try {
+    const answer = await exportConversation(conversation)
+    switchNotice.value = answer.ok
+      ? `已导出：${answer.path}`
+      : `没能导出：${answer.error || '未知原因'}`
+  } catch (err) {
+    switchNotice.value = `没能导出：${err instanceof Error ? err.message : String(err)}`
   }
 }
 

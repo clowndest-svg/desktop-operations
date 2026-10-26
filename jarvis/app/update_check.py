@@ -40,6 +40,7 @@ class ReleaseInfo(TypedDict):
     current: str
     latest: str
     newer: bool
+    server_behind: bool
     notes: str
     size_mb: float
     sha256: str
@@ -53,6 +54,7 @@ def _fail(error: str) -> ReleaseInfo:
         "current": release_round(),
         "latest": "",
         "newer": False,
+        "server_behind": False,
         "notes": "",
         "size_mb": 0.0,
         "sha256": "",
@@ -120,6 +122,7 @@ def fetch_release(
             "这是作者这边清单写错了，把这句贴回来"
         )
     newer = theirs > mine
+    server_behind = theirs < mine
     latest = f"r{theirs}"
     size = data.get("size_mb")
     try:
@@ -131,6 +134,7 @@ def fetch_release(
         "current": release_round(),
         "latest": latest,
         "newer": newer,
+        "server_behind": server_behind,
         "notes": str(data.get("notes") or "")[:2000],
         "size_mb": size_mb,
         "sha256": str(data.get("sha256") or ""),
@@ -144,6 +148,11 @@ def words(info: ReleaseInfo) -> str:
     if not info["ok"]:
         return f"没查到新版：{info['error']}"
     if not info["newer"]:
+        if info.get("server_behind"):
+            return (
+                f"你手上这版是 {info['current']}，清单上最新的一版却是 {info['latest']} —— "
+                "清单比你手上的版本还旧，作者那边的发布清单可能没同步；别降级，先把这句贴回去问作者。"
+            )
         return (
             f"你手上这版是 {info['current']}，清单上最新的一版也是 {info['latest']} —— 没落下什么。"
             f"（想知道这版和上一版差在哪，看包里的 清单.txt 或问「新版改了什么」。）"
@@ -153,6 +162,6 @@ def words(info: ReleaseInfo) -> str:
     where = f" 下载地址：{info['url']}" if info["url"] else ""
     return (
         f"有新版：{info['latest']}（你现在是 {info['current']}）{tail}。"
-        f"软件**不会自己下载也不会自己换** —— 包有 10 GB 左右，这一步得你点头。"
+        f"软件**不会自己下载也不会自己换** —— 这一步得你点头。"
         f"{notes}{where}"
     )

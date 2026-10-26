@@ -38,3 +38,11 @@ export function portraitHdAsset(id: string, frame: number): string {
   if (!hdCharacters.has(id) || typeof document === 'undefined') return ''
   return new URL(`portraits-hd/${id}-${frame}.webp`, document.baseURI).href
 }
+const patchAssets = import.meta.glob('../assets/portraits/patches/*.webp', {
+  eager: true,
+  query: '?url',
+  import: 'default',
+}) as Record<string, string>
+export function portraitPatchAsset(id: string, kind: string): string {
+  return patchAssets[`../assets/portraits/patches/${id}-${kind}.webp`] ?? ''
+}

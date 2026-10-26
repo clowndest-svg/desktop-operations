@@ -210,6 +210,10 @@ class TestWhatTheEndpointCanSay:
         _set(_manifest(round="r99"))
         info = fetch_release(_url(server))
         assert info["ok"] is True and info["newer"] is False
+        assert info["server_behind"] is True
+        said = words(info)
+        assert "清单" in said and "别降级" in said
+        assert "也在 r99" not in said, "不许把旧清单说成最新"
 
     def test_a_manifest_without_a_round_is_the_authors_problem(
         self, server: ThreadingHTTPServer
@@ -265,6 +269,7 @@ class TestWhatTheEndpointCanSay:
             "current",
             "latest",
             "newer",
+            "server_behind",
             "notes",
             "size_mb",
             "sha256",
@@ -272,3 +277,21 @@ class TestWhatTheEndpointCanSay:
             "error",
         ):
             assert key in info, f"少了 {key}：界面读成 undefined 就会整块不画"
+
+
+def test_the_tool_layer_also_reports_a_stale_server_manifest() -> None:
+    from jarvis.tools.builtins.update_tools import _words as tool_words
+
+    words = tool_words(
+        {
+            "ok": True,
+            "current": "r127",
+            "latest": "r119",
+            "newer": False,
+            "server_behind": True,
+            "size_mb": 0,
+            "url": "",
+        }
+    )
+    assert "还新" in words and "别降级" in words
+    assert "就是清单上最新" not in words

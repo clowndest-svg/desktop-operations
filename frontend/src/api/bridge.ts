@@ -2003,6 +2003,14 @@ export interface SessionMessages {
   messages: StoredTurn[]
 }
 
+/** A Markdown copy of one stored conversation, written under 数据/文档/对话/. */
+export interface ChatExport {
+  ok: boolean
+  path: string
+  count: number
+  error: string
+}
+
 /**
  * One message on the audio channel: a slice of s16le PCM, or a command to stop.
  *
@@ -2169,6 +2177,7 @@ interface PywebviewApi {
   chat_delete(sessionId: string): Promise<SessionList>
   chat_delete_many(sessionIds: string[]): Promise<BatchSessionDelete>
   chat_messages(sessionId: string): Promise<SessionMessages>
+  chat_export(sessionId: string): Promise<ChatExport>
   voice_status(): Promise<VoiceStatus>
   voice_enable(): Promise<VoiceStatus>
   voice_mute(): Promise<VoiceStatus>
@@ -4014,6 +4023,9 @@ const mock: PywebviewApi = {
   },
   async chat_messages() {
     return { error: '', current: 'mock', messages: [] }
+  },
+  async chat_export() {
+    return { ok: false, path: '', count: 0, error: '预览模式没有可写的数据目录' }
   },
   async computer_levels() {
     return {
@@ -6202,6 +6214,10 @@ export function deleteSessions(sessionIds: string[]): Promise<BatchSessionDelete
 /** Every stored turn of one conversation, oldest first. */
 export function fetchSessionMessages(sessionId: string): Promise<SessionMessages> {
   return bridge().then((target) => target.chat_messages(sessionId))
+}
+
+export function exportConversation(sessionId: string): Promise<ChatExport> {
+  return bridge().then((target) => target.chat_export(sessionId))
 }
 
 /**

@@ -1,0 +1,1605 @@
+{
+  "version": 1,
+  "characters": {
+    "p01": {
+      "high": true,
+      "patches": {
+        "blink": {
+          "file": "p01-blink.webp",
+          "width": 2048,
+          "height": 2048,
+          "mask_pixels": 55318,
+          "bytes": 27386
+        },
+        "cavity": {
+          "file": "p01-cavity.webp",
+          "width": 2048,
+          "height": 2048,
+          "mask_pixels": 41237,
+          "bytes": 24550
+        },
+        "speaking": {
+          "file": "p01-speaking.webp",
+          "width": 2048,
+          "height": 2048,
+          "mask_pixels": 75621,
+          "bytes": 27256
+        },
+        "happy": {
+          "file": "p01-happy.webp",
+          "width": 2048,
+          "height": 2048,
+          "mask_pixels": 33224,
+          "bytes": 22044
+        },
+        "pout": {
+          "file": "p01-pout.webp",
+          "width": 2048,
+          "height": 2048,
+          "mask_pixels": 27797,
+          "bytes": 19342
+        },
+        "soft": {
+          "file": "p01-soft.webp",
+          "width": 2048,
+          "height": 2048,
+          "mask_pixels": 29325,
+          "bytes": 21602
+        },
+        "pout-brows": {
+          "file": "p01-pout-brows.webp",
+          "width": 2048,
+          "height": 2048,
+          "mask_pixels": 66768,
+          "bytes": 33816
+        },
+        "mouth": {
+          "25": {
+            "file": "p01-mouth-25.webp",
+            "width": 2048,
+            "height": 2048,
+            "bytes": 89788
+          },
+          "50": {
+            "file": "p01-mouth-50.webp",
+            "width": 2048,
+            "height": 2048,
+            "bytes": 90442
+          },
+          "75": {
+            "file": "p01-mouth-75.webp",
+            "width": 2048,
+            "height": 2048,
+            "bytes": 90382
+          },
+          "100": {
+            "file": "p01-mouth-100.webp",
+            "width": 2048,
+            "height": 2048,
+            "bytes": 90782
+          }
+        }
+      }
+    },
+    "p02": {
+      "high": false,
+      "patches": {
+        "blink": {
+          "file": "p02-blink.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 12306,
+          "bytes": 9822
+        },
+        "cavity": {
+          "file": "p02-cavity.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 9597,
+          "bytes": 6768
+        },
+        "speaking": {
+          "file": "p02-speaking.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 17799,
+          "bytes": 9562
+        },
+        "happy": {
+          "file": "p02-happy.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 45269,
+          "bytes": 10676
+        },
+        "pout": {
+          "file": "p02-pout.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 45307,
+          "bytes": 10314
+        },
+        "soft": {
+          "file": "p02-soft.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 45347,
+          "bytes": 9816
+        },
+        "pout-brows": {
+          "file": "p02-pout-brows.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 14744,
+          "bytes": 9676
+        },
+        "mouth": {
+          "25": {
+            "file": "p02-mouth-25.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 36476
+          },
+          "50": {
+            "file": "p02-mouth-50.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 35536
+          },
+          "75": {
+            "file": "p02-mouth-75.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 35344
+          },
+          "100": {
+            "file": "p02-mouth-100.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 35404
+          }
+        }
+      }
+    },
+    "p03": {
+      "high": false,
+      "patches": {
+        "blink": {
+          "file": "p03-blink.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 13314,
+          "bytes": 9632
+        },
+        "cavity": {
+          "file": "p03-cavity.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 10005,
+          "bytes": 6700
+        },
+        "speaking": {
+          "file": "p03-speaking.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 18709,
+          "bytes": 9494
+        },
+        "happy": {
+          "file": "p03-happy.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 19636,
+          "bytes": 8188
+        },
+        "pout": {
+          "file": "p03-pout.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 32887,
+          "bytes": 10650
+        },
+        "soft": {
+          "file": "p03-soft.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 14474,
+          "bytes": 8008
+        },
+        "pout-brows": {
+          "file": "p03-pout-brows.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 16104,
+          "bytes": 10208
+        },
+        "mouth": {
+          "25": {
+            "file": "p03-mouth-25.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 31752
+          },
+          "50": {
+            "file": "p03-mouth-50.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 31646
+          },
+          "75": {
+            "file": "p03-mouth-75.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 31638
+          },
+          "100": {
+            "file": "p03-mouth-100.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 31604
+          }
+        }
+      }
+    },
+    "p04": {
+      "high": false,
+      "patches": {
+        "blink": {
+          "file": "p04-blink.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 13314,
+          "bytes": 10386
+        },
+        "cavity": {
+          "file": "p04-cavity.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 10005,
+          "bytes": 6982
+        },
+        "speaking": {
+          "file": "p04-speaking.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 18709,
+          "bytes": 9774
+        },
+        "happy": {
+          "file": "p04-happy.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 46278,
+          "bytes": 10874
+        },
+        "pout": {
+          "file": "p04-pout.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 46721,
+          "bytes": 9896
+        },
+        "soft": {
+          "file": "p04-soft.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 46438,
+          "bytes": 10068
+        },
+        "pout-brows": {
+          "file": "p04-pout-brows.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 16104,
+          "bytes": 9468
+        },
+        "mouth": {
+          "25": {
+            "file": "p04-mouth-25.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 37760
+          },
+          "50": {
+            "file": "p04-mouth-50.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 37870
+          },
+          "75": {
+            "file": "p04-mouth-75.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 37838
+          },
+          "100": {
+            "file": "p04-mouth-100.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 37802
+          }
+        }
+      }
+    },
+    "p05": {
+      "high": false,
+      "patches": {
+        "blink": {
+          "file": "p05-blink.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 13078,
+          "bytes": 9086
+        },
+        "cavity": {
+          "file": "p05-cavity.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 10155,
+          "bytes": 6984
+        },
+        "speaking": {
+          "file": "p05-speaking.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 18901,
+          "bytes": 9706
+        },
+        "happy": {
+          "file": "p05-happy.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 46979,
+          "bytes": 10698
+        },
+        "pout": {
+          "file": "p05-pout.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 42003,
+          "bytes": 11676
+        },
+        "soft": {
+          "file": "p05-soft.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 42378,
+          "bytes": 10398
+        },
+        "pout-brows": {
+          "file": "p05-pout-brows.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 15392,
+          "bytes": 8794
+        },
+        "mouth": {
+          "25": {
+            "file": "p05-mouth-25.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 42828
+          },
+          "50": {
+            "file": "p05-mouth-50.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 42832
+          },
+          "75": {
+            "file": "p05-mouth-75.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 42174
+          },
+          "100": {
+            "file": "p05-mouth-100.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 41604
+          }
+        }
+      }
+    },
+    "p06": {
+      "high": false,
+      "patches": {
+        "blink": {
+          "file": "p06-blink.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 13078,
+          "bytes": 10150
+        },
+        "cavity": {
+          "file": "p06-cavity.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 10301,
+          "bytes": 7072
+        },
+        "speaking": {
+          "file": "p06-speaking.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 19104,
+          "bytes": 10204
+        },
+        "happy": {
+          "file": "p06-happy.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 46684,
+          "bytes": 9844
+        },
+        "pout": {
+          "file": "p06-pout.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 46767,
+          "bytes": 10568
+        },
+        "soft": {
+          "file": "p06-soft.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 47305,
+          "bytes": 9186
+        },
+        "pout-brows": {
+          "file": "p06-pout-brows.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 15866,
+          "bytes": 8332
+        },
+        "mouth": {
+          "25": {
+            "file": "p06-mouth-25.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 35318
+          },
+          "50": {
+            "file": "p06-mouth-50.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 35362
+          },
+          "75": {
+            "file": "p06-mouth-75.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 35200
+          },
+          "100": {
+            "file": "p06-mouth-100.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 35212
+          }
+        }
+      }
+    },
+    "p07": {
+      "high": false,
+      "patches": {
+        "blink": {
+          "file": "p07-blink.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 12508,
+          "bytes": 9044
+        },
+        "cavity": {
+          "file": "p07-cavity.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 10005,
+          "bytes": 6774
+        },
+        "speaking": {
+          "file": "p07-speaking.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 18709,
+          "bytes": 9508
+        },
+        "happy": {
+          "file": "p07-happy.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 45691,
+          "bytes": 9468
+        },
+        "pout": {
+          "file": "p07-pout.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 39836,
+          "bytes": 11776
+        },
+        "soft": {
+          "file": "p07-soft.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 37714,
+          "bytes": 10848
+        },
+        "pout-brows": {
+          "file": "p07-pout-brows.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 15160,
+          "bytes": 9076
+        },
+        "mouth": {
+          "25": {
+            "file": "p07-mouth-25.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 35158
+          },
+          "50": {
+            "file": "p07-mouth-50.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 35096
+          },
+          "75": {
+            "file": "p07-mouth-75.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 35162
+          },
+          "100": {
+            "file": "p07-mouth-100.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 35320
+          }
+        }
+      }
+    },
+    "p08": {
+      "high": false,
+      "patches": {
+        "blink": {
+          "file": "p08-blink.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 13964,
+          "bytes": 9524
+        },
+        "cavity": {
+          "file": "p08-cavity.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 10301,
+          "bytes": 8402
+        },
+        "speaking": {
+          "file": "p08-speaking.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 19104,
+          "bytes": 10876
+        },
+        "happy": {
+          "file": "p08-happy.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 47738,
+          "bytes": 10176
+        },
+        "pout": {
+          "file": "p08-pout.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 48116,
+          "bytes": 8236
+        },
+        "soft": {
+          "file": "p08-soft.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 47604,
+          "bytes": 10800
+        },
+        "pout-brows": {
+          "file": "p08-pout-brows.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 16716,
+          "bytes": 8008
+        },
+        "mouth": {
+          "25": {
+            "file": "p08-mouth-25.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 37588
+          },
+          "50": {
+            "file": "p08-mouth-50.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 37612
+          },
+          "75": {
+            "file": "p08-mouth-75.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 37492
+          },
+          "100": {
+            "file": "p08-mouth-100.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 37514
+          }
+        }
+      }
+    },
+    "p09": {
+      "high": false,
+      "patches": {
+        "blink": {
+          "file": "p09-blink.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 13078,
+          "bytes": 9384
+        },
+        "cavity": {
+          "file": "p09-cavity.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 10005,
+          "bytes": 6750
+        },
+        "speaking": {
+          "file": "p09-speaking.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 18543,
+          "bytes": 9372
+        },
+        "happy": {
+          "file": "p09-happy.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 44876,
+          "bytes": 9712
+        },
+        "pout": {
+          "file": "p09-pout.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 43889,
+          "bytes": 10528
+        },
+        "soft": {
+          "file": "p09-soft.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 44334,
+          "bytes": 10612
+        },
+        "pout-brows": {
+          "file": "p09-pout-brows.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 15160,
+          "bytes": 8742
+        },
+        "mouth": {
+          "25": {
+            "file": "p09-mouth-25.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 31748
+          },
+          "50": {
+            "file": "p09-mouth-50.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 32026
+          },
+          "75": {
+            "file": "p09-mouth-75.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 31710
+          },
+          "100": {
+            "file": "p09-mouth-100.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 31752
+          }
+        }
+      }
+    },
+    "p10": {
+      "high": false,
+      "patches": {
+        "blink": {
+          "file": "p10-blink.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 13078,
+          "bytes": 9644
+        },
+        "cavity": {
+          "file": "p10-cavity.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 9884,
+          "bytes": 6736
+        },
+        "speaking": {
+          "file": "p10-speaking.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 18369,
+          "bytes": 9524
+        },
+        "happy": {
+          "file": "p10-happy.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 46076,
+          "bytes": 10246
+        },
+        "pout": {
+          "file": "p10-pout.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 44680,
+          "bytes": 10848
+        },
+        "soft": {
+          "file": "p10-soft.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 44848,
+          "bytes": 10844
+        },
+        "pout-brows": {
+          "file": "p10-pout-brows.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 15866,
+          "bytes": 9140
+        },
+        "mouth": {
+          "25": {
+            "file": "p10-mouth-25.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 37138
+          },
+          "50": {
+            "file": "p10-mouth-50.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 36342
+          },
+          "75": {
+            "file": "p10-mouth-75.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 36604
+          },
+          "100": {
+            "file": "p10-mouth-100.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 35558
+          }
+        }
+      }
+    },
+    "p11": {
+      "high": false,
+      "patches": {
+        "blink": {
+          "file": "p11-blink.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 12306,
+          "bytes": 8968
+        },
+        "cavity": {
+          "file": "p11-cavity.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 9597,
+          "bytes": 6698
+        },
+        "speaking": {
+          "file": "p11-speaking.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 18011,
+          "bytes": 9722
+        },
+        "happy": {
+          "file": "p11-happy.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 45540,
+          "bytes": 10282
+        },
+        "pout": {
+          "file": "p11-pout.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 45473,
+          "bytes": 11468
+        },
+        "soft": {
+          "file": "p11-soft.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 45540,
+          "bytes": 9702
+        },
+        "pout-brows": {
+          "file": "p11-pout-brows.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 14744,
+          "bytes": 8602
+        },
+        "mouth": {
+          "25": {
+            "file": "p11-mouth-25.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 25162
+          },
+          "50": {
+            "file": "p11-mouth-50.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 25306
+          },
+          "75": {
+            "file": "p11-mouth-75.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 25288
+          },
+          "100": {
+            "file": "p11-mouth-100.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 25228
+          }
+        }
+      }
+    },
+    "p12": {
+      "high": false,
+      "patches": {
+        "blink": {
+          "file": "p12-blink.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 13314,
+          "bytes": 10068
+        },
+        "cavity": {
+          "file": "p12-cavity.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 10155,
+          "bytes": 6832
+        },
+        "speaking": {
+          "file": "p12-speaking.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 18709,
+          "bytes": 9516
+        },
+        "happy": {
+          "file": "p12-happy.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 47196,
+          "bytes": 11520
+        },
+        "pout": {
+          "file": "p12-pout.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 44311,
+          "bytes": 13642
+        },
+        "soft": {
+          "file": "p12-soft.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 45788,
+          "bytes": 12034
+        },
+        "pout-brows": {
+          "file": "p12-pout-brows.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 15866,
+          "bytes": 7586
+        },
+        "mouth": {
+          "25": {
+            "file": "p12-mouth-25.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 44012
+          },
+          "50": {
+            "file": "p12-mouth-50.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 43552
+          },
+          "75": {
+            "file": "p12-mouth-75.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 42846
+          },
+          "100": {
+            "file": "p12-mouth-100.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 42194
+          }
+        }
+      }
+    },
+    "p13": {
+      "high": false,
+      "patches": {
+        "blink": {
+          "file": "p13-blink.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 12508,
+          "bytes": 9588
+        },
+        "cavity": {
+          "file": "p13-cavity.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 9884,
+          "bytes": 6778
+        },
+        "speaking": {
+          "file": "p13-speaking.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 18369,
+          "bytes": 9444
+        },
+        "happy": {
+          "file": "p13-happy.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 36007,
+          "bytes": 14090
+        },
+        "pout": {
+          "file": "p13-pout.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 31405,
+          "bytes": 10824
+        },
+        "soft": {
+          "file": "p13-soft.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 14604,
+          "bytes": 7960
+        },
+        "pout-brows": {
+          "file": "p13-pout-brows.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 14962,
+          "bytes": 7694
+        },
+        "mouth": {
+          "25": {
+            "file": "p13-mouth-25.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 31386
+          },
+          "50": {
+            "file": "p13-mouth-50.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 30954
+          },
+          "75": {
+            "file": "p13-mouth-75.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 30662
+          },
+          "100": {
+            "file": "p13-mouth-100.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 30750
+          }
+        }
+      }
+    },
+    "p14": {
+      "high": false,
+      "patches": {
+        "blink": {
+          "file": "p14-blink.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 12508,
+          "bytes": 9782
+        },
+        "cavity": {
+          "file": "p14-cavity.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 9884,
+          "bytes": 6740
+        },
+        "speaking": {
+          "file": "p14-speaking.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 18186,
+          "bytes": 9608
+        },
+        "happy": {
+          "file": "p14-happy.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 45181,
+          "bytes": 10540
+        },
+        "pout": {
+          "file": "p14-pout.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 34793,
+          "bytes": 10082
+        },
+        "soft": {
+          "file": "p14-soft.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 33926,
+          "bytes": 10462
+        },
+        "pout-brows": {
+          "file": "p14-pout-brows.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 15160,
+          "bytes": 7704
+        },
+        "mouth": {
+          "25": {
+            "file": "p14-mouth-25.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 32966
+          },
+          "50": {
+            "file": "p14-mouth-50.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 32936
+          },
+          "75": {
+            "file": "p14-mouth-75.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 32762
+          },
+          "100": {
+            "file": "p14-mouth-100.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 32952
+          }
+        }
+      }
+    },
+    "p15": {
+      "high": false,
+      "patches": {
+        "blink": {
+          "file": "p15-blink.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 13314,
+          "bytes": 9806
+        },
+        "cavity": {
+          "file": "p15-cavity.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 10419,
+          "bytes": 6874
+        },
+        "speaking": {
+          "file": "p15-speaking.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 19254,
+          "bytes": 9536
+        },
+        "happy": {
+          "file": "p15-happy.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 47331,
+          "bytes": 9236
+        },
+        "pout": {
+          "file": "p15-pout.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 47766,
+          "bytes": 9884
+        },
+        "soft": {
+          "file": "p15-soft.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 48080,
+          "bytes": 8620
+        },
+        "pout-brows": {
+          "file": "p15-pout-brows.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 16104,
+          "bytes": 9174
+        },
+        "mouth": {
+          "25": {
+            "file": "p15-mouth-25.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 35342
+          },
+          "50": {
+            "file": "p15-mouth-50.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 35328
+          },
+          "75": {
+            "file": "p15-mouth-75.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 35426
+          },
+          "100": {
+            "file": "p15-mouth-100.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 35326
+          }
+        }
+      }
+    },
+    "p16": {
+      "high": false,
+      "patches": {
+        "blink": {
+          "file": "p16-blink.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 12508,
+          "bytes": 9860
+        },
+        "cavity": {
+          "file": "p16-cavity.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 9884,
+          "bytes": 6920
+        },
+        "speaking": {
+          "file": "p16-speaking.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 18186,
+          "bytes": 9600
+        },
+        "happy": {
+          "file": "p16-happy.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 46035,
+          "bytes": 11266
+        },
+        "pout": {
+          "file": "p16-pout.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 45120,
+          "bytes": 11544
+        },
+        "soft": {
+          "file": "p16-soft.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 46262,
+          "bytes": 9226
+        },
+        "pout-brows": {
+          "file": "p16-pout-brows.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 14962,
+          "bytes": 9512
+        },
+        "mouth": {
+          "25": {
+            "file": "p16-mouth-25.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 41778
+          },
+          "50": {
+            "file": "p16-mouth-50.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 41682
+          },
+          "75": {
+            "file": "p16-mouth-75.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 41358
+          },
+          "100": {
+            "file": "p16-mouth-100.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 40660
+          }
+        }
+      }
+    },
+    "p17": {
+      "high": false,
+      "patches": {
+        "blink": {
+          "file": "p17-blink.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 13078,
+          "bytes": 9144
+        },
+        "cavity": {
+          "file": "p17-cavity.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 10005,
+          "bytes": 6820
+        },
+        "speaking": {
+          "file": "p17-speaking.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 18709,
+          "bytes": 9610
+        },
+        "happy": {
+          "file": "p17-happy.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 34151,
+          "bytes": 14980
+        },
+        "pout": {
+          "file": "p17-pout.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 33746,
+          "bytes": 10956
+        },
+        "soft": {
+          "file": "p17-soft.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 24075,
+          "bytes": 10738
+        },
+        "pout-brows": {
+          "file": "p17-pout-brows.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 15392,
+          "bytes": 8758
+        },
+        "mouth": {
+          "25": {
+            "file": "p17-mouth-25.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 28874
+          },
+          "50": {
+            "file": "p17-mouth-50.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 28822
+          },
+          "75": {
+            "file": "p17-mouth-75.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 28710
+          },
+          "100": {
+            "file": "p17-mouth-100.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 28682
+          }
+        }
+      }
+    },
+    "p18": {
+      "high": false,
+      "patches": {
+        "blink": {
+          "file": "p18-blink.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 12702,
+          "bytes": 9656
+        },
+        "cavity": {
+          "file": "p18-cavity.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 9884,
+          "bytes": 6616
+        },
+        "speaking": {
+          "file": "p18-speaking.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 18369,
+          "bytes": 9280
+        },
+        "happy": {
+          "file": "p18-happy.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 45793,
+          "bytes": 9978
+        },
+        "pout": {
+          "file": "p18-pout.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 35163,
+          "bytes": 10472
+        },
+        "soft": {
+          "file": "p18-soft.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 34718,
+          "bytes": 9788
+        },
+        "pout-brows": {
+          "file": "p18-pout-brows.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 15160,
+          "bytes": 9092
+        },
+        "mouth": {
+          "25": {
+            "file": "p18-mouth-25.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 39644
+          },
+          "50": {
+            "file": "p18-mouth-50.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 39442
+          },
+          "75": {
+            "file": "p18-mouth-75.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 38848
+          },
+          "100": {
+            "file": "p18-mouth-100.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 39214
+          }
+        }
+      }
+    },
+    "p19": {
+      "high": false,
+      "patches": {
+        "blink": {
+          "file": "p19-blink.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 13314,
+          "bytes": 10028
+        },
+        "cavity": {
+          "file": "p19-cavity.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 10005,
+          "bytes": 6952
+        },
+        "speaking": {
+          "file": "p19-speaking.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 18709,
+          "bytes": 9450
+        },
+        "happy": {
+          "file": "p19-happy.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 47001,
+          "bytes": 8768
+        },
+        "pout": {
+          "file": "p19-pout.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 47196,
+          "bytes": 8132
+        },
+        "soft": {
+          "file": "p19-soft.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 47196,
+          "bytes": 8036
+        },
+        "pout-brows": {
+          "file": "p19-pout-brows.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 16298,
+          "bytes": 9558
+        },
+        "mouth": {
+          "25": {
+            "file": "p19-mouth-25.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 36432
+          },
+          "50": {
+            "file": "p19-mouth-50.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 36318
+          },
+          "75": {
+            "file": "p19-mouth-75.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 36200
+          },
+          "100": {
+            "file": "p19-mouth-100.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 36414
+          }
+        }
+      }
+    },
+    "p20": {
+      "high": false,
+      "patches": {
+        "blink": {
+          "file": "p20-blink.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 13314,
+          "bytes": 8972
+        },
+        "cavity": {
+          "file": "p20-cavity.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 9884,
+          "bytes": 6690
+        },
+        "speaking": {
+          "file": "p20-speaking.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 18369,
+          "bytes": 9376
+        },
+        "happy": {
+          "file": "p20-happy.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 41517,
+          "bytes": 11392
+        },
+        "pout": {
+          "file": "p20-pout.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 33096,
+          "bytes": 9776
+        },
+        "soft": {
+          "file": "p20-soft.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 23535,
+          "bytes": 9934
+        },
+        "pout-brows": {
+          "file": "p20-pout-brows.webp",
+          "width": 1024,
+          "height": 1024,
+          "mask_pixels": 15866,
+          "bytes": 7610
+        },
+        "mouth": {
+          "25": {
+            "file": "p20-mouth-25.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 35598
+          },
+          "50": {
+            "file": "p20-mouth-50.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 35488
+          },
+          "75": {
+            "file": "p20-mouth-75.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 35442
+          },
+          "100": {
+            "file": "p20-mouth-100.webp",
+            "width": 1024,
+            "height": 1024,
+            "bytes": 35898
+          }
+        }
+      }
+    }
+  }
+}

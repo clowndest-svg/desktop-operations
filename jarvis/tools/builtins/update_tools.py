@@ -39,6 +39,11 @@ def _words(info: Mapping[str, object]) -> str:
     if not info.get("ok"):
         return f"没查到新版：{info.get('error') or '清单那边没给原因'}"
     if not info.get("newer"):
+        if info.get("server_behind"):
+            return (
+                f"你手上这版（{info.get('current')}）比清单上的（{info.get('latest')}）还新 —— "
+                "清单可能没同步，别降级，先把这句贴回去问作者。"
+            )
         return f"你手上这版（{info.get('current')}）就是清单上最新的那版（{info.get('latest')}）。"
     try:
         size = float(info.get("size_mb") or 0)  # type: ignore[arg-type]
@@ -49,7 +54,7 @@ def _words(info: Mapping[str, object]) -> str:
     where = f" 下载地址：{url}" if url else ""
     return (
         f"有新版：{info.get('latest')}（你现在是 {info.get('current')}）{tail}。"
-        f"软件不会自己下载也不会自己换 —— 包有 10 GB，这一步得你点头。{where}"
+        f"软件不会自己下载也不会自己换 —— 这一步得你点头。{where}"
     )
 
 

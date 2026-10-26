@@ -449,6 +449,15 @@ class PetController:
         self._apply_click_through(self._click_through)
         self._start_watcher()
         self._start_compositor()
+        # ``alpha`` is a cue sent to a page that may still be loading. The page's
+        # command handler is installed in Vue's onMounted, which can land after the
+        # window's ``loaded`` event, so a single cue at show time is a race. Retry
+        # until the first composited frame proves the page heard it.
+        threading.Thread(
+            target=self._retry_alpha,
+            name="jarvis-pet-alpha",
+            daemon=True,
+        ).start()
         if _restore_foreground(previous_foreground, (self._hwnd, handle_of(window))):
             logger.debug("the keyboard went back to the window that had it")
         self._command(WAKE_SCRIPT)
@@ -500,6 +509,30 @@ class PetController:
 
     def emerge(self) -> None:
         self._command(EMERGE_SCRIPT)
+
+    def _retry_alpha(self, attempts: int = 25, interval: float = 0.4) -> None:
+        """Keep asking the page to ship frames until one actually arrives.
+
+        The compositor window is already on screen when the page is still booting;
+        without a frame it is an empty topmost rectangle. ``_frames_seen`` is the
+        acknowledgement, not a timer: a page can take seconds to build its Three.js
+        scene on a cold start.
+
+        Wake rides along with every attempt. The page's command handler is installed
+        in onMounted, and the once-only wake from ``show`` / the loaded event can both
+        land before that -- the window then draws its first frame and goes back to
+        sleep, which looks like a pet that appears and never moves. A cue that is
+        repeated until a frame arrives cannot be lost to that race.
+        """
+        for _ in range(max(1, attempts)):
+            if not self._shown or self._frames_seen > 0:
+                return
+            compositor = self._compositor
+            if compositor is None or not compositor.alive:
+                return
+            self._command(ALPHA_SCRIPT)
+            self._command(WAKE_SCRIPT)
+            time.sleep(max(0.0, interval))
 
     def _on_page_loaded(self) -> None:
         """Re-play the cues the page was not ready for when they were sent."""

@@ -2300,6 +2300,36 @@ class HudBridge:
             return {"error": "对话服务不可用", "current": "", "messages": []}
         return self._chat.session_messages(session_id)
 
+    def chat_export(self, session_id: str) -> dict[str, object]:
+        """Write one stored conversation as Markdown under 数据/文档/对话/."""
+        from jarvis.app.chat_export import render_conversation
+        from jarvis.app.documents import safe_name, unique_path
+
+        if self._chat is None:
+            return {"ok": False, "path": "", "count": 0, "error": "对话服务不可用"}
+        answer = self._chat.session_messages(str(session_id))
+        if answer.get("error"):
+            return {"ok": False, "path": "", "count": 0, "error": str(answer["error"])}
+        turns = answer.get("messages")
+        if not isinstance(turns, list) or not turns:
+            return {"ok": False, "path": "", "count": 0, "error": "这个对话还没有内容"}
+        title = "对话"
+        listing = self._chat.sessions()
+        sessions = listing.get("sessions") if isinstance(listing, dict) else None
+        for row in sessions if isinstance(sessions, list) else []:
+            if isinstance(row, dict) and row.get("id") == str(session_id):
+                title = str(row.get("title") or title)
+                break
+        body = render_conversation(title, turns)
+        folder = self._paths.exports_dir / "对话"
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            target = unique_path(folder, safe_name(title), ".md")
+            target.write_text(body, encoding="utf-8")
+        except OSError as exc:
+            return {"ok": False, "path": "", "count": 0, "error": f"写不出导出文件：{exc}"}
+        return {"ok": True, "path": str(target), "count": len(turns), "error": ""}
+
     def chat_models(self) -> dict[str, object]:
         """Which providers and models the chat can be pointed at, and the current pair.
 

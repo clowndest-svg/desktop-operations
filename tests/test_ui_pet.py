@@ -365,6 +365,27 @@ class TestCueReplay:
         window.events.loaded.fire()
         assert any("'alpha'" in script for script in window.scripts), window.scripts
 
+    def test_alpha_is_retried_until_the_page_sends_its_first_frame(self, monkeypatch: Any) -> None:
+        """A single cue can land before Vue has installed the pet command handler.
+
+        The page's handler is installed in onMounted; the window's loaded event can
+        arrive earlier. Retrying is what turns "sometimes no pet" into every time.
+        """
+        pet = controller()
+        pet._shown = True
+        pet._compositor = cast(Any, types.SimpleNamespace(alive=True))
+        calls: list[str] = []
+        monkeypatch.setattr(pet, "_command", calls.append)
+        monkeypatch.setattr("jarvis.ui.pet.time.sleep", lambda _seconds: None)
+        pet._retry_alpha(attempts=4, interval=0)
+        assert calls == [
+            step for _ in range(4) for step in (pet_module.ALPHA_SCRIPT, pet_module.WAKE_SCRIPT)
+        ], calls
+        calls.clear()
+        pet._frames_seen = 1
+        pet._retry_alpha(attempts=4, interval=0)
+        assert calls == [], "the first frame is the acknowledgement; stop poking"
+
 
 class _FakeCompositor:
     """Her window, as far as the bubble is concerned: a box on a screen.
