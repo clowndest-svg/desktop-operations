@@ -38,7 +38,7 @@ def render_conversation(
         f"# {title or '对话'}",
         "",
         f"- 导出时间：{stamp}",
-        f"- 对话轮次：{len(turns)}",
+        f"- 消息条数：{len(turns)}",
         "",
         "---",
         "",

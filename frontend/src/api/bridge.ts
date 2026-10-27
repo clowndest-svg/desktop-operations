@@ -1954,6 +1954,8 @@ export interface SessionInfo {
   title: string
   updated_at: string
   turns: number
+  pinned?: boolean
+  excerpt?: string
 }
 
 /** What a batch delete did: which ids went, which were not there to begin with. */
@@ -1972,6 +1974,8 @@ export interface SessionList {
   error: string
   current: string
   sessions: SessionInfo[]
+  has_more?: boolean
+  next_offset?: number
 }
 
 export interface StoredTurn {
@@ -2170,7 +2174,8 @@ interface PywebviewApi {
   mirror_screen_vision(allow: boolean): Promise<MirrorScreenAnswer>
   mirror_swipe(direction: string): Promise<MirrorState>
   mirror_discover(): Promise<MirrorState>
-  chat_sessions(): Promise<SessionList>
+  chat_sessions(query?: string, offset?: number, limit?: number, pinnedOnly?: boolean): Promise<SessionList>
+  chat_pin(sessionId: string, pinned: boolean): Promise<SessionList>
   chat_new_session(): Promise<SessionList>
   chat_switch(sessionId: string): Promise<SessionList>
   chat_rename(sessionId: string, title: string): Promise<SessionList>
@@ -3973,8 +3978,18 @@ const mock: PywebviewApi = {
       voices: mockVoiceChoices.filter((row) => row.kind === 'clone'),
     }
   },
-  async chat_sessions() {
-    return { error: '', current: mockSessionStore.current, sessions: [...mockSessionStore.rows] }
+  async chat_sessions(query = '', offset = 0, limit = 50, pinnedOnly = false) {
+    const term = query.trim().toLowerCase()
+    const rows = mockSessionStore.rows.filter(row => (!pinnedOnly || row.pinned) &&
+      (!term || row.title.toLowerCase().includes(term)))
+      .sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || b.updated_at.localeCompare(a.updated_at) || b.id.localeCompare(a.id))
+    return { error: '', current: mockSessionStore.current, sessions: rows.slice(offset, offset + limit), has_more: rows.length > offset + limit, next_offset: offset + Math.min(limit, Math.max(0, rows.length - offset)) }
+  },
+  async chat_pin(sessionId: string, pinned: boolean) {
+    const row = mockSessionStore.rows.find(item => item.id === sessionId)
+    if (!row) return { error: '没有这个对话', current: mockSessionStore.current, sessions: [] }
+    row.pinned = pinned
+    return this.chat_sessions()
   },
   async chat_new_session() {
     const id = 'mock-new-' + (mockSessionStore.seq += 1)
@@ -6186,8 +6201,12 @@ export function setShellTier(tier: number): Promise<ShellLevels> {
   return bridge().then((target) => target.shell_set_tier(tier))
 }
 
-export function fetchSessions(): Promise<SessionList> {
-  return bridge().then((target) => target.chat_sessions())
+export function fetchSessions(query = '', offset = 0, limit = 50, pinnedOnly = false): Promise<SessionList> {
+  return bridge().then((target) => target.chat_sessions(query, offset, limit, pinnedOnly))
+}
+
+export function pinSession(sessionId: string, pinned: boolean): Promise<SessionList> {
+  return bridge().then((target) => target.chat_pin(sessionId, pinned))
 }
 
 export function newSession(): Promise<SessionList> {

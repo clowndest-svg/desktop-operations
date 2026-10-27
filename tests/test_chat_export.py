@@ -43,13 +43,10 @@ def test_markdown_renders_roles_times_models_and_attachment_names() -> None:
 
 def _bridge(tmp_path: Path, turns: list[dict[str, Any]] | None) -> HudBridge:
     class Chat:
-        def session_messages(self, _session: str) -> dict[str, object]:
+        def session_export(self, _session: str) -> dict[str, object]:
             if turns is None:
                 return {"error": "没有这个对话", "messages": []}
-            return {"error": "", "messages": turns}
-
-        def sessions(self) -> dict[str, object]:
-            return {"current": "c1", "sessions": [{"id": "c1", "title": "测试对话"}]}
+            return {"error": "", "messages": turns, "title": "测试对话"}
 
     bridge = HudBridge.__new__(HudBridge)
     bridge._chat = Chat()  # type: ignore[assignment]

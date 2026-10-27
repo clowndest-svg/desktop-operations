@@ -1,4 +1,5 @@
 <template>
+  <Teleport to="body">
   <div v-if="open" class="ss" role="dialog" aria-modal="true" aria-label="对话历史">
     <div class="ss__scrim" @click="emit('close')"></div>
 
@@ -9,16 +10,16 @@
           <button
             class="hud-btn"
             type="button"
-            :disabled="working || sessions.length === 0"
-            :title="allSelected ? '把勾全部去掉' : '勾上每一场对话'"
+            :disabled="working || loading || sessions.length === 0"
+            :title="allSelected ? '取消已加载对话的勾选' : '只选择当前已加载的结果'"
             @click="toggleAll"
           >
-            {{ allSelected ? '取消全选' : '全选' }}
+            {{ allSelected ? '取消全选' : '全选已加载' }}
           </button>
           <button
             class="hud-btn ss__del"
             type="button"
-            :disabled="working || selected.length === 0"
+            :disabled="working || loading || selected.length === 0"
             @click="askRemoveMany"
           >
             删除所选{{ selected.length ? '（' + selected.length + '）' : '' }}
@@ -28,34 +29,54 @@
         </div>
       </header>
 
-      <p v-if="error" class="ss__error">{{ error }}</p>
-      <p v-else-if="sessions.length === 0" class="ss__empty">
-        还没有存下来的对话。从这里开始说的每一句都会记进本机数据库，关掉软件也在。
+      <form class="ss__search" @submit.prevent="resetSearch">
+        <input v-model="query" type="search" maxlength="200" :disabled="working" aria-label="搜索对话标题或内容" placeholder="搜索所有历史的标题或内容…" />
+        <label><input v-model="pinnedOnly" type="checkbox" :disabled="working" />只看置顶</label>
+        <button class="hud-btn" type="submit" :disabled="working">刷新</button>
+      </form>
+      <p v-if="error" class="ss__error" role="alert">{{ error }}</p>
+      <p v-if="notice" class="ss__empty" role="status">{{ notice }}</p>
+      <p v-if="loading && sessions.length === 0" class="ss__empty" role="status">正在查找…</p>
+      <p v-else-if="!error && sessions.length === 0" class="ss__empty">
+        {{ query.trim() || pinnedOnly ? '没有匹配的对话，试试其他关键词或取消置顶筛选。' : '还没有存下来的对话，开始聊天后会保存在这里。' }}
       </p>
 
-      <ul v-else class="ss__list">
+      <ul v-if="sessions.length" class="ss__list" :aria-busy="loading">
         <li v-for="session in sessions" :key="session.id" class="ss__row" :class="{ 'ss__row--on': session.id === current }">
           <label class="ss__pick" :title="selected.includes(session.id) ? '取消勾选' : '勾上，一起删'">
             <input
               type="checkbox"
+              :disabled="working || loading"
               :checked="selected.includes(session.id)"
               @change="toggle(session.id)"
             />
           </label>
           <div class="ss__body">
-            <strong :title="session.title">{{ session.title }}</strong>
+            <strong :title="session.title">{{ session.pinned ? '★ ' : '' }}{{ session.title }}</strong>
             <em>{{ session.turns }} 轮 · {{ stamp(session.updated_at) }}</em>
+            <p v-if="session.excerpt" class="ss__excerpt">{{ session.excerpt }}</p>
           </div>
           <span class="ss__ops">
-            <button v-if="session.id !== current" class="hud-btn" type="button" :disabled="working" @click="openSession(session.id)">
+            <button v-if="session.id !== current" class="hud-btn" type="button" :disabled="working || loading" @click="openSession(session.id)">
               打开
             </button>
             <span v-else class="ss__now">正在聊</span>
-            <button class="hud-btn" type="button" :disabled="working" @click="rename(session)">改名</button>
-            <button class="hud-btn ss__del" type="button" :disabled="working" @click="remove(session.id)">删除</button>
+            <button class="hud-btn" type="button" :disabled="working || loading" :aria-pressed="!!session.pinned" @click="pin(session)">{{ session.pinned ? '取消置顶' : '置顶' }}</button>
+            <button class="hud-btn" type="button" :disabled="working || loading" @click="rename(session)">改名</button>
+            <button class="hud-btn" type="button" :disabled="working || loading" @click="exportSession(session.id)">导出</button>
+            <button class="hud-btn ss__del" type="button" :disabled="working || loading" @click="remove(session.id)">删除</button>
           </span>
         </li>
       </ul>
+      <div class="ss__more">
+        <span>已显示 {{ sessions.length }} 场{{ selected.length ? ` · 已选 ${selected.length} 场` : '' }}</span>
+        <button v-if="hasMore" class="hud-btn" type="button" :disabled="working || loading" @click="load(true)">{{ loading ? '加载中…' : '加载更多' }}</button>
+      </div>
+      <form v-if="renaming" class="ss__search" @submit.prevent="saveName">
+        <input v-model="renameTitle" maxlength="48" aria-label="新的对话名称" :disabled="working" />
+        <button class="hud-btn" type="submit" :disabled="working || !renameTitle.trim()">保存名称</button>
+        <button class="hud-btn" type="button" :disabled="working" @click="renaming = ''">取消</button>
+      </form>
 
       <!--
         Deletion here is the only place a stored conversation can disappear, and it
@@ -84,10 +105,11 @@
       </p>
 
       <p class="ss__note">
-        对话存在本机 SQLite 里（与 token 账本同一个库），不上传。「清空」只是开一场新对话，旧的仍在这里。勾上几场一起删走的，是上面「删除所选」那一格 —— 和单条删除一样要再确认一次。
+        搜索覆盖全部本机历史，导出包含完整消息。全选只勾选已加载的结果；更改筛选会清除勾选。删除前请确认，重要对话可以先导出。
       </p>
     </section>
   </div>
+  </Teleport>
 </template>
 
 <script setup lang="ts">
@@ -98,12 +120,14 @@
  * kept in the page, so what this list shows is what is on disk -- which is the
  * whole point of having moved history out of a JavaScript array.
  */
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import {
   deleteSession,
   deleteSessions,
   fetchSessions,
+  exportConversation,
   newSession,
+  pinSession,
   renameSession,
   switchSession,
   type SessionInfo,
@@ -117,6 +141,16 @@ const sessions = ref<SessionInfo[]>([])
 const current = ref('')
 const error = ref('')
 const working = ref(false)
+const loading = ref(false)
+const query = ref('')
+const pinnedOnly = ref(false)
+const hasMore = ref(false)
+const nextOffset = ref(0)
+const notice = ref('')
+const renaming = ref('')
+const renameTitle = ref('')
+let requestVersion = 0
+let searchTimer: ReturnType<typeof setTimeout> | undefined
 const confirming = ref('')
 const confirmingTitle = ref('')
 /** The checkbox column: what a batch delete will take. Empty almost always. */
@@ -135,12 +169,14 @@ const confirmManyTitles = computed(() => {
 })
 
 function toggle(id: string): void {
+  confirmMany.value = false
   selected.value = selected.value.includes(id)
     ? selected.value.filter((entry) => entry !== id)
     : [...selected.value, id]
 }
 
 function toggleAll(): void {
+  confirmMany.value = false
   selected.value = allSelected.value ? [] : sessions.value.map((entry) => entry.id)
 }
 
@@ -156,14 +192,15 @@ async function removeMany(): Promise<void> {
   working.value = true
   try {
     const list = await deleteSessions(ids)
-    sessions.value = list.sessions
-    current.value = list.current
     // A batch that came back with ids it could not find says so here, not silently:
     // "I ticked five and three went" has to be readable on screen.
     error.value = list.missing?.length
       ? (list.error || '') + ' 没找到的：' + list.missing.join('、')
       : list.error
-    selected.value = selected.value.filter((id) => !ids.includes(id))
+    selected.value = []
+    const problem = error.value
+    await load()
+    error.value = problem || error.value
     emit('switched')
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
@@ -172,23 +209,45 @@ async function removeMany(): Promise<void> {
   }
 }
 
-async function load(): Promise<void> {
+async function load(append = false): Promise<void> {
+  const version = ++requestVersion
+  loading.value = true
   error.value = ''
   try {
-    const list = await fetchSessions()
-    sessions.value = list.sessions
+    const list = await fetchSessions(query.value, append ? nextOffset.value : 0, 50, pinnedOnly.value)
+    if (version !== requestVersion || !props.open) return
+    if (list.error) { error.value = list.error; return }
+    const existing = new Set(append ? sessions.value.map(row => row.id) : [])
+    sessions.value = [...(append ? sessions.value : []), ...list.sessions.filter(row => !existing.has(row.id))]
     current.value = list.current
-    error.value = list.error
-    selected.value = selected.value.filter((id) => list.sessions.some((row) => row.id === id))
+    hasMore.value = !!list.has_more
+    nextOffset.value = list.next_offset ?? sessions.value.length
+    selected.value = selected.value.filter(id => sessions.value.some(row => row.id === id))
   } catch (err) {
-    error.value = err instanceof Error ? err.message : String(err)
+    if (version === requestVersion) error.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    if (version === requestVersion) loading.value = false
   }
+}
+
+function resetSearch(): void {
+  clearTimeout(searchTimer)
+  requestVersion++
+  selected.value = []
+  confirming.value = ''
+  confirmMany.value = false
+  renaming.value = ''
+  sessions.value = []
+  hasMore.value = false
+  notice.value = ''
+  void load()
 }
 
 async function create(): Promise<void> {
   working.value = true
   try {
     const list = await newSession()
+    if (list.error) { error.value = list.error; return }
     sessions.value = list.sessions
     current.value = list.current
     emit('switched')
@@ -204,6 +263,7 @@ async function openSession(id: string): Promise<void> {
   working.value = true
   try {
     const list = await switchSession(id)
+    if (list.error) { error.value = list.error; return }
     sessions.value = list.sessions
     current.value = list.current
     emit('switched')
@@ -215,14 +275,20 @@ async function openSession(id: string): Promise<void> {
   }
 }
 
-async function rename(session: SessionInfo): Promise<void> {
-  const title = window.prompt('新的名字', session.title)
-  if (title === null || title.trim() === '') return
+function rename(session: SessionInfo): void {
+  renaming.value = session.id
+  renameTitle.value = session.title
+  confirming.value = ''
+  confirmMany.value = false
+}
+
+async function saveName(): Promise<void> {
+  if (!renaming.value || !renameTitle.value.trim()) return
   working.value = true
   try {
-    const list = await renameSession(session.id, title)
-    sessions.value = list.sessions
+    const list = await renameSession(renaming.value, renameTitle.value.trim())
     error.value = list.error
+    if (!list.error) { renaming.value = ''; await load(); emit('switched') }
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
   } finally {
@@ -230,8 +296,33 @@ async function rename(session: SessionInfo): Promise<void> {
   }
 }
 
+async function pin(session: SessionInfo): Promise<void> {
+  working.value = true
+  try {
+    const list = await pinSession(session.id, !session.pinned)
+    error.value = list.error
+    if (!list.error) { selected.value = []; await load(); emit('switched') }
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  } finally { working.value = false }
+}
+
+async function exportSession(id: string): Promise<void> {
+  working.value = true
+  notice.value = ''
+  error.value = ''
+  try {
+    const result = await exportConversation(id)
+    if (!result.ok) error.value = result.error
+    else notice.value = `已导出 ${result.count} 条消息：${result.path}`
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  } finally { working.value = false }
+}
+
 async function remove(id: string, confirmed = false): Promise<void> {
   if (!confirmed) {
+    confirmMany.value = false
     const target = sessions.value.find((entry) => entry.id === id)
     confirming.value = id
     confirmingTitle.value = target?.title ?? id
@@ -241,9 +332,8 @@ async function remove(id: string, confirmed = false): Promise<void> {
   working.value = true
   try {
     const list = await deleteSession(id)
-    sessions.value = list.sessions
-    current.value = list.current
     error.value = list.error
+    if (!list.error) { selected.value = selected.value.filter(entry => entry !== id); await load() }
     emit('switched')
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
@@ -255,9 +345,27 @@ async function remove(id: string, confirmed = false): Promise<void> {
 watch(
   () => props.open,
   (shown) => {
-    if (shown) void load()
+    clearTimeout(searchTimer)
+    requestVersion++
+    loading.value = false
+    if (shown) resetSearch()
   },
 )
+watch([query, pinnedOnly], () => {
+  clearTimeout(searchTimer)
+  requestVersion++
+  selected.value = []
+  sessions.value = []
+  confirming.value = ''
+  confirmMany.value = false
+  renaming.value = ''
+  hasMore.value = false
+  if (props.open) {
+    loading.value = true
+    searchTimer = setTimeout(resetSearch, 250)
+  }
+})
+onBeforeUnmount(() => { clearTimeout(searchTimer); requestVersion++ })
 </script>
 
 <style scoped>
@@ -281,7 +389,8 @@ watch(
 
 .ss__box {
   position: relative;
-  width: min(620px, 94vw);
+  width: min(900px, 94vw);
+  box-sizing: border-box;
   max-height: 82vh;
   display: flex;
   flex-direction: column;
@@ -299,11 +408,13 @@ watch(
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 12px;
+  flex-wrap: wrap;
 }
 
 .ss__actions {
   display: flex;
   gap: 6px;
+  flex-wrap: wrap;
 }
 
 .ss__error,
@@ -355,8 +466,8 @@ watch(
  */
 .ss__body {
   display: flex;
-  align-items: baseline;
-  gap: 10px;
+  flex-direction: column;
+  gap: 4px;
   min-width: 0;
 }
 
@@ -419,5 +530,16 @@ watch(
   font-size: 10px;
   line-height: 1.6;
   color: var(--hud-dim);
+}
+.ss__search { display: flex; gap: 10px; align-items: center; margin: 0 0 12px; flex-wrap: wrap; }
+.ss__search > input { flex: 1; min-width: 160px; padding: 10px; border: 1px solid var(--hud-line); border-radius: var(--hud-radius); color: var(--hud-text); background: rgba(0,0,0,.2); font: inherit; }
+.ss__search label, .ss__more { font-size: 12px; color: var(--hud-dim); }
+.ss__more { display: flex; align-items: center; justify-content: space-between; padding: 10px 0; }
+.ss__excerpt { margin: 0; font-size: 12px; color: var(--hud-dim); overflow-wrap: anywhere; white-space: pre-wrap; }
+.ss__empty { overflow-wrap: anywhere; }
+@media (max-width: 720px) {
+  .ss__row { grid-template-columns: auto minmax(0, 1fr); }
+  .ss__ops { grid-column: 2; flex-wrap: wrap; }
+  .ss__box { padding: 14px; }
 }
 </style>

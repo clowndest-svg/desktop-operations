@@ -23,6 +23,7 @@ import sqlite3
 import uuid
 from typing import Any
 
+from jarvis.core.exceptions import DatabaseError
 from jarvis.database import Migration, SqliteStore, format_timestamp, utc_now
 
 logger = logging.getLogger("jarvis.app.transcript_service")
@@ -97,6 +98,15 @@ MIGRATIONS: tuple[Migration, ...] = (
             """
             ALTER TABLE chat_messages ADD COLUMN task_id TEXT NOT NULL DEFAULT ''
             """,
+        ),
+    ),
+    Migration(
+        namespace=NAMESPACE,
+        version=4,
+        statements=(
+            "ALTER TABLE chat_sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
+            "CREATE INDEX idx_chat_sessions_listing "
+            "ON chat_sessions (pinned DESC, updated_at DESC, id DESC)",
         ),
     ),
 )
@@ -220,31 +230,126 @@ class TranscriptService:
         return session_id
 
     def list_sessions(self, limit: int = 50) -> list[dict[str, Any]]:
+        return list(self.session_page(limit=limit)["sessions"])
+
+    def session_details(self, session_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """Snapshots need only the open tabs, even when those tabs are years old."""
+        result: dict[str, dict[str, Any]] = {}
+        try:
+            with self._store.connection() as conn:
+                for start in range(0, len(session_ids), 200):
+                    keys = session_ids[start : start + 200]
+                    placeholders = ",".join("?" for _ in keys)
+                    rows = conn.execute(
+                        "SELECT s.id, s.title, s.updated_at, "
+                        "(SELECT COUNT(*) FROM chat_messages m WHERE m.session_id=s.id) AS total "
+                        f"FROM chat_sessions s WHERE s.id IN ({placeholders})",
+                        keys,
+                    )
+                    for row in rows:
+                        result[row["id"]] = {
+                            "title": row["title"],
+                            "updated_at": row["updated_at"],
+                            "turns": row["total"] // 2,
+                        }
+        except (sqlite3.Error, DatabaseError):
+            logger.exception("could not read open conversation details")
+        return result
+
+    def session_page(
+        self, query: str = "", offset: int = 0, limit: int = 50, pinned_only: bool = False
+    ) -> dict[str, Any]:
+        """Page sessions before counting turns; search all history, including old sessions.
+
+        Literal substring matching keeps %, _ and quotes ordinary user text. The
+        covering message index counts only this page rather than grouping all turns.
+        One extra session tells the page whether there is more, without a full count.
+        """
+        term = str(query).strip()[:200]
+        limit, offset = max(1, min(int(limit), 200)), max(0, int(offset))
+        empty = {"sessions": [], "has_more": False, "next_offset": offset, "error": ""}
         try:
             with self._store.connection() as conn:
                 rows = conn.execute(
                     """
-                    SELECT s.id, s.title, s.updated_at, COUNT(m.id) AS turns
-                      FROM chat_sessions s
-                      LEFT JOIN chat_messages m ON m.session_id = s.id
-                     GROUP BY s.id, s.title, s.updated_at
-                     ORDER BY s.updated_at DESC
-                     LIMIT ?
+                    SELECT id, title, updated_at, pinned FROM chat_sessions s
+                    WHERE (? = 0 OR pinned = 1) AND (
+                        ? = '' OR instr(lower(title), lower(?)) > 0 OR EXISTS (
+                            SELECT 1 FROM chat_messages m WHERE m.session_id = s.id
+                            AND instr(lower(m.content), lower(?)) > 0
+                        )
+                    )
+                    ORDER BY pinned DESC, updated_at DESC, id DESC LIMIT ? OFFSET ?
                     """,
-                    (max(1, limit),),
+                    (int(pinned_only), term, term, term, limit + 1, offset),
                 ).fetchall()
-        except sqlite3.Error:
+                sessions = []
+                for row in rows[:limit]:
+                    count = conn.execute(
+                        "SELECT COUNT(*) FROM chat_messages WHERE session_id = ?", (row["id"],)
+                    ).fetchone()[0]
+                    excerpt = ""
+                    if term:
+                        match = conn.execute(
+                            "SELECT substr(content, max(1, instr(lower(content), lower(?)) - 45), "
+                            "160) FROM chat_messages WHERE session_id = ? "
+                            "AND instr(lower(content), lower(?)) > 0 ORDER BY id DESC LIMIT 1",
+                            (term, row["id"], term),
+                        ).fetchone()
+                        excerpt = match[0] if match else ""
+                    sessions.append(
+                        {
+                            "id": row["id"],
+                            "title": row["title"] or "（没有标题）",
+                            "updated_at": row["updated_at"],
+                            "pinned": bool(row["pinned"]),
+                            "turns": int(count) // 2,
+                            "excerpt": excerpt,
+                        }
+                    )
+        except (sqlite3.Error, DatabaseError):
             logger.exception("could not list conversations")
-            return []
-        return [
-            {
-                "id": row["id"],
-                "title": row["title"] or "（没有标题）",
-                "updated_at": row["updated_at"],
-                "turns": int(row["turns"] or 0) // 2,
-            }
-            for row in rows
-        ]
+            return {**empty, "error": "读取对话历史失败，请稍后重试"}
+        return {
+            "sessions": sessions,
+            "has_more": len(rows) > limit,
+            "next_offset": offset + len(sessions),
+            "error": "",
+        }
+
+    def pin(self, session_id: str, pinned: bool) -> bool:
+        """Pinning changes list priority, never the time the conversation happened."""
+        try:
+            with self._store.transaction() as conn:
+                return (
+                    conn.execute(
+                        "UPDATE chat_sessions SET pinned = ? WHERE id = ?",
+                        (int(pinned), session_id),
+                    ).rowcount
+                    > 0
+                )
+        except (sqlite3.Error, DatabaseError):
+            logger.exception("could not pin conversation %s", session_id)
+            return False
+
+    def export_snapshot(self, session_id: str) -> dict[str, Any]:
+        """Read the title and ALL messages together, without the display/replay cap."""
+        try:
+            with self._store.connection() as conn:
+                row = conn.execute(
+                    "SELECT title FROM chat_sessions WHERE id = ?", (session_id,)
+                ).fetchone()
+                if row is None:
+                    return {"error": "没有这个对话", "messages": []}
+                turns = conn.execute(
+                    "SELECT id, role, content, at, attachments, model, task_id "
+                    "FROM chat_messages WHERE session_id = ? ORDER BY id",
+                    (session_id,),
+                ).fetchall()
+                return {"error": "", "title": row["title"], "messages": [_turn(t) for t in turns]}
+        except (sqlite3.Error, DatabaseError):
+            logger.exception("could not export conversation %s", session_id)
+            return {"error": "读取对话失败，未生成导出文件", "messages": []}
 
     def rename(self, session_id: str, title: str) -> bool:
         try:

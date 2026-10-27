@@ -2253,11 +2253,18 @@ class HudBridge:
             return {"entries": [], "error": "工具服务不可用"}
         return {"entries": [call.to_dict() for call in self._tools.recent()], "error": ""}
 
-    def chat_sessions(self) -> dict[str, object]:
+    def chat_sessions(
+        self, query: str = "", offset: int = 0, limit: int = 50, pinned_only: bool = False
+    ) -> dict[str, object]:
         """Stored conversations, newest first, with the open one marked."""
         if self._chat is None:
             return {"error": "对话服务不可用", "current": "", "sessions": []}
-        return self._chat.sessions()
+        return self._chat.sessions(query, offset, limit, pinned_only)
+
+    def chat_pin(self, session_id: str, pinned: bool) -> dict[str, object]:
+        if self._chat is None:
+            return {"error": "对话服务不可用", "current": "", "sessions": []}
+        return self._chat.pin_session(session_id, pinned)
 
     def chat_new_session(self) -> dict[str, object]:
         """Open a blank conversation. The one on screen stays stored."""
@@ -2307,25 +2314,27 @@ class HudBridge:
 
         if self._chat is None:
             return {"ok": False, "path": "", "count": 0, "error": "对话服务不可用"}
-        answer = self._chat.session_messages(str(session_id))
+        answer = self._chat.session_export(str(session_id))
         if answer.get("error"):
             return {"ok": False, "path": "", "count": 0, "error": str(answer["error"])}
         turns = answer.get("messages")
         if not isinstance(turns, list) or not turns:
             return {"ok": False, "path": "", "count": 0, "error": "这个对话还没有内容"}
-        title = "对话"
-        listing = self._chat.sessions()
-        sessions = listing.get("sessions") if isinstance(listing, dict) else None
-        for row in sessions if isinstance(sessions, list) else []:
-            if isinstance(row, dict) and row.get("id") == str(session_id):
-                title = str(row.get("title") or title)
-                break
+        title = str(answer.get("title") or "对话")
         body = render_conversation(title, turns)
         folder = self._paths.exports_dir / "对话"
         try:
             folder.mkdir(parents=True, exist_ok=True)
-            target = unique_path(folder, safe_name(title), ".md")
-            target.write_text(body, encoding="utf-8")
+            # Bridge calls run on different threads. Reserve the filename exclusively
+            # so two simultaneous exports can never overwrite each other's snapshot.
+            while True:
+                target = unique_path(folder, safe_name(title), ".md")
+                try:
+                    with target.open("x", encoding="utf-8") as handle:
+                        handle.write(body)
+                    break
+                except FileExistsError:
+                    continue
         except OSError as exc:
             return {"ok": False, "path": "", "count": 0, "error": f"写不出导出文件：{exc}"}
         return {"ok": True, "path": str(target), "count": len(turns), "error": ""}

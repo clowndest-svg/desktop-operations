@@ -844,10 +844,10 @@ class ChatService:
         with self._guard:
             keys = list(self._conversations)
             active = self._active
-        stored: dict[str, Mapping[str, object]] = {}
+        stored: Mapping[str, Mapping[str, object]] = {}
         transcript = self._transcript
         if transcript is not None:
-            stored = {str(row["id"]): row for row in transcript.list_sessions(limit=200)}
+            stored = transcript.session_details(keys)
         rows: list[dict[str, object]] = []
         for key in keys:
             card = self._touch(key).snapshot()
@@ -1521,17 +1521,37 @@ class ChatService:
     # Conversations, kept across restarts
     # ------------------------------------------------------------------
 
-    def sessions(self) -> dict[str, object]:
+    def sessions(
+        self, query: str = "", offset: int = 0, limit: int = 50, pinned_only: bool = False
+    ) -> dict[str, object]:
         """The list the HUD's history popup draws, newest first."""
         transcript = self._transcript
         if transcript is None:
             return {"error": "对话历史未启用", "current": self.session_id, "sessions": []}
+        try:
+            page = transcript.session_page(str(query), int(offset), int(limit), bool(pinned_only))
+        except (TypeError, ValueError, OverflowError):
+            return {"error": "分页参数无效", "current": self.session_id, "sessions": []}
         return {
-            "error": "",
+            **page,
             "current": self.session_id,
-            "sessions": transcript.list_sessions(),
             "conversations": self.conversations(),
         }
+
+    def pin_session(self, session_id: str, pinned: object) -> dict[str, object]:
+        transcript = self._transcript
+        if transcript is None:
+            return self.sessions()
+        if not isinstance(pinned, bool):
+            return {**self.sessions(), "error": "置顶状态必须是开或关"}
+        if not transcript.pin(str(session_id), pinned):
+            return {**self.sessions(), "error": "没有这个对话，或置顶保存失败"}
+        return self.sessions()
+
+    def session_export(self, session_id: str) -> dict[str, object]:
+        if self._transcript is None:
+            return {"error": "对话历史未启用", "messages": []}
+        return self._transcript.export_snapshot(str(session_id))
 
     def session_messages(self, session_id: str) -> dict[str, object]:
         """Every turn of one conversation, oldest first, for the page to draw."""
