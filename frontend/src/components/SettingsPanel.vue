@@ -37,7 +37,10 @@
               <button class="settings__model-pick" type="button" @click="editRow(row.name)">
                 {{ row.name }}
               </button>
-              <span class="settings__model-meta">
+              <span
+                class="settings__model-meta"
+                :title="`${row.models.length} 个模型 · 起始 ${row.default_model} · ${row.source} · key ${row.key_optional ? '不需要' : row.key_set ? '已设置' : '未设置'}`"
+              >
                 {{ row.models.length }} 个模型 · 起始 {{ row.default_model }}
                 · {{ row.source }}<template v-if="row.edited"> · 已改</template>
                 · key {{ row.key_optional ? '不需要' : row.key_set ? '已设置' : '未设置' }}

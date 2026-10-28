@@ -97,7 +97,7 @@
             <ul class="usage__swatches">
               <li v-for="slice in slices" :key="`k-${slice.key}`">
                 <i :style="{ background: slice.color }"></i>
-                <span class="hud-num">{{ slice.label }}</span>
+                <span class="hud-num" :title="slice.label">{{ slice.label }}</span>
                 <b class="hud-num">{{ slice.percent.toFixed(2) }}%</b>
               </li>
             </ul>

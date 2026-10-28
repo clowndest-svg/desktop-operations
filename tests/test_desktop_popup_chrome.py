@@ -73,29 +73,25 @@ def test_every_head_puts_close_at_the_right_edge() -> None:
 
 
 def test_the_expanded_chat_closes_from_the_top_right_corner() -> None:
-    """放大态的对话区：右上角那颗叫「关闭」，而且它得真能钉在右上角。
+    """放大态的对话区：右上角那颗叫「关闭」，而且它得真的在最右端、不压任何按钮。
 
-    绝对定位是必要的而不是省事：头部用的是公共类 .hud-title，它带一个
-    `::after { flex: 1 }` 在吃剩余空间画那条渐变线 —— 往 header 里塞
-    margin-left:auto 会把线挤没。所以关闭必须是 header 的兄弟节点 + 绝对定位，
-    而那就要求父容器有定位上下文（position: relative）。少这一行，它会钉到整个页面上。
+    它跟着工具条那一排走（排在「···」之后）：模型标签带着 margin-right:auto 把整排
+    推到右边，所以排尾就是右上角。原先它绝对定位在容器 right:0 / top:1px，正好盖住
+    「···」—— 屏幕上「关闭」两个字后面拖着半个省略号，就是两颗按钮抢同一批像素。
+    真机几何（无重叠、elementFromPoint 点得到）由 scripts/audit_layout.mjs 量。
     """
     text = (COMPONENTS / "ChatPanel.vue").read_text(encoding="utf-8")
 
-    assert 'class="hud-btn chat__close"' in text, "放大态没有那颗关闭按钮"
+    assert 'class="hud-btn chat__simple chat__close"' in text, "放大态没有那颗关闭按钮"
     close_block = re.search(r"<button[^>]*chat__close[^>]*>(.*?)</button>", text, re.S)
     assert close_block and "关闭" in close_block.group(1), "右上角那颗不叫「关闭」"
     assert 'v-if="expanded"' in text[: text.index("chat__close")], "关闭按钮没跟着放大态出现"
 
+    toolbar = re.search(r'aria-controls="chat-options"[^>]*>···</button>(.*?)</div>', text, re.S)
+    assert toolbar and "chat__close" in toolbar.group(1), "关闭没有跟工具条那排走"
     rule = re.search(r"\.chat__close\s*\{([^}]*)\}", text)
     assert rule, "没有 .chat__close 的样式"
-    body = rule.group(1)
-    assert "position: absolute" in body and re.search(r"right:\s*0", body), f"没钉右上角：{body}"
-
-    main = re.search(r"\.chat__main\s*\{([^}]*)\}", text)
-    assert main and "position: relative" in main.group(
-        1
-    ), ".chat__main 没有定位上下文，关闭会钉错地方"
+    assert "position" not in rule.group(1), "关闭又回到绝对定位，会再压住「···」"
 
 
 def test_the_top_bar_no_longer_hides_the_action_behind_the_word_shouhui() -> None:

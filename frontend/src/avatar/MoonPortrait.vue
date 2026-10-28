@@ -8,6 +8,21 @@
 </template>
 
 <script setup lang="ts">
+/**
+ * 写实形象：一张照片 + 三件会动的东西。
+ *
+ * 这一版把三个"动起来很假"的地方逐个换掉了：
+ *
+ * * **眨眼**。上一版是"睁眼"和"闭眼"两帧之间 190 ms 硬切 —— 没有中间帧，所以是闪
+ *   一下。现在按真实眼睑的运动做：一条 75 ms 的闭合曲线 + 135 ms 的睁开，而且闭合
+ *   不是换图，是把眼睛上方那条**皮肤**向下拉伸盖住眼睛（人闭眼就是上睑盖下来），
+ *   闭到最深时才用随包的闭眼贴片补上眼线和睫毛。几何负责连续，贴片负责细节。
+ * * **眼神**。上一版把眼睛区域切成 4×8 块再逐块推拉，那是拉伸原图像素，所以用户
+ *   圈着圈说"糊"。现在整块平移、幅度只有眼宽的 5%，椭圆裁剪掉边缘 —— 移动不是变形。
+ * * **口型**。四档贴片仍然按音量取两档做线性混合，但多了一道 60 ms 的低通：RMS 每帧
+ *   都在抖，不滤的话嘴在以 30 Hz 抽搐。另外说话时表情不再被清零，只是压低 ——
+ *   一张说话时说笑就消失的脸，比错一帧口型更假。
+ */
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import portraitUrl from '@/assets/brand/portrait.webp'
 import { mouthEnvelope, type PortraitMood } from './portraitMotion'
@@ -25,6 +40,10 @@ const props = withDefaults(defineProps<{
   hd?: boolean
 }>(), { mood: 'idle', label: '', character: 'p01', emotion: 'neutral', gaze: true, hd: false })
 
+/** 真实眨眼的两个阶段（秒）。闭合比睁开快，这是它读起来"自然"的关键一半。 */
+const BLINK_CLOSE = 0.075
+const BLINK_OPEN = 0.135
+
 const canvas = ref<HTMLCanvasElement | null>(null)
 const failed = ref(false)
 let timer: ReturnType<typeof setTimeout> | undefined
@@ -34,8 +53,11 @@ let observer: IntersectionObserver | undefined
 let resizer: ResizeObserver | undefined
 let previous = 0
 let mouth = 0
+/** 低通后的 RMS：嘴不该跟着每一个采样点的抖动走。 */
+let mouthSignal = 0
 let blinkTimer: ReturnType<typeof setTimeout> | undefined
-let blinkUntil = 0
+let blinkAt = -1
+let blinkPeak = 1
 let calm: MediaQueryList | undefined
 let baseImage: HTMLImageElement | undefined
 let mouthFrames: HTMLImageElement[] = []
@@ -98,7 +120,7 @@ async function changeCharacter(): Promise<void> {
     )
     if (!alive || token !== generation) return
     mouthFrames = levels.filter((image): image is HTMLImageElement => Boolean(image))
-    mouth = expression = 0
+    mouth = expression = mouthSignal = 0
     activeEmotion = props.emotion
     if (canvas.value) canvas.value.dataset.loadedCharacter = props.character
     frame()
@@ -116,66 +138,108 @@ function pointer(event: PointerEvent): void {
   lastPointer = performance.now()
 }
 
+/**
+ * 眼神：整块平移，不是变形。
+ *
+ * 4×8 栅格逐块推拉那一版会拉伸原图像素 —— 用户圈着眼睛说"糊"，圈的就是它。这里
+ * 只把眼睛区域整体移 5% 个眼宽，椭圆裁掉边缘，像素一个都不变形。
+ */
 function gazeEye(ctx: CanvasRenderingContext2D, image: HTMLImageElement, box: number[], side: number): void {
   const [nx, ny, nw, nh] = box as [number, number, number, number]
   const x = nx * side, y = ny * side, width = nw * side, height = nh * side
+  const dx = gazeX * width * .05
+  const dy = gazeY * height * .06
+  if (Math.abs(dx) + Math.abs(dy) < .25) return
   ctx.save()
   ctx.beginPath()
-  ctx.ellipse(x + width / 2, y + height / 2, width * .46, height * .44, 0, 0, Math.PI * 2)
+  ctx.ellipse(x + width / 2, y + height / 2, width * .44, height * .42, 0, 0, Math.PI * 2)
   ctx.clip()
-  // A coarse lattice is enough for a 1-2% iris shift; the old 6x12 grid was
-  // four times the draw calls for a movement nobody could see.
-  const cols = 4, rows = 8
-  for (let row = 0; row < rows; row += 1) {
-    for (let col = 0; col < cols; col += 1) {
-      const weight = Math.sin(Math.PI * (col + .5) / cols) * Math.sin(Math.PI * (row + .5) / rows)
-      const dx = gazeX * width * .06 * weight
-      const dy = gazeY * height * .07 * weight
-      ctx.drawImage(
-        image,
-        (x + col * width / cols - dx) / side * image.width,
-        (y + row * height / rows - dy) / side * image.height,
-        width / cols / side * image.width,
-        height / rows / side * image.height,
-        x + col * width / cols,
-        y + row * height / rows,
-        width / cols + .0004,
-        height / rows + .0004,
-      )
-    }
-  }
+  ctx.drawImage(
+    image,
+    Math.max(0, (x - dx) / side * image.width),
+    Math.max(0, (y - dy) / side * image.height),
+    width / side * image.width,
+    height / side * image.height,
+    x, y, width, height,
+  )
   ctx.restore()
 }
 
+/**
+ * 上眼睑：把眼睛上方一条皮肤向下拉伸，盖住眼睛。
+ *
+ * 这就是"闭眼"的物理过程，不是两张图之间的透明度切换。取的那条皮肤在眉毛下面、
+ * 眼睛上面 —— 往上取多了会把眉毛一起拉下来，那是这一版最早做错的地方。
+ */
+function drawLid(ctx: CanvasRenderingContext2D, box: number[], side: number, amount: number): void {
+  const figure = baseImage
+  if (!figure || amount < .01) return
+  const [nx, ny, nw, nh] = box as [number, number, number, number]
+  const eyeW = nw * side, eyeH = nh * side
+  const left = nx * side - eyeW * .05
+  const width = eyeW * 1.1
+  const band = Math.max(1, eyeH * .34)
+  const bandTop = ny * side - band
+  const drop = eyeH * 1.12 * amount
+  ctx.save()
+  ctx.beginPath()
+  ctx.rect(left, bandTop, width, band + eyeH * 1.16)
+  ctx.clip()
+  ctx.drawImage(
+    figure,
+    (left / side) * figure.width,
+    Math.max(0, (bandTop / side) * figure.height),
+    (width / side) * figure.width,
+    (band / side) * figure.height,
+    left, bandTop, width, band + drop,
+  )
+  ctx.restore()
+}
+
+/**
+ * 四档口型之间线性混合。
+ *
+ * 贴片只在下颌/嘴部有像素，其余全透明，所以"先铺下界、再按比例叠上界"在数学上就是
+ * lerp —— 不会出现第三张嘴。真正把人看吐的是嘴巴在 30 Hz 抽搐，那不是这里的活，
+ * 是 ``mouthSignal`` 那道低通。
+ */
 function drawMouth(ctx: CanvasRenderingContext2D, side: number): void {
-  if (!mouthFrames.length || mouth < 0.004) return
-  const points = [0, .25, .5, .75, 1]
-  let index = 0
-  while (index < 3 && mouth > points[index + 1]!) index += 1
-  const fraction = Math.min(1, Math.max(0, (mouth - points[index]!) / (points[index + 1]! - points[index]!)))
-  if (index === 0) {
-    const image = mouthFrames[0]
-    if (image) { ctx.globalAlpha = fraction; ctx.drawImage(image, 0, 0, side, side) }
-    return
-  }
-  const lower = mouthFrames[index - 1]
-  if (lower) { ctx.globalAlpha = 1; ctx.drawImage(lower, 0, 0, side, side) }
-  if (fraction > 0.01) {
-    const upper = mouthFrames[index]
-    if (upper) { ctx.globalAlpha = fraction; ctx.drawImage(upper, 0, 0, side, side) }
+  if (!mouthFrames.length || mouth < .004) return
+  const scaled = Math.min(.999, mouth) * 3
+  const lower = Math.floor(scaled)
+  const fraction = scaled - lower
+  const from = mouthFrames[lower]
+  if (from) { ctx.globalAlpha = 1; ctx.drawImage(from, 0, 0, side, side) }
+  if (fraction > .01) {
+    const to = mouthFrames[Math.min(mouthFrames.length - 1, lower + 1)]
+    if (to) { ctx.globalAlpha = fraction; ctx.drawImage(to, 0, 0, side, side) }
   }
 }
 
 function drawExpression(ctx: CanvasRenderingContext2D, side: number): void {
-  if (expression < 0.01 || mouth >= 0.12) return
+  if (expression < .01) return
   const name = activeEmotion === 'happy' ? 'happy' : activeEmotion === 'pout' ? 'pout' : activeEmotion === 'soft' ? 'soft' : ''
   if (!name) return
+  // 说话时表情压低而不是清零：一张笑起来说话的脸，比"说话时笑容消失"自然得多。
+  const weight = expression * (mouth >= .12 ? .45 : 1)
   const image = patchImages[name]
-  if (image) { ctx.globalAlpha = expression; ctx.drawImage(image, 0, 0, side, side) }
+  if (image) { ctx.globalAlpha = weight; ctx.drawImage(image, 0, 0, side, side) }
   if (name === 'pout' && patchImages['pout-brows']) {
-    ctx.globalAlpha = expression * .9
+    ctx.globalAlpha = weight * .9
     ctx.drawImage(patchImages['pout-brows']!, 0, 0, side, side)
   }
+}
+
+/** 0 → 1 → 0：闭合快、睁开慢，且每次闭合深度略有不同。 */
+function blinkAmount(now: number): number {
+  if (blinkAt < 0) return 0
+  const t = (now - blinkAt) / 1000
+  if (t < 0) return 0
+  if (t < BLINK_CLOSE) return blinkPeak * (t / BLINK_CLOSE)
+  const open = (t - BLINK_CLOSE) / BLINK_OPEN
+  if (open >= 1) { blinkAt = -1; return 0 }
+  // 睁开走 ease-out：真实眼睑抬起是先快后慢，匀速会读成机械。
+  return blinkPeak * (1 - open * open)
 }
 
 function ensureBuffer(side: number): CanvasRenderingContext2D | null {
@@ -215,8 +279,11 @@ function frame(): void {
     expression = Math.min(1, expression + delta * 6)
   }
   const audio = props.readAudio?.() ?? { rms: 0, talking: false }
-  mouth = mouthEnvelope(mouth, audio.rms, audio.talking, delta)
-  const blinking = !calm?.matches && now < blinkUntil
+  // 一道 60 ms 低通再进包络：RMS 每个采样点都在变，不滤的话嘴在以 30 Hz 抽搐 ——
+  // 这比口型不准更毁观感。
+  mouthSignal += (audio.rms - mouthSignal) * Math.min(1, delta / 0.06)
+  mouth = mouthEnvelope(mouth, mouthSignal, audio.talking, delta)
+  const blinking = calm?.matches ? 0 : blinkAmount(now)
   const side = Math.min(view.width, view.height)
   const bctx = ensureBuffer(side)
   if (!bctx) return
@@ -226,14 +293,24 @@ function frame(): void {
   bctx.imageSmoothingQuality = 'high'
   bctx.globalAlpha = 1
   bctx.drawImage(baseImage, 0, 0, side, side)
-  if (!blinking && rig && Math.abs(gazeX) + Math.abs(gazeY) > .01) {
-    for (const eye of rig.eyes) gazeEye(bctx, baseImage, eye, side)
-  }
-  drawMouth(bctx, side)
-  drawExpression(bctx, side)
-  if (blinking && patchImages['blink']) {
-    bctx.globalAlpha = 1
-    bctx.drawImage(patchImages['blink'], 0, 0, side, side)
+  if (rig) {
+    if (Math.abs(gazeX) + Math.abs(gazeY) > .01 && blinking < .55) {
+      for (const eye of rig.eyes) gazeEye(bctx, baseImage, eye, side)
+    }
+    drawMouth(bctx, side)
+    drawExpression(bctx, side)
+    if (blinking > .01) {
+      // 随包的闭眼贴片本来就只覆盖眼睛那一块、自带羽化边 —— 它是主力，按开合度
+      // 全程渐变（75 ms 从透明到覆盖，人眼读作眼皮落下，而不是"换了一张图"）。
+      const patch = patchImages['blink']
+      if (patch) {
+        bctx.globalAlpha = Math.min(1, blinking * 1.15)
+        bctx.drawImage(patch, 0, 0, side, side)
+      }
+      // 几何只做很轻的一点下压，给眼皮一点厚度。幅度大了会在眉毛下面拉出一条横向
+      // 接缝 —— 第一版用的是 0.86 倍眼高，那张截图里她左眼上方的方块就是这么来的。
+      for (const eye of rig.eyes) drawLid(bctx, eye, side, blinking * .26)
+    }
   }
   bctx.globalAlpha = 1
   ctx.setTransform(1, 0, 0, 1, 0, 0)
@@ -253,10 +330,11 @@ function frame(): void {
   ctx.drawImage(buffer!, 0, 0, side, side)
   view.dataset.mouth = mouth.toFixed(3)
   view.dataset.playing = String(audio.talking)
-  view.dataset.blinking = String(blinking)
+  view.dataset.blinking = String(blinking > .5)
+  view.dataset.blink = blinking.toFixed(3)
   view.dataset.gazeX = gazeX.toFixed(3)
   view.dataset.gazeY = gazeY.toFixed(3)
-  timer = setTimeout(frame, calm?.matches ? 200 : audio.talking || blinking ? 33 : 50)
+  timer = setTimeout(frame, calm?.matches ? 200 : audio.talking || blinking > .01 ? 33 : 50)
 }
 
 function resizeCanvas(): void {
@@ -273,12 +351,25 @@ function resizeCanvas(): void {
   }
 }
 
+/**
+ * 真人两三秒眨一次，偶尔连眨两下。
+ *
+ * 上一版固定 3.6~6.2 秒、每次都一样深，加上硬切，读起来像机器在做定期自检。
+ */
 function scheduleBlink(): void {
   clearTimeout(blinkTimer)
   blinkTimer = setTimeout(() => {
-    if (!calm?.matches && !document.hidden) blinkUntil = performance.now() + 190
+    if (!calm?.matches && !document.hidden && blinkAt < 0) {
+      blinkAt = performance.now()
+      blinkPeak = .82 + Math.random() * .18
+      if (Math.random() < .22) {
+        window.setTimeout(() => {
+          if (!document.hidden) { blinkAt = performance.now(); blinkPeak = .72 }
+        }, 280)
+      }
+    }
     scheduleBlink()
-  }, 3600 + Math.random() * 2600)
+  }, 2400 + Math.random() * 3400)
 }
 
 onMounted(async () => {

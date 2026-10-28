@@ -359,7 +359,7 @@ const KINDS: Record<string, string> = {
   preference: '偏好',
 }
 
-const props = defineProps<{ open: boolean }>()
+const props = defineProps<{ open: boolean; focus?: TabId }>()
 const emit = defineEmits<{ (e: 'close'): void }>()
 
 const tab = ref<TabId>('reminders')
@@ -715,9 +715,12 @@ async function makePlan(): Promise<void> {
 }
 
 watch(
-  () => props.open,
-  (open) => {
-    if (open) void load(tab.value)
+  () => [props.open, props.focus] as const,
+  ([open, focus]) => {
+    if (!open) return
+    // 顶栏把「长期记忆」「知识库」当成一级入口，所以那一张要能直接落在对应那一格。
+    if (focus) tab.value = focus
+    void load(tab.value)
   },
 )
 

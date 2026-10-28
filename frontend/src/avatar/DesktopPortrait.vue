@@ -1,4 +1,14 @@
-<template><MoonPortrait hd :mood="mood" :label="label" :read-audio="readAudio" :character="portraitState.character" :gaze="portraitState.gaze" :emotion="emotion" /></template>
+<template>
+  <MoonPortrait
+    hd
+    :mood="mood"
+    :label="label"
+    :read-audio="readAudio"
+    :character="portraitState.character"
+    :gaze="portraitState.gaze"
+    :emotion="emotion"
+  />
+</template>
 <script setup lang="ts">
 import { computed, onMounted } from 'vue'
 import { portraitState, loadPortraitPreferences } from './portraitState'

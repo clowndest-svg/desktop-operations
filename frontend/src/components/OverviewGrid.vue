@@ -12,7 +12,7 @@
       <ul v-if="upcoming.length" class="ov__list">
         <li v-for="row in upcoming" :key="row.job_id" class="ov__line">
           <span class="ov__time hud-num">{{ row.next_run || row.when }}</span>
-          <span class="ov__text">{{ row.text }}</span>
+          <span class="ov__text" :title="row.text">{{ row.text }}</span>
         </li>
       </ul>
       <p v-else class="ov__empty">还没有提醒</p>
@@ -85,7 +85,11 @@
       </h4>
       <ul v-if="openAlerts.length" class="ov__list">
         <li v-for="row in openAlerts" :key="row.code" class="ov__line">
-          <span class="ov__text" :class="row.severity === 'critical' ? 'ov__bad' : 'ov__warn'">
+          <span
+            class="ov__text"
+            :class="row.severity === 'critical' ? 'ov__bad' : 'ov__warn'"
+            :title="row.message"
+          >
             {{ row.message }}
           </span>
           <button class="ov__act" type="button" title="这条我认了，恢复了再提醒我" @click.stop="ack(row.code)">
@@ -95,7 +99,7 @@
       </ul>
       <ul v-else-if="system.warnings.length" class="ov__list">
         <li v-for="(line, index) in system.warnings.slice(0, 2)" :key="index" class="ov__line">
-          <span class="ov__text ov__warn">{{ line }}</span>
+          <span class="ov__text ov__warn" :title="line">{{ line }}</span>
         </li>
       </ul>
       <p v-else class="ov__empty">没有告警</p>
@@ -296,8 +300,6 @@ onBeforeUnmount(() => {
   line-height: 1.5;
   color: var(--hud-text);
   overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
 }
 
 .ov__time {
@@ -305,9 +307,20 @@ onBeforeUnmount(() => {
   color: var(--hud-cyan);
 }
 
+/*
+ * 一行截断把告警念掉一半 —— 实测「C:\ 可用只剩 8.0 GB，低于」这条被截掉 128 px，
+ * 「CPU 已经连着占用 93%，超过告」截掉 138 px。一条说不完自己的告警等于没有告警。
+ * 所以给它两行，剩下的才用省略号，并且悬停仍然给全文。
+ */
 .ov__text {
+  min-width: 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .ov__dim {

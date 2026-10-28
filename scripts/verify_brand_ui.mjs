@@ -7,7 +7,11 @@ import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 
 // Resolve Playwright from the environment (NODE_PATH may point at Codex's runtime).
-const { chromium } = createRequire(import.meta.url)('playwright')
+// 这台机器上只有 qa-tools 里那份 playwright-core；launch 时显式给浏览器路径就够。
+const { chromium } = (() => {
+  try { return createRequire(import.meta.url)('playwright') }
+  catch { return createRequire(import.meta.url)('playwright-core') }
+})()
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const output = path.resolve(process.argv[2] || path.join(root, 'reports/brand-r124'))
 fs.mkdirSync(output, { recursive: true })
@@ -29,7 +33,7 @@ const browser = await chromium.launch({ executablePath: process.env.XIAOYE_BROWS
 try {
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } })
   page.on('pageerror', error => errors.push(error.message))
-  await page.goto(url)
+  await page.goto(url + '?nosplash=1')
   const face = page.locator('.app__portrait canvas')
   await page.waitForFunction(() => document.querySelector('.app__portrait canvas')?.dataset.mouth !== undefined)
   assert.equal(await page.locator('html').getAttribute('data-skin'), 'moon')
@@ -134,7 +138,7 @@ try {
   for (const [label, dialogName] of destinations) {
     await page.getByRole('button', { name: '功能', exact: true }).click()
     await page.getByRole('textbox', { name: '搜索功能' }).fill(label)
-    await page.locator('.feature-menu__groups button').first().click()
+    await page.locator('.feature-menu__group button').first().click()
     const dialog = page.getByRole('dialog', { name: dialogName, exact: true })
     await dialog.waitFor()
     await dialog.getByRole('button', { name: '关闭', exact: true }).first().click()

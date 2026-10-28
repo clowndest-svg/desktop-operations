@@ -88,4 +88,6 @@ jarvis/vendor/
 # Release audit evidence and historical verification scratch
 /.r[0-9]*/
 /.audit/
+
+# 商业材料永远不进公开仓库
 commercial/

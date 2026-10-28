@@ -286,6 +286,31 @@ export class FaceDriver {
     if (this.blinkPhase >= 1) return 0
     return Math.sin(this.blinkPhase * Math.PI)
   }
+
+  /**
+   * 只读的一格：口型到底有没有在动，得能从外面问到。
+   *
+   * 「她张嘴了」和「渲染在跑但五个权重一直是 0」在屏幕上是同一个样子 ——
+   * 前者是对的，后者是接线断了。没有这一格，界面判据就只能靠截图猜，而这一窗
+   * 的截图工具是超时的。
+   */
+  snapshot(): {
+    visemes: Record<Viseme, number>
+    blink: number
+    jaw: number
+    brows: number
+    pitch: number
+    yaw: number
+  } {
+    return {
+      visemes: { ...this.pose.visemes },
+      blink: this.pose.blink,
+      jaw: this.pose.jaw,
+      brows: this.pose.brows,
+      pitch: this.pose.pitch,
+      yaw: this.pose.yaw,
+    }
+  }
 }
 
 function clamp01(value: number): number {

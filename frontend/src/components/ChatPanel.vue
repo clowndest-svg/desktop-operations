@@ -34,6 +34,13 @@
         <button class="chat__simple" type="button" :disabled="working" @click="addTab">新对话</button>
         <button class="chat__simple" type="button" @click="sessionsOpen = true">历史</button>
         <button class="chat__simple" type="button" aria-label="对话选项" :aria-expanded="optionsOpen" aria-controls="chat-options" @click="optionsOpen = !optionsOpen">···</button>
+        <!--
+          放大态的关闭跟着这一排走。它原先绝对定位在 .chat__main 的 right:0 / top:1px，
+          正好压在「···」那颗上面 —— 屏幕上"关闭"两个字后面拖着半个省略号，就是两颗
+          按钮抢同一批像素。放进 flex 流之后它仍在最右端（模型标签带 margin-right:auto
+          把整排推到右边），但不再和任何人重叠。
+        -->
+        <button v-if="expanded" class="hud-btn chat__simple chat__close" type="button" title="关闭对话大窗（Esc）" @click="toggleExpanded">关闭</button>
       </div>
       <div v-show="optionsOpen" id="chat-options" class="chat__options" aria-label="对话选项">
       <header class="hud-title">
@@ -161,23 +168,6 @@
         </select>
       </header>
       </div>
-
-      <!--
-        放大态的关闭放在右上角 —— 和其余十三扇弹窗同一个位置、同一个词。
-        以前它叫「收回」，蹲在顶栏那一排按钮中间，找它得把顶栏扫一遍；而窗口右上角
-        空着，那里恰恰是所有人本能会去看的地方。绝对定位而不是塞进 header：
-        .hud-title 有个 ::after{flex:1} 在吃剩余空间画那条渐变线，往 header 里加
-        margin-left:auto 会把线挤没。
-      -->
-      <button
-        v-if="expanded"
-        class="hud-btn chat__close"
-        type="button"
-        title="关闭对话大窗（Esc）"
-        @click="toggleExpanded"
-      >
-        关闭
-      </button>
 
       <!--
         椅子。顺序就是点它的顺序，而"顺序意味着什么"跟着形态变：圆桌里第一家负责合并，
@@ -974,16 +964,19 @@ onMounted(() => {
   // 宠物那张卡上的 ＋ 按下去，壳子往这一页发这句。谁有输入框谁装这个钩子 —— 壳子因此
   // 不需要知道它在哪个元素上，宠物那一页（没有输入框）也不会接到就崩。
   shellCues().__jarvisFocusInput = focusInput
+  // 顶栏「功能 → 对话历史」开这一张：弹窗归对话区所有，入口只能由这里点亮。
+  shellCues().__jarvisOpenSessions = () => { sessionsOpen.value = true }
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('jarvis-settings-saved', onSettingsSaved)
   delete shellCues().__jarvisFocusInput
+  delete shellCues().__jarvisOpenSessions
 })
 
 /** The cue names this page answers to from the shell, all optional. */
-function shellCues(): { __jarvisFocusInput?: () => void } {
-  return window as unknown as { __jarvisFocusInput?: () => void }
+function shellCues(): { __jarvisFocusInput?: () => void; __jarvisOpenSessions?: () => void } {
+  return window as unknown as { __jarvisFocusInput?: () => void; __jarvisOpenSessions?: () => void }
 }
 
 function focusInput(): void {
@@ -2086,7 +2079,6 @@ async function clear(): Promise<void> {
 }
 
 .chat__main {
-  /* 放大态那颗「关闭」的定位上下文（见模板里 chat__close 那段注释）。 */
   position: relative;
   display: flex;
   flex-direction: column;
@@ -2096,14 +2088,11 @@ async function clear(): Promise<void> {
 }
 
 /*
- * 右上角，和其余弹窗的「关闭」同一个位置。top 用 1px 而不是 0：header 那行是
- * 10.5px 的字配 24px 的按钮，贴顶会高出半格。
+ * 关闭 now sits inside the toolbar row and takes that row's metrics, so the only
+ * thing left to say is that it is the one button in the row that comes and goes.
  */
 .chat__close {
-  position: absolute;
-  top: 1px;
-  right: 0;
-  z-index: 2;
+  color: var(--hud-text);
 }
 
 /*

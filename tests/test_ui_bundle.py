@@ -553,12 +553,52 @@ class TestTheImagePanelIsReachable:
     def test_the_top_bar_has_a_door_and_the_shell_opens_the_popup(self) -> None:
         bar = _page("components/TopBar.vue")
         assert "label: '画图'" in bar and "event: 'images'" in bar
-        assert "choose(item.event)" in bar and "emit(event)" in bar
+        assert "choose(item.event, item.tab)" in bar and "emit(event, tab)" in bar
         assert "'images'" in bar.split("type Feature =")[1].split("type Entry")[0]
         app = _page("App.vue")
         assert '@images="imagesOpen = true"' in app, "事件发出来了，没人接"
         assert '<ImagePopup :open="imagesOpen"' in app, "接了，但没有那张弹窗"
         assert app.index("<MirrorPopup") < app.index("<ImagePopup"), "挂在投屏之后，同一层不打架"
+
+    def test_the_feature_menu_can_be_found_by_what_it_opens(self) -> None:
+        """r124 把顶栏改成搜索面板那一次，tooltip 里「记忆 / 知识库」这几个字跟着丢了：
+        后端四个工具（memory_search / remember / knowledge_search / add_knowledge）、
+        桥接五个方法、弹窗两个页签全都在，面板里却永远搜不到 —— 三个版本没人发现，
+        因为没有任何一条判据把"面板能搜到的词"和"后端有的功能"对起来。
+
+        这条钉的就是那个对齐：下面每个词都必须出现在命令面板的**可搜索文案**
+        （label + hint + keys + 分组名）里，少一个就是又一次"功能在、入口没了"。
+        """
+        bar = _page("components/TopBar.vue")
+        searchable = bar.split("const groups")[1].split("const visibleGroups")[0]
+        for word in (
+            "知识库",
+            "长期记忆",
+            "自动化",
+            "对话历史",
+            "用量",
+            "音色",
+            "投屏",
+            "权限",
+            "宠物",
+            "画图",
+            "视频",
+            "外观",
+            "托盘",
+            "提醒",
+        ):
+            assert word in searchable, f"命令面板搜不到「{word}」—— 功能在，入口又丢了"
+        # 「长期记忆 / 知识库 / 自动化」要真的落到 AssistantPopup 对应那一格，不只是搜得到。
+        for tab in ("'memory'", "'knowledge'", "'automation'"):
+            assert f"tab: {tab}" in bar, f"「{tab}」没有 tab 直达"
+        app = _page("App.vue")
+        assert ':focus="assistantTab"' in app, "顶栏带了页签，App 没把它递给弹窗"
+        assert '@assistant="openAssistant"' in app and "function openAssistant" in app
+        chat = _page("components/ChatPanel.vue")
+        # 对话历史弹窗住在对话区里，顶栏只能把信号递过去 —— 这条钉"递了且有人接"。
+        assert (
+            "__jarvisOpenSessions" in chat and "__jarvisOpenSessions" in app
+        ), "「对话历史」入口没人接"
 
     def test_the_popup_shows_the_engine_choice_and_the_two_setup_slots(self) -> None:
         popup = _page("components/ImagePopup.vue")

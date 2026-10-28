@@ -39,7 +39,7 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import { fetchVoices, pickVoice, previewVoice, type VoiceList } from '@/api/bridge'
 import { characters, portraitAsset, type Character } from '@/avatar/portraitCatalog'
-import { portraitState, loadPortraitPreferences, savePortraitPreferences } from '@/avatar/portraitState'
+import { portraitState, savePortraitPreferences, loadPortraitPreferences } from '@/avatar/portraitState'
 import { toggleFavoriteId } from '@/avatar/portraitFavorites'
 const props=defineProps<{open:boolean}>()
 const emit=defineEmits<{close:[]; advanced:[]}>()

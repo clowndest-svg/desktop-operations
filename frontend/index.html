@@ -29,10 +29,60 @@
       html[data-mode='pet'] #app {
         background: transparent;
       }
+
+      /*
+        静态垫底：在 Vue 挂载之前先把"她"的名字和一团呼吸光放上屏。
+        没有这一段，双击 exe 之后到第一帧之间是一片纯色，那一下比任何动画都显得粗糙。
+        它不参与任何脚本，SplashScreen 挂载后第一个动作就是把它摘掉。
+      */
+      #boot {
+        position: fixed;
+        z-index: 99;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        background: radial-gradient(circle at 50% 44%, #2a2338 0%, #100e18 56%, #09070d 100%);
+      }
+
+      #boot::after {
+        content: '';
+        position: absolute;
+        width: 44vmin;
+        height: 44vmin;
+        border-radius: 50%;
+        background: radial-gradient(circle, rgba(168, 146, 208, 0.18), transparent 68%);
+        animation: boot-breathe 1.8s ease-in-out infinite;
+      }
+
+      #boot strong {
+        position: relative;
+        color: #f0eaf6;
+        font: 300 40px/1 'Microsoft YaHei', 'Segoe UI', sans-serif;
+        letter-spacing: 0.34em;
+        text-indent: 0.34em;
+        text-shadow: 0 0 26px rgba(198, 176, 232, 0.5);
+      }
+
+      @keyframes boot-breathe {
+        0%,
+        100% {
+          transform: scale(0.92);
+          opacity: 0.55;
+        }
+        50% {
+          transform: scale(1.06);
+          opacity: 1;
+        }
+      }
+
+      html[data-mode='pet'] #boot {
+        display: none;
+      }
     </style>
   </head>
   <body>
     <div id="app"></div>
+    <div id="boot" aria-hidden="true"><strong>小夜</strong></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

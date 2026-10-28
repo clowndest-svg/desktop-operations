@@ -11,12 +11,14 @@
         @mirror="mirrorOpen = true"
         @images="imagesOpen = true"
         @videos="videosOpen = true"
-      @assistant="assistantOpen = true"
+      @assistant="openAssistant"
       @extensions="extensionsOpen = true"
       @skin="skinOpen = true"
       @systems="systemsOpen = true"
       @voice-controls="voicePanelOpen = true"
       @portraits="portraitsOpen = true"
+      @usage="usageOpen = true"
+      @sessions="openSessions"
       />
 
     <p v-if="store.error" class="app__error">{{ store.error }}</p>
@@ -157,7 +159,7 @@
     <MirrorPopup :open="mirrorOpen" @close="mirrorOpen = false" />
     <ImagePopup :open="imagesOpen" @close="imagesOpen = false" />
     <VideoPopup :open="videosOpen" @close="videosOpen = false" />
-    <AssistantPopup :open="assistantOpen" @close="assistantOpen = false" />
+    <AssistantPopup :open="assistantOpen" :focus="assistantTab" @close="assistantOpen = false" />
     <!--
       扩展（插件市场）挂在助手之后、皮肤之前：它是从顶栏和设置都开得动的入口，而它自己里面
       还要「去设置改那三档」。同 z-index 层靠文档顺序决胜这一窗已经吃过两次亏（音色、告警），
@@ -185,6 +187,8 @@
       而打包版那扇 WebView2 把原生右键菜单关了 —— 不自己做一个，右键就是"鼠标没反应"。
     -->
     <ContextMenu />
+    <!-- 开机动画最后挂：它是最高一层，结束自己摘掉。 -->
+    <SplashScreen />
   </div>
 </template>
 
@@ -218,6 +222,7 @@ import ImagePopup from '@/components/ImagePopup.vue'
 import VideoPopup from '@/components/VideoPopup.vue'
 import OfflineNotice from '@/components/OfflineNotice.vue'
 import ContextMenu from '@/components/ContextMenu.vue'
+import SplashScreen from '@/components/SplashScreen.vue'
 const ProcessPanel = defineAsyncComponent(() => import('@/components/ProcessPanel.vue'))
 import SettingsPanel from '@/components/SettingsPanel.vue'
 import TopBar from '@/components/TopBar.vue'
@@ -292,6 +297,16 @@ function closePetForge(): void {
   petClosed.value += 1
 }
 const assistantOpen = ref(false)
+/** 「提醒与助手」那一张里装着记忆、知识库、自动化，顶栏的入口要点到具体那一格。 */
+const assistantTab = ref<'reminders' | 'memory' | 'knowledge' | 'automation'>('reminders')
+function openAssistant(tab?: string): void {
+  assistantTab.value = tab === 'memory' || tab === 'knowledge' || tab === 'automation' ? tab : 'reminders'
+  assistantOpen.value = true
+}
+/** 历史弹窗住在对话区里，所以这里只能把信号递过去，不能自己开。 */
+function openSessions(): void {
+  void (window as unknown as { __jarvisOpenSessions?: () => void }).__jarvisOpenSessions?.()
+}
 const extensionsOpen = ref(false)
 const skinOpen = ref(false)
 

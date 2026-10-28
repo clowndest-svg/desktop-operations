@@ -114,7 +114,17 @@ def main() -> int:
                 "pytest",
                 # pyproject already carries ``-q``; passing another makes it ``-qq``, which
                 # drops the "N passed" line and leaves the report summarizing a row of dots.
-                [python, "-m", "pytest", "--tb=line", "-p", "no:cacheprovider"],
+                # basetemp 钉在同一个可写的非系统盘目录：tmp_path 落在 C 盘时，
+                # 「买家版不许装系统盘」那条会偶发地红，而红的是临时目录不是代码。
+                [
+                    python,
+                    "-m",
+                    "pytest",
+                    "--tb=line",
+                    "-p",
+                    "no:cacheprovider",
+                    "--basetemp=" + str(temporary / "pytest"),
+                ],
                 3600,
                 None,
             )
